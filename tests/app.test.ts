@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { EventLog } from '../src/events/log.js';
-import { freshDb } from './helpers.js';
+import { freshDb, makeCtx } from './helpers.js';
 
 describe('app', () => {
   it('serves healthz', async () => {
@@ -13,6 +13,42 @@ describe('app', () => {
   it('does not mount the events routes when ctx.events is absent', async () => {
     const res = await createApp({}).request('/api/events');
     expect(res.status).toBe(404);
+  });
+
+  it('does not mount the webhooks route when ctx.queue/events are absent', async () => {
+    const res = await createApp({}).request('/webhooks/sonarr', { method: 'POST' });
+    expect(res.status).toBe(404);
+  });
+
+  describe('webhooks route', () => {
+    it('responds 200 with handleWebhook\'s result, even for an unhandled event', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+
+      const res = await app.request('/webhooks/sonarr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ eventType: 'Rename' }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ handled: false, reason: 'ignored' });
+    });
+
+    it('enqueues an acquire job and answers 200 for a SeriesAdd event', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+
+      const res = await app.request('/webhooks/sonarr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren' } }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ handled: true });
+      expect(ctx.queue.claim()).toMatchObject({ pipeline: 'acquire', target_kind: 'series', target_id: 42 });
+    });
   });
 
   describe('events routes', () => {

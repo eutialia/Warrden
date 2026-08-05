@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import { handleWebhook } from '../arr/webhooks.js';
 import type { AppContext } from '../context.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
@@ -50,6 +51,19 @@ export function createApp(ctx: Partial<AppContext>): Hono {
           unsubscribe();
         }
       });
+    });
+  }
+
+  if (ctx.queue && ctx.events) {
+    // Full AppContext here, minus fields handleWebhook never touches (db, config, clients) —
+    // the guard above already guarantees the two it does.
+    const webhookCtx = ctx as AppContext;
+
+    app.post('/webhooks/:instance', async (c) => {
+      const instance = c.req.param('instance');
+      const payload: unknown = await c.req.json().catch(() => undefined);
+      // Always 200: the arrs retry non-2xx webhook deliveries, which we don't want.
+      return c.json(handleWebhook(webhookCtx, instance, payload));
     });
   }
 
