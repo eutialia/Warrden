@@ -19,11 +19,11 @@ export const ConfigSchema = z.object({
   // below it. .prefault() substitutes the value and then validates/defaults it.
   //
   // All object/array defaults use the factory form (`() => ({...})` / `() => [...]`)
-  // rather than a literal. Zod v4's default is only a shallow clone per parse: a
-  // literal default object is captured once and the SAME nested object/array
-  // references are handed out on every parse. Mutating one parsed config's default
-  // (e.g. `cfg.arrs.push(...)`) would then leak into every other in-process parse
-  // that hit the same default. The factory form allocates fresh objects each time.
+  // rather than a literal. Zod v4 shallow-clones a literal default on every parse,
+  // so the top-level object/array is fresh each time, but anything nested inside it
+  // (e.g. `profiles.dev`) is the same shared reference across parses. Any default
+  // with nested structure needs the factory form; used uniformly here so the safety
+  // is structural rather than case-by-case.
   server: z
     .object({
       port: z.number().int().default(9797),

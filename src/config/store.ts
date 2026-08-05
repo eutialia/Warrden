@@ -7,7 +7,11 @@ export class ConfigError extends Error {
   readonly issues: z.core.$ZodIssue[];
 
   constructor(issues: z.core.$ZodIssue[]) {
-    super(`Invalid config: ${issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+    super(
+      `Invalid config: ${issues
+        .map((i) => (i.path.length ? `${i.path.join('.')}: ${i.message}` : i.message))
+        .join('; ')}`,
+    );
     this.name = 'ConfigError';
     this.issues = issues;
   }

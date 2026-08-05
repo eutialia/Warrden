@@ -22,11 +22,16 @@ describe('config store', () => {
     expect(loadConfig(dir)).toEqual(cfg);
   });
 
-  it('does not share default nested objects/arrays across parses', () => {
-    // Zod v4's `.default()` is only a shallow clone per parse. A literal default
-    // (e.g. `.default({ dev: {}, prod: {} })`) would hand out the SAME object on
-    // every parse; mutating one config's defaults would then leak into every other
-    // in-process config. Guards the factory-form fix (`.default(() => ({...}))`).
+  it('does not share nested default structure (llm.profiles) across parses', () => {
+    // Zod v4 shallow-clones a literal default per parse: the top-level object/array
+    // is already fresh every time, but anything nested inside it is the same shared
+    // reference across parses. `llm.profiles` (`{ dev: {...}, prod: {...} }`) is the
+    // real regression this guards — a literal default here would share `profiles.dev`
+    // across every config loaded in-process. The `arrs`/`pathMappings`/`picking.tags`
+    // assertions below don't independently prove the bug (those defaults have no
+    // nested structure, so even a literal `.default([])` gives a fresh array each
+    // parse) — they're kept for defense-in-depth since the factory form is applied
+    // uniformly to all of them.
     const cfgA = loadConfig(tmp());
     const cfgB = loadConfig(tmp());
 
