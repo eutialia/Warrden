@@ -1,5 +1,6 @@
 import type { ArrInstance } from '../config/schema.js';
 import type {
+  ArrApi,
   MovieResource,
   NotificationSummary,
   ReleaseCandidate,
@@ -28,7 +29,7 @@ type QueryValue = string | number | boolean | undefined;
  * single `fetch` against `{baseUrl}/api/v3/...`. No retries, no caching — callers that
  * need resilience or coalescing build it on top of this.
  */
-export class ArrClient {
+export class ArrClient implements ArrApi {
   // Trailing slash stripped once here (not touched in the config schema) so a
   // baseUrl like `http://host:8989/` doesn't produce `//api/v3/...` in request().
   private readonly baseUrl: string;

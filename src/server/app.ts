@@ -54,10 +54,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     });
   }
 
-  if (ctx.queue && ctx.events) {
-    // Full AppContext here, minus fields handleWebhook never touches (db, config, clients) —
-    // the guard above already guarantees the two it does.
-    const webhookCtx = ctx as AppContext;
+  if (ctx.queue && ctx.events && ctx.config) {
+    const webhookCtx = { queue: ctx.queue, events: ctx.events, config: ctx.config };
 
     app.post('/webhooks/:instance', async (c) => {
       const instance = c.req.param('instance');

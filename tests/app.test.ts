@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { EventLog } from '../src/events/log.js';
-import { freshDb, makeCtx } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs } from './helpers.js';
 
 describe('app', () => {
   it('serves healthz', async () => {
@@ -22,7 +22,7 @@ describe('app', () => {
 
   describe('webhooks route', () => {
     it('responds 200 with handleWebhook\'s result, even for an unhandled event', async () => {
-      const ctx = makeCtx();
+      const ctx = makeCtx({ config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -35,8 +35,23 @@ describe('app', () => {
       expect(await res.json()).toEqual({ handled: false, reason: 'ignored' });
     });
 
+    it('responds 200 with "unknown instance" for an arr not in config', async () => {
+      const ctx = makeCtx(); // default config: arrs: []
+      const app = createApp(ctx);
+
+      const res = await app.request('/webhooks/sonarr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren' } }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ handled: false, reason: 'unknown instance' });
+      expect(ctx.queue.claim()).toBeNull();
+    });
+
     it('enqueues an acquire job and answers 200 for a SeriesAdd event', async () => {
-      const ctx = makeCtx();
+      const ctx = makeCtx({ config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {

@@ -1,45 +1,57 @@
 import { describe, it, expect } from 'vitest';
 import { handleWebhook } from '../src/arr/webhooks.js';
-import { makeCtx } from './helpers.js';
+import { makeCtx, configWithArrs } from './helpers.js';
 
 const seriesAdd = { eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren', year: 2023, tvdbId: 424536 } };
 const movieAdded = { eventType: 'MovieAdded', movie: { id: 7, title: 'Perfect Blue', year: 1997, tmdbId: 573 } };
+
+function knownArrsCtx() {
+  return makeCtx({ config: configWithArrs('sonarr', 'radarr') });
+}
 
 describe('handleWebhook', () => {
   it.each([
     { name: 'sonarr SeriesAdd', instance: 'sonarr', payload: seriesAdd, targetKind: 'series', targetId: 42 },
     { name: 'radarr MovieAdded', instance: 'radarr', payload: movieAdded, targetKind: 'movie', targetId: 7 },
   ])('$name enqueues acquire', ({ instance, payload, targetKind, targetId }) => {
-    const ctx = makeCtx();
+    const ctx = knownArrsCtx();
     expect(handleWebhook(ctx, instance, payload).handled).toBe(true);
     const job = ctx.queue.claim()!;
     expect(job).toMatchObject({ pipeline: 'acquire', target_kind: targetKind, target_id: targetId, arr_instance: instance });
   });
 
   it('acknowledges Test events without enqueueing', () => {
-    const ctx = makeCtx();
+    const ctx = knownArrsCtx();
     expect(handleWebhook(ctx, 'sonarr', { eventType: 'Test' }).handled).toBe(true);
     expect(ctx.queue.claim()).toBeNull();
   });
 
   it('ignores unknown events and garbage payloads', () => {
-    const ctx = makeCtx();
-    expect(handleWebhook(ctx, 'sonarr', { eventType: 'Rename' }).handled).toBe(false);
-    expect(handleWebhook(ctx, 'sonarr', { nonsense: true }).handled).toBe(false);
+    const ctx = knownArrsCtx();
+    expect(handleWebhook(ctx, 'sonarr', { eventType: 'Rename' })).toEqual({ handled: false, reason: 'ignored' });
+    expect(handleWebhook(ctx, 'sonarr', { nonsense: true })).toEqual({ handled: false, reason: 'ignored' });
+    expect(ctx.queue.claim()).toBeNull();
+  });
+
+  it('rejects an instance that is not in ctx.config.arrs', () => {
+    const ctx = makeCtx(); // default config: arrs: []
+    expect(handleWebhook(ctx, 'sonarr', seriesAdd)).toEqual({ handled: false, reason: 'unknown instance' });
     expect(ctx.queue.claim()).toBeNull();
   });
 
   it('carries the target title through as the acquire prompt hint', () => {
-    const ctx = makeCtx();
+    const ctx = knownArrsCtx();
     handleWebhook(ctx, 'sonarr', seriesAdd);
     expect(ctx.queue.claim()!.payload).toEqual({ title: 'Frieren' });
   });
 
-  it('appends an event on a handled webhook', () => {
-    const ctx = makeCtx();
+  it('appends an event carrying the job id and enqueue outcome', () => {
+    const ctx = knownArrsCtx();
     handleWebhook(ctx, 'sonarr', seriesAdd);
+    const job = ctx.queue.claim()!;
     const events = ctx.events.list();
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ kind: 'webhook.received' });
+    expect(events[0]).toMatchObject({ kind: 'webhook.received', job_id: job.id });
+    expect(events[0]!.data).toMatchObject({ outcome: 'enqueued' });
   });
 });

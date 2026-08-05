@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
-import type { ArrClient } from '../src/arr/client.js';
+import type { ArrApi } from '../src/arr/types.js';
 import type { AppContext } from '../src/context.js';
+import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { openDb } from '../src/db/db.js';
 import { EventLog } from '../src/events/log.js';
@@ -29,18 +30,38 @@ export function freshDb(): Database.Database {
 /**
  * Builds a real `AppContext` backed by a fresh temp db, wired with a real queue and
  * event log, default config, and an empty arr clients map. Individual fields can be
- * swapped via `overrides` (e.g. a `clients` map seeded with fakes for pipeline tests).
+ * swapped via `overrides` — notably `db`: if given, `queue`/`events` are built on
+ * *that* db (not a second, orphaned one), so a caller providing its own db can still
+ * see everything the queue/event log write.
  */
 export function makeCtx(overrides?: Partial<AppContext>): AppContext {
-  const db = freshDb();
+  const db = overrides?.db ?? freshDb();
   return {
     db,
     config: ConfigSchema.parse({}),
     queue: new JobQueue(db),
     events: new EventLog(db),
-    clients: new Map<string, ArrClient>(),
+    clients: new Map<string, ArrApi>(),
     ...overrides,
   };
+}
+
+/** A valid `ArrInstance` config entry, defaulting to a `sonarr` instance named "sonarr". */
+export function arrInstance(overrides?: Partial<ArrInstance>): ArrInstance {
+  return {
+    name: 'sonarr',
+    kind: 'sonarr',
+    baseUrl: 'http://localhost:8989',
+    apiKey: 'test-api-key',
+    ...overrides,
+  };
+}
+
+/** Default config with the given arr instances configured (by name, `sonarr`/`radarr` shorthand). */
+export function configWithArrs(...names: Array<'sonarr' | 'radarr'>): Config {
+  return ConfigSchema.parse({
+    arrs: names.map((name) => arrInstance({ name, kind: name, baseUrl: `http://${name}:0` })),
+  });
 }
 
 /**

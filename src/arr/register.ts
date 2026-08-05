@@ -1,23 +1,36 @@
 import type { AppContext } from '../context.js';
+import { ManagedObjects } from '../db/managedObjects.js';
 
 const NOTIFICATION_NAME = 'Warrden';
 
 /**
  * Self-registers the Warrden webhook notification on every configured arr instance
  * that doesn't already have one. Idempotent (checks by name before creating) and
- * fault-tolerant: a broken/unreachable instance logs a warning and is skipped, it
- * never stops the rest from registering.
+ * fault-tolerant: a broken/unreachable/unconfigured instance logs a warning and is
+ * skipped, it never stops the rest from registering.
  */
 export async function registerWebhooks(ctx: AppContext): Promise<void> {
-  for (const arr of ctx.config.arrs) {
-    try {
-      const client = ctx.clients.get(arr.name);
-      if (!client) {
-        throw new Error(`no ArrClient configured for instance "${arr.name}"`);
-      }
+  const managedObjects = new ManagedObjects(ctx.db);
 
+  for (const arr of ctx.config.arrs) {
+    const client = ctx.clients.get(arr.name);
+    if (!client) {
+      ctx.events.append({
+        kind: 'webhook.register-failed',
+        level: 'warn',
+        message: `Failed to register webhook on "${arr.name}": no ArrClient configured`,
+        data: { instance: arr.name },
+      });
+      continue;
+    }
+
+    try {
       const existing = await client.listNotifications();
-      if (existing.some((n) => n.name === NOTIFICATION_NAME)) {
+      const found = existing.find((n) => n.name === NOTIFICATION_NAME);
+      if (found) {
+        // Already present in the arr, but the local registry may have been reset
+        // (fresh db, restore) — re-record it so GC (Task 12) can still find it.
+        managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
         continue;
       }
 
@@ -36,12 +49,7 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         onUpgrade: true,
       });
 
-      ctx.db
-        .prepare(
-          `INSERT INTO managed_objects (arr_instance, kind, external_id, name, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(arr.name, 'notification', created.id, NOTIFICATION_NAME, Date.now());
+      managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: created.id, name: NOTIFICATION_NAME });
 
       ctx.events.append({
         kind: 'webhook.registered',

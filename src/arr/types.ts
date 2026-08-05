@@ -49,3 +49,27 @@ export interface NotificationSummary {
   id: number;
   name: string;
 }
+
+/**
+ * The public surface of `ArrClient`, extracted so consumers (and their tests) depend
+ * on this interface rather than the concrete class — fakes can implement it directly
+ * with no cast, and `AppContext.clients` can hold either a real client or a fake.
+ */
+export interface ArrApi {
+  systemStatus(): Promise<unknown>;
+  listSeries(): Promise<SeriesResource[]>;
+  listMovies(): Promise<MovieResource[]>;
+  getSeries(id: number): Promise<SeriesResource>;
+  updateSeries(s: SeriesResource): Promise<SeriesResource>;
+  searchReleases(p: { seriesId?: number; seasonNumber?: number; movieId?: number }): Promise<ReleaseCandidate[]>;
+  grabRelease(guid: string, indexerId: number): Promise<void>;
+  listTags(): Promise<TagResource[]>;
+  createTag(label: string): Promise<TagResource>;
+  deleteTag(id: number): Promise<void>;
+  listReleaseProfiles(): Promise<ReleaseProfileResource[]>;
+  createReleaseProfile(p: ReleaseProfileResource): Promise<ReleaseProfileResource>;
+  deleteReleaseProfile(id: number): Promise<void>;
+  listNotifications(): Promise<NotificationSummary[]>;
+  createNotification(body: object): Promise<NotificationSummary>;
+  deleteNotification(id: number): Promise<void>;
+}

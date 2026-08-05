@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { ArrClient } from './arr/client.js';
+import type { ArrApi } from './arr/types.js';
 import type { Config } from './config/schema.js';
 import type { EventLog } from './events/log.js';
 import type { JobQueue } from './jobs/queue.js';
@@ -10,6 +10,6 @@ export interface AppContext {
   config: Config;
   queue: JobQueue;
   events: EventLog;
-  // keyed by ArrInstance.name
-  clients: Map<string, ArrClient>;
+  // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly
+  clients: Map<string, ArrApi>;
 }
