@@ -81,11 +81,11 @@ export class JobQueue {
         .get(j.pipeline, j.arrInstance, j.targetKind, j.targetId) as { id: number; status: JobStatus } | undefined;
 
       if (twin?.status === 'pending') {
-        return { id: null, outcome: 'coalesced' };
+        return { id: twin.id, outcome: 'coalesced' };
       }
       if (twin?.status === 'running') {
         this.db.prepare(`UPDATE jobs SET dirty = 1, updated_at = ? WHERE id = ?`).run(now, twin.id);
-        return { id: null, outcome: 'marked-dirty' };
+        return { id: twin.id, outcome: 'marked-dirty' };
       }
       const info = this.db
         .prepare(
@@ -95,7 +95,9 @@ export class JobQueue {
         .run(j.pipeline, j.targetKind, j.targetId, j.arrInstance, JSON.stringify(j.payload ?? {}), j.notBefore ?? 0, now, now);
       return { id: Number(info.lastInsertRowid), outcome: 'enqueued' };
     });
-    return tx();
+    // BEGIN IMMEDIATE up front closes the theoretical window where a deferred
+    // transaction upgrades from read to write mid-flight and races another writer.
+    return tx.immediate();
   }
 
   claim(now: number = Date.now()): JobRow | null {
@@ -103,7 +105,8 @@ export class JobQueue {
       .prepare(
         `UPDATE jobs SET status = 'running', updated_at = ?
          WHERE id = (
-           SELECT id FROM jobs WHERE status = 'pending' AND not_before <= ? ORDER BY created_at ASC LIMIT 1
+           SELECT id FROM jobs WHERE status = 'pending' AND not_before <= ?
+           ORDER BY created_at ASC, id ASC LIMIT 1
          )
          RETURNING *`,
       )
@@ -115,11 +118,14 @@ export class JobQueue {
     const now = Date.now();
     const tx = this.db.transaction((): { requeued: boolean } => {
       const job = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id) as JobRowRaw | undefined;
-      if (!job) return { requeued: false };
+      if (!job) throw new Error(`complete: job ${id} not found`);
 
-      this.db
-        .prepare(`UPDATE jobs SET status = 'done', dirty = 0, result = ?, updated_at = ? WHERE id = ?`)
+      const info = this.db
+        .prepare(`UPDATE jobs SET status = 'done', dirty = 0, result = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
         .run(result === undefined ? null : JSON.stringify(result), now, id);
+      if (info.changes === 0) {
+        throw new Error(`complete: job ${id} is not running (status=${job.status})`);
+      }
 
       if (!job.dirty) return { requeued: false };
 
@@ -135,24 +141,38 @@ export class JobQueue {
   }
 
   fail(id: number, err: string, opts?: { retryInMs?: number; maxAttempts?: number }): { retried: boolean } {
-    const retryInMs = opts?.retryInMs ?? 60_000;
     const maxAttempts = opts?.maxAttempts ?? 3;
     const now = Date.now();
     const tx = this.db.transaction((): { retried: boolean } => {
-      const job = this.db.prepare(`SELECT attempts FROM jobs WHERE id = ?`).get(id) as { attempts: number } | undefined;
-      if (!job) return { retried: false };
+      const job = this.db.prepare(`SELECT attempts, status FROM jobs WHERE id = ?`).get(id) as
+        | { attempts: number; status: JobStatus }
+        | undefined;
+      if (!job) throw new Error(`fail: job ${id} not found`);
 
       const attempts = job.attempts + 1;
       if (attempts < maxAttempts) {
-        this.db
-          .prepare(`UPDATE jobs SET status = 'pending', attempts = ?, not_before = ?, error = ?, updated_at = ? WHERE id = ?`)
-          .run(attempts, now + retryInMs * attempts, err, now, id);
+        // Only the default backoff scales with attempts; an explicit retryInMs is used as-is.
+        const delay = opts?.retryInMs ?? 60_000 * attempts;
+        const info = this.db
+          .prepare(
+            `UPDATE jobs SET status = 'pending', dirty = 0, attempts = ?, not_before = ?, error = ?, updated_at = ?
+             WHERE id = ? AND status = 'running'`,
+          )
+          .run(attempts, now + delay, err, now, id);
+        if (info.changes === 0) {
+          throw new Error(`fail: job ${id} is not running (status=${job.status})`);
+        }
         return { retried: true };
       }
 
-      this.db
-        .prepare(`UPDATE jobs SET status = 'failed', attempts = ?, error = ?, updated_at = ? WHERE id = ?`)
+      const info = this.db
+        .prepare(
+          `UPDATE jobs SET status = 'failed', dirty = 0, attempts = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
+        )
         .run(attempts, err, now, id);
+      if (info.changes === 0) {
+        throw new Error(`fail: job ${id} is not running (status=${job.status})`);
+      }
       return { retried: false };
     });
     return tx();

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { JobQueue } from '../src/jobs/queue.js';
 import { freshDb } from './helpers.js';
 
@@ -8,13 +8,18 @@ beforeEach(() => { q = new JobQueue(freshDb()); });
 
 describe('JobQueue', () => {
   it('enqueues then coalesces duplicate pending', () => {
-    expect(q.enqueue(target).outcome).toBe('enqueued');
-    expect(q.enqueue(target).outcome).toBe('coalesced');
+    const first = q.enqueue(target);
+    expect(first.outcome).toBe('enqueued');
+    const second = q.enqueue(target);
+    expect(second.outcome).toBe('coalesced');
+    expect(second.id).toBe(first.id); // coalesced reports the existing twin's id, not null
   });
   it('marks running job dirty and requeues on completion', () => {
-    q.enqueue(target);
+    const first = q.enqueue(target);
     const job = q.claim()!;
-    expect(q.enqueue(target).outcome).toBe('marked-dirty');
+    const dirtied = q.enqueue(target);
+    expect(dirtied.outcome).toBe('marked-dirty');
+    expect(dirtied.id).toBe(first.id); // marked-dirty reports the running twin's id, not null
     expect(q.complete(job.id).requeued).toBe(true);
     expect(q.claim()!.status).toBe('running'); // the requeued twin is claimable
   });
@@ -40,5 +45,75 @@ describe('JobQueue', () => {
       res = q.fail(job.id, 'boom');
     }
     expect(res.retried).toBe(retried);
+  });
+
+  it('clears dirty on retry so a later completion is not spuriously requeued', () => {
+    q.enqueue(target);
+    const job = q.claim()!;
+    expect(q.enqueue(target).outcome).toBe('marked-dirty'); // sets dirty=1 on the running job
+    expect(q.fail(job.id, 'boom').retried).toBe(true); // back to pending — dirty must be cleared here
+
+    const retried = q.claim(Number.MAX_SAFE_INTEGER)!;
+    expect(q.complete(retried.id).requeued).toBe(false); // no leftover dirty flag to trigger a requeue
+    expect(q.claim()).toBeNull(); // and no extra pending row was created
+  });
+
+  describe('fail() backoff delay (fake timers for exact not_before values)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('defaults not_before to now + 60_000ms x attempts', () => {
+      vi.setSystemTime(0);
+      q.enqueue(target);
+      const job1 = q.claim()!;
+      q.fail(job1.id, 'boom'); // attempts=1
+      expect(q.get(job1.id)!.not_before).toBe(60_000);
+
+      vi.setSystemTime(1_000);
+      const job2 = q.claim(Number.MAX_SAFE_INTEGER)!; // same row, attempts going from 1 to 2
+      q.fail(job2.id, 'boom again'); // attempts=2
+      expect(q.get(job2.id)!.not_before).toBe(1_000 + 60_000 * 2);
+    });
+
+    it('uses an explicit retryInMs as-is, without scaling by attempt number', () => {
+      vi.setSystemTime(5_000);
+      q.enqueue(target);
+      const job = q.claim()!;
+      q.fail(job.id, 'boom', { retryInMs: 2_000 });
+      expect(q.get(job.id)!.not_before).toBe(5_000 + 2_000);
+    });
+  });
+
+  it('list() returns newest first and respects limit', () => {
+    const a = q.enqueue(target).id!;
+    const b = q.enqueue({ ...target, targetId: 43 }).id!;
+    const c = q.enqueue({ ...target, targetId: 44 }).id!;
+
+    expect(q.list().map((j) => j.id)).toEqual([c, b, a]);
+    expect(q.list({ limit: 2 }).map((j) => j.id)).toEqual([c, b]);
+  });
+
+  it('round-trips payload and result JSON through enqueue -> claim -> complete -> get', () => {
+    const payload = { season: 3, reason: 'missing' };
+    const result = { picked: 'release-guid-123', sizeMB: 1234 };
+    const { id } = q.enqueue({ ...target, payload });
+
+    const claimed = q.claim()!;
+    expect(claimed.payload).toEqual(payload);
+
+    q.complete(id!, result);
+    const done = q.get(id!)!;
+    expect(done.status).toBe('done');
+    expect(done.result).toEqual(result);
+  });
+
+  it('complete() throws when the job is not running', () => {
+    const { id } = q.enqueue(target);
+    expect(() => q.complete(id!)).toThrow(/not running/);
+  });
+
+  it('fail() throws when the job is not running', () => {
+    const { id } = q.enqueue(target);
+    expect(() => q.fail(id!, 'boom')).toThrow(/not running/);
   });
 });
