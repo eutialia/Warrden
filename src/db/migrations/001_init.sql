@@ -25,7 +25,7 @@ CREATE TABLE events (
   kind TEXT NOT NULL,
   level TEXT NOT NULL DEFAULT 'info',
   job_id INTEGER,
-  message TEXT,
+  message TEXT NOT NULL,
   data TEXT NOT NULL DEFAULT '{}'
 );
 

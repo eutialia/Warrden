@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EventLog } from '../src/events/log.js';
 import { freshDb } from './helpers.js';
 
@@ -20,5 +20,21 @@ describe('EventLog', () => {
     log.append({ kind: 'a', message: 'a' });
     log.append({ kind: 'b', message: 'b', level: 'attention' });
     expect(log.list({ level: 'attention' }).map((e) => e.kind)).toEqual(['b']);
+  });
+
+  it('does not let a throwing subscriber break the append or starve other subscribers', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = new EventLog(freshDb());
+    const seen: string[] = [];
+    log.subscribe(() => {
+      throw new Error('boom');
+    });
+    log.subscribe((e) => seen.push(e.kind));
+
+    const row = log.append({ kind: 'job.started', message: 'go' });
+
+    expect(row.kind).toBe('job.started'); // row is still persisted and returned
+    expect(seen).toEqual(['job.started']); // the healthy subscriber still ran
+    consoleError.mockRestore();
   });
 });

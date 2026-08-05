@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { EventLog } from '../src/events/log.js';
 import { freshDb } from './helpers.js';
@@ -28,6 +28,24 @@ describe('app', () => {
       expect(body.map((e) => e.kind)).toEqual(['job.done']);
     });
 
+    it.each([
+      { query: '', expectedKinds: ['job.done', 'job.started'] }, // no params -> default limit 100, all rows
+      { query: '?limit=1', expectedKinds: ['job.done'] },
+      { query: '?limit=abc', expectedKinds: ['job.done', 'job.started'] }, // non-numeric -> falls back to default
+      { query: '?limit=', expectedKinds: ['job.done', 'job.started'] }, // empty -> falls back to default, not LIMIT 0
+      { query: '?level=', expectedKinds: ['job.done', 'job.started'] }, // empty level -> no filter, not WHERE level=''
+    ])('GET /api/events$query returns $expectedKinds', async ({ query, expectedKinds }) => {
+      const events = new EventLog(freshDb());
+      events.append({ kind: 'job.started', message: 'go' });
+      events.append({ kind: 'job.done', message: 'done' });
+      const app = createApp({ events });
+
+      const res = await app.request(`/api/events${query}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { kind: string }[];
+      expect(body.map((e) => e.kind)).toEqual(expectedKinds);
+    });
+
     it('GET /api/events/stream responds with text/event-stream and streams an appended event', async () => {
       const events = new EventLog(freshDb());
       const app = createApp({ events });
@@ -35,6 +53,7 @@ describe('app', () => {
 
       const res = await app.request('/api/events/stream', { signal: controller.signal });
       expect(res.headers.get('content-type')).toContain('text/event-stream');
+      expect(events.subscriberCount).toBe(1);
 
       events.append({ kind: 'job.started', message: 'go' });
 
@@ -47,6 +66,7 @@ describe('app', () => {
 
       controller.abort();
       await reader.cancel();
+      await vi.waitFor(() => expect(events.subscriberCount).toBe(0));
     });
   });
 });

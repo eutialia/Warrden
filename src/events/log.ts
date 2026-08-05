@@ -55,7 +55,15 @@ export class EventLog {
       .get(Date.now(), e.kind, e.level ?? 'info', e.jobId ?? null, e.message, JSON.stringify(e.data ?? {})) as EventRowRaw;
 
     const parsed = parseRow(row);
-    for (const fn of this.subscribers) fn(parsed);
+    for (const fn of this.subscribers) {
+      try {
+        fn(parsed);
+      } catch (err) {
+        // A misbehaving subscriber (e.g. a dropped SSE connection) must not stop the
+        // row from being persisted or starve subscribers registered after it.
+        console.error('EventLog subscriber threw', err);
+      }
+    }
     return parsed;
   }
 
@@ -80,5 +88,10 @@ export class EventLog {
     return () => {
       this.subscribers.delete(fn);
     };
+  }
+
+  /** Exposed for tests to assert subscriptions are actually cleaned up (e.g. after an SSE abort). */
+  get subscriberCount(): number {
+    return this.subscribers.size;
   }
 }
