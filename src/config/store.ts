@@ -37,7 +37,21 @@ export function loadConfig(dataDir: string): Config {
     saveConfig(dataDir, defaults);
     return defaults;
   }
-  const raw = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+  const text = readFileSync(path, 'utf-8');
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ConfigError([
+      {
+        code: 'custom',
+        path: [],
+        message: `config.json is not valid JSON: ${message}`,
+        input: text,
+      },
+    ]);
+  }
   return parseConfig(raw);
 }
 

@@ -9,7 +9,7 @@ export const CallsiteModelSchema = z.object({
 export const ArrInstanceSchema = z.object({
   name: z.string().min(1),
   kind: z.enum(['sonarr', 'radarr']),
-  baseUrl: z.string().url(),
+  baseUrl: z.url(),
   apiKey: z.string().min(1),
 });
 export const ConfigSchema = z.object({
@@ -17,17 +17,24 @@ export const ConfigSchema = z.object({
   // short-circuits and returns the literal default without running it through the
   // inner schema, so a missing top-level key would skip the field-level defaults
   // below it. .prefault() substitutes the value and then validates/defaults it.
+  //
+  // All object/array defaults use the factory form (`() => ({...})` / `() => [...]`)
+  // rather than a literal. Zod v4's default is only a shallow clone per parse: a
+  // literal default object is captured once and the SAME nested object/array
+  // references are handed out on every parse. Mutating one parsed config's default
+  // (e.g. `cfg.arrs.push(...)`) would then leak into every other in-process parse
+  // that hit the same default. The factory form allocates fresh objects each time.
   server: z
     .object({
       port: z.number().int().default(9797),
-      publicUrl: z.string().url().default('http://localhost:9797'), // used for webhook registration
+      publicUrl: z.url().default('http://localhost:9797'), // used for webhook registration
     })
     .prefault({}),
-  arrs: z.array(ArrInstanceSchema).default([]),
-  pathMappings: z.array(z.object({ from: z.string(), to: z.string() })).default([]),
+  arrs: z.array(ArrInstanceSchema).default(() => []),
+  pathMappings: z.array(z.object({ from: z.string(), to: z.string() })).default(() => []),
   picking: z
     .object({
-      tags: z.array(z.string()).default([]),
+      tags: z.array(z.string()).default(() => []),
       seederFloor: z.number().int().default(3),
       minSizeMB: z.number().default(50),
       maxSizeMB: z.number().default(60000),
@@ -39,14 +46,14 @@ export const ConfigSchema = z.object({
       // profile -> callsite -> model config; Phase 1 callsite: 'release-pick'
       profiles: z
         .record(z.string(), z.record(z.string(), CallsiteModelSchema))
-        .default({ dev: {}, prod: {} }),
+        .default(() => ({ dev: {}, prod: {} })),
       keys: z
         .object({
           openrouter: z.string().optional(),
           openai: z.string().optional(),
           anthropic: z.string().optional(),
         })
-        .default({}),
+        .default(() => ({})),
     })
     .prefault({}),
   reconcileIntervalMinutes: z.number().default(15),
