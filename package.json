@@ -1,0 +1,36 @@
+{
+  "name": "warrden",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.30",
+    "@ai-sdk/openai": "^4.0.30",
+    "@hono/node-server": "^2.1.0",
+    "@openrouter/ai-sdk-provider": "^3.0.0",
+    "ai": "^7.0.52",
+    "ai-sdk-provider-claude-code": "^4.0.1",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.8",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
