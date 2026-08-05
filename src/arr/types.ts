@@ -43,3 +43,9 @@ export interface ReleaseProfileResource {
   tags: number[];
   indexerId: number;
 }
+
+/** A notification resource, as returned by Sonarr/Radarr's `/notification` endpoint. */
+export interface NotificationSummary {
+  id: number;
+  name: string;
+}

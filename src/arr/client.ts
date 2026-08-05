@@ -1,17 +1,12 @@
 import type { ArrInstance } from '../config/schema.js';
 import type {
   MovieResource,
+  NotificationSummary,
   ReleaseCandidate,
   ReleaseProfileResource,
   SeriesResource,
   TagResource,
 } from './types.js';
-
-/** A notification resource, as returned by Sonarr/Radarr's `/notification` endpoint. */
-export interface NotificationSummary {
-  id: number;
-  name: string;
-}
 
 /** Thrown for any non-2xx response from a Sonarr/Radarr v3 API call. */
 export class ArrApiError extends Error {
@@ -34,7 +29,13 @@ type QueryValue = string | number | boolean | undefined;
  * need resilience or coalescing build it on top of this.
  */
 export class ArrClient {
-  constructor(private readonly inst: ArrInstance) {}
+  // Trailing slash stripped once here (not touched in the config schema) so a
+  // baseUrl like `http://host:8989/` doesn't produce `//api/v3/...` in request().
+  private readonly baseUrl: string;
+
+  constructor(private readonly inst: ArrInstance) {
+    this.baseUrl = inst.baseUrl.replace(/\/+$/, '');
+  }
 
   systemStatus(): Promise<unknown> {
     return this.request('GET', '/system/status');
@@ -52,6 +53,8 @@ export class ArrClient {
     return this.request('GET', `/series/${id}`);
   }
 
+  // Round-trip a getSeries() result only — PUTting a hand-built partial object
+  // would wipe unlisted series fields server-side.
   updateSeries(s: SeriesResource): Promise<SeriesResource> {
     return this.request('PUT', `/series/${s.id}`, { body: s });
   }
@@ -107,7 +110,7 @@ export class ArrClient {
     path: string,
     opts?: { query?: Record<string, QueryValue>; body?: unknown },
   ): Promise<T> {
-    let url = `${this.inst.baseUrl}/api/v3${path}`;
+    let url = `${this.baseUrl}/api/v3${path}`;
     if (opts?.query) {
       const params = new URLSearchParams();
       for (const [key, value] of Object.entries(opts.query)) {
@@ -131,6 +134,8 @@ export class ArrClient {
     }
 
     const text = await res.text();
+    // `undefined as T` is only legitimate for void-returning methods (grab/deletes) —
+    // value-returning GETs against the arr v3 API always have a JSON body.
     return (text ? (JSON.parse(text) as unknown) : undefined) as T;
   }
 }
