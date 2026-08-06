@@ -70,9 +70,12 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop polls each arr's history/queue as a backstop for missed webhooks. |
 
 Secrets (`arrs[].apiKey`, `llm.keys.*`) are shown as `•••` on the Config page once set.
-Leave a field as `•••` to keep the stored value, or retype it to change it. `llm.keys`
-fields left blank (never set) stay unset — they're omitted from the save rather than
-sent as an invalid empty value.
+Leave a field as `•••`, or retype it to rotate it. For `llm.keys` specifically, clearing
+a field back to blank is *also* a no-change — a blank field only means "never set" if it
+was already blank when the page loaded; to actually delete a stored `llm.keys` value, use
+that field's "Remove stored key" checkbox. (`arrs[].apiKey` has no such checkbox — it's a
+required field, so blanking it is rejected outright rather than treated as a deletion;
+remove the whole arr instance to drop it.)
 
 ## More detail
 

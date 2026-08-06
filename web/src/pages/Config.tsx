@@ -8,8 +8,25 @@ import { Textarea } from '@/components/ui/textarea';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
 
+const LLM_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const;
+type LlmProvider = (typeof LLM_PROVIDERS)[number];
+const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = { openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic' };
+
+/** One provider key field's editing state: `text` is what's shown (the sentinel, a typed
+ * value, or blank), `wasSet` records whether the key was actually configured when the page
+ * loaded (so a blank field can tell "never set" apart from "cleared"), and `remove` is the
+ * explicit "delete this key" checkbox — the only path that actually unsets a previously-set
+ * key (see `buildLlmKeys`). */
+interface LlmKeyFieldState {
+  text: string;
+  wasSet: boolean;
+  remove: boolean;
+}
+const EMPTY_KEY_FIELD: LlmKeyFieldState = { text: '', wasSet: false, remove: false };
+
 export default function ConfigPage() {
   const [config, setConfig] = useState<Config | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [tagsText, setTagsText] = useState('');
   // Kept as free-form text (not the parsed numbers) so an in-progress edit — including a
   // momentarily empty field while the user retypes it — never gets coerced to 0 and saved.
@@ -20,13 +37,13 @@ export default function ConfigPage() {
   const [pickingError, setPickingError] = useState<string | null>(null);
   const [profilesText, setProfilesText] = useState('');
   const [profilesError, setProfilesError] = useState<string | null>(null);
-  // One free-form text field per provider key, not bound directly to `config.llm.keys` —
-  // an unset key loads as '' (not the sentinel), a set one loads as SECRET_PLACEHOLDER,
-  // and a blank field on save means "leave unchanged" (see `buildLlmKeys`) rather than
-  // "clear it", since the schema itself rejects an empty string as a key value.
-  const [openrouterKeyText, setOpenrouterKeyText] = useState('');
-  const [openaiKeyText, setOpenaiKeyText] = useState('');
-  const [anthropicKeyText, setAnthropicKeyText] = useState('');
+  // One editing state per provider key, not bound directly to `config.llm.keys` — see
+  // `LlmKeyFieldState` above for what each field tracks and why.
+  const [llmKeyFields, setLlmKeyFields] = useState<Record<LlmProvider, LlmKeyFieldState>>({
+    openrouter: EMPTY_KEY_FIELD,
+    openai: EMPTY_KEY_FIELD,
+    anthropic: EMPTY_KEY_FIELD,
+  });
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -37,29 +54,66 @@ export default function ConfigPage() {
     setMinSizeMBText(String(c.picking.minSizeMB));
     setMaxSizeMBText(String(c.picking.maxSizeMB));
     setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
-    setOpenrouterKeyText(c.llm.keys.openrouter ?? '');
-    setOpenaiKeyText(c.llm.keys.openai ?? '');
-    setAnthropicKeyText(c.llm.keys.anthropic ?? '');
+    setLlmKeyFields({
+      openrouter: { text: c.llm.keys.openrouter ?? '', wasSet: c.llm.keys.openrouter !== undefined, remove: false },
+      openai: { text: c.llm.keys.openai ?? '', wasSet: c.llm.keys.openai !== undefined, remove: false },
+      anthropic: { text: c.llm.keys.anthropic ?? '', wasSet: c.llm.keys.anthropic !== undefined, remove: false },
+    });
   }
 
-  /** Builds the `llm.keys` object to send on save: a field left blank is omitted
-   * entirely (server keeps whatever's stored, if anything) rather than sent as `''`,
-   * which the schema would reject outright (`z.string().min(1)`). A field still showing
-   * `SECRET_PLACEHOLDER` (untouched) or holding a freshly typed value is sent as-is —
-   * the server resolves the former back to the stored secret. */
+  function updateLlmKeyField(provider: LlmProvider, patch: Partial<LlmKeyFieldState>): void {
+    setLlmKeyFields((prev) => ({ ...prev, [provider]: { ...prev[provider], ...patch } }));
+  }
+
+  /**
+   * Builds the `llm.keys` object to send on save. Per key, in priority order:
+   *  1. "Remove" checked — omitted entirely. This is the *only* path that actually
+   *     deletes a previously-set key.
+   *  2. A non-blank value (a freshly typed secret, or the sentinel round-tripped
+   *     unchanged) — sent as-is; the server resolves the sentinel back to the stored
+   *     secret, a real value rotates it.
+   *  3. Blank, but the key was set when the page loaded — re-sent as the sentinel, so
+   *     clearing the field back to empty is a no-op rather than a silent delete (the
+   *     bug this whole scheme fixes: clearing used to erase the stored secret).
+   *  4. Blank and never set — omitted; still unset either way.
+   */
   function buildLlmKeys(): Config['llm']['keys'] {
     const keys: Config['llm']['keys'] = {};
-    if (openrouterKeyText !== '') keys.openrouter = openrouterKeyText;
-    if (openaiKeyText !== '') keys.openai = openaiKeyText;
-    if (anthropicKeyText !== '') keys.anthropic = anthropicKeyText;
+    for (const provider of LLM_PROVIDERS) {
+      const field = llmKeyFields[provider];
+      if (field.remove) continue;
+      if (field.text !== '') {
+        keys[provider] = field.text;
+      } else if (field.wasSet) {
+        keys[provider] = SECRET_PLACEHOLDER;
+      }
+    }
     return keys;
   }
 
-  useEffect(() => {
+  function loadConfigFromServer(): void {
+    setLoadError(null);
     fetchConfig()
       .then(loadFormState)
-      .catch((err: unknown) => toast.error(err instanceof ApiError ? err.message : 'failed to load config'));
-  }, []);
+      .catch((err: unknown) => {
+        const message = err instanceof ApiError ? err.message : 'failed to load config';
+        setLoadError(message);
+        toast.error(message);
+      });
+  }
+
+  useEffect(loadConfigFromServer, []);
+
+  if (loadError) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-destructive">{loadError}</p>
+        <Button variant="outline" size="sm" onClick={loadConfigFromServer}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (!config) {
     return <p className="text-muted-foreground">Loading…</p>;
@@ -285,38 +339,37 @@ export default function ConfigPage() {
         <CardHeader>
           <CardTitle>API keys</CardTitle>
           <CardDescription>
-            Leave a key as {SECRET_PLACEHOLDER} to keep the stored value, or blank if it's never been set. Not
-            needed for the claude-code provider, which uses subscription auth instead.
+            Leave a key as {SECRET_PLACEHOLDER} — or blank it out — to keep the stored value unchanged; a blank
+            field only means "never set" if it was already blank. Check "Remove" to actually delete a stored key.
+            Not needed for the claude-code provider, which uses subscription auth instead.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="mb-1 block text-sm font-medium">OpenRouter</label>
-            <Input
-              type="password"
-              autoComplete="new-password"
-              value={openrouterKeyText}
-              onChange={(e) => setOpenrouterKeyText(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">OpenAI</label>
-            <Input
-              type="password"
-              autoComplete="new-password"
-              value={openaiKeyText}
-              onChange={(e) => setOpenaiKeyText(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">Anthropic</label>
-            <Input
-              type="password"
-              autoComplete="new-password"
-              value={anthropicKeyText}
-              onChange={(e) => setAnthropicKeyText(e.target.value)}
-            />
-          </div>
+          {LLM_PROVIDERS.map((provider) => {
+            const field = llmKeyFields[provider];
+            return (
+              <div key={provider}>
+                <label className="mb-1 block text-sm font-medium">{LLM_PROVIDER_LABELS[provider]}</label>
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  disabled={field.remove}
+                  value={field.text}
+                  onChange={(e) => updateLlmKeyField(provider, { text: e.target.value })}
+                />
+                {field.wasSet && (
+                  <label className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={field.remove}
+                      onChange={(e) => updateLlmKeyField(provider, { remove: e.target.checked })}
+                    />
+                    Remove stored key
+                  </label>
+                )}
+              </div>
+            );
+          })}
         </CardContent>
       </Card>
 
