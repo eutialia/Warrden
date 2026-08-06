@@ -14,24 +14,34 @@ linked below.
 ## Quickstart
 
 Warrden is a single container. It needs a data directory for its SQLite database and
-config, and network access to your Sonarr/Radarr instances.
+config, and network access to your Sonarr/Radarr instances. There's no published image
+yet — build it from a checkout of this repo:
 
 ```sh
+docker build -t warrden .
 docker run -d \
   --name warrden \
   -p 9797:9797 \
-  -v /path/to/warrden-data:/data \
-  ghcr.io/your-org/warrden:latest
+  -v warrden-data:/data \
+  warrden
 ```
 
-On first start, Warrden writes a default `config.json` into the data volume and serves a
-dashboard at `http://<host>:9797`. Use the **Config** page to add your arr instances
-(name, kind, base URL, API key), set picking preferences, and choose an LLM provider —
-then restart the container to pick up the LLM provider change. Everything else applies
-live.
+Using a named volume (`warrden-data` above) rather than a bind mount lets Docker set its
+ownership to match the container's non-root user automatically; a bind-mounted host
+directory needs to be pre-owned by uid/gid `1000` for the same reason.
 
-Warrden registers its own webhook with each configured arr instance on startup; no manual
-webhook setup is required in Sonarr/Radarr.
+On first start, Warrden writes a default `config.json` into the data volume and serves a
+dashboard at `http://<host>:9797`. Before adding any arr instance, set `server.publicUrl`
+on the **Config** page to a URL your Sonarr/Radarr instances can reach the container at —
+this is the address Warrden registers as its own webhook, and it's registered **once**,
+by name, the first time each arr instance is added; changing `publicUrl` afterwards does
+not update webhooks already registered under the old one; delete the "Warrden" webhook in
+the arr's own settings first if you need to re-point it. Then add your arr instances
+(name, kind, base URL, API key), set picking preferences, and choose an LLM provider.
+
+Every config save requires a container restart to fully take effect (the save
+confirmation says so) — some fields are read live, but arr connections and the LLM
+provider/keys are only wired up at startup.
 
 **Tested against:** Sonarr v4 and Radarr v5. The release-profile API shape Warrden relies
 on for pinning assumes Sonarr v4 or newer.
@@ -59,8 +69,10 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `llm.keys.openrouter` / `.openai` / `.anthropic` | unset | API keys for the corresponding LLM provider. Not required for the `claude-code` provider, which uses subscription auth instead. |
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop polls each arr's history/queue as a backstop for missed webhooks. |
 
-Secrets (`arrs[].apiKey`, `llm.keys.*`) are shown as `•••` on the Config page once set;
-leave them as-is to keep the stored value, or clear and retype to change them.
+Secrets (`arrs[].apiKey`, `llm.keys.*`) are shown as `•••` on the Config page once set.
+Leave a field as `•••` to keep the stored value, or retype it to change it. `llm.keys`
+fields left blank (never set) stay unset — they're omitted from the save rather than
+sent as an invalid empty value.
 
 ## More detail
 

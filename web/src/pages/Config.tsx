@@ -20,6 +20,13 @@ export default function ConfigPage() {
   const [pickingError, setPickingError] = useState<string | null>(null);
   const [profilesText, setProfilesText] = useState('');
   const [profilesError, setProfilesError] = useState<string | null>(null);
+  // One free-form text field per provider key, not bound directly to `config.llm.keys` —
+  // an unset key loads as '' (not the sentinel), a set one loads as SECRET_PLACEHOLDER,
+  // and a blank field on save means "leave unchanged" (see `buildLlmKeys`) rather than
+  // "clear it", since the schema itself rejects an empty string as a key value.
+  const [openrouterKeyText, setOpenrouterKeyText] = useState('');
+  const [openaiKeyText, setOpenaiKeyText] = useState('');
+  const [anthropicKeyText, setAnthropicKeyText] = useState('');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -30,6 +37,22 @@ export default function ConfigPage() {
     setMinSizeMBText(String(c.picking.minSizeMB));
     setMaxSizeMBText(String(c.picking.maxSizeMB));
     setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
+    setOpenrouterKeyText(c.llm.keys.openrouter ?? '');
+    setOpenaiKeyText(c.llm.keys.openai ?? '');
+    setAnthropicKeyText(c.llm.keys.anthropic ?? '');
+  }
+
+  /** Builds the `llm.keys` object to send on save: a field left blank is omitted
+   * entirely (server keeps whatever's stored, if anything) rather than sent as `''`,
+   * which the schema would reject outright (`z.string().min(1)`). A field still showing
+   * `SECRET_PLACEHOLDER` (untouched) or holding a freshly typed value is sent as-is —
+   * the server resolves the former back to the stored secret. */
+  function buildLlmKeys(): Config['llm']['keys'] {
+    const keys: Config['llm']['keys'] = {};
+    if (openrouterKeyText !== '') keys.openrouter = openrouterKeyText;
+    if (openaiKeyText !== '') keys.openai = openaiKeyText;
+    if (anthropicKeyText !== '') keys.anthropic = anthropicKeyText;
+    return keys;
   }
 
   useEffect(() => {
@@ -102,12 +125,12 @@ export default function ConfigPage() {
       .filter((t) => t.length > 0);
 
     // Full replace: round-trip everything from the last GET/save, with just the edited
-    // fields overlaid — llm.keys is sent back untouched (still '•••' where unset by the
-    // user) and the server merges it specially.
+    // fields overlaid — llm.keys entries are rebuilt from the per-provider text fields
+    // (see `buildLlmKeys`) and the server merges sentinel values back to the stored secret.
     const payload: Config = {
       ...config,
       picking: { tags, seederFloor, minSizeMB, maxSizeMB },
-      llm: { ...config.llm, profiles },
+      llm: { ...config.llm, profiles, keys: buildLlmKeys() },
     };
 
     setSaving(true);
@@ -254,6 +277,45 @@ export default function ConfigPage() {
               }}
             />
             {profilesError && <p className="mt-1 text-sm text-destructive">{profilesError}</p>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>API keys</CardTitle>
+          <CardDescription>
+            Leave a key as {SECRET_PLACEHOLDER} to keep the stored value, or blank if it's never been set. Not
+            needed for the claude-code provider, which uses subscription auth instead.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="mb-1 block text-sm font-medium">OpenRouter</label>
+            <Input
+              type="password"
+              autoComplete="new-password"
+              value={openrouterKeyText}
+              onChange={(e) => setOpenrouterKeyText(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium">OpenAI</label>
+            <Input
+              type="password"
+              autoComplete="new-password"
+              value={openaiKeyText}
+              onChange={(e) => setOpenaiKeyText(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium">Anthropic</label>
+            <Input
+              type="password"
+              autoComplete="new-password"
+              value={anthropicKeyText}
+              onChange={(e) => setAnthropicKeyText(e.target.value)}
+            />
           </div>
         </CardContent>
       </Card>
