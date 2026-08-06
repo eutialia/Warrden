@@ -16,18 +16,24 @@ import { synthesizePolicyPrompt } from './policy.js';
 // structured-output definition (Anthropic, OpenAI json_schema, claude-code) require a
 // root-level `type: "object"`, and a union serializes to a bare `anyOf` they 400 on.
 // The pick-only fields are nullable instead; the superRefine enforces the pairing.
+// `.nullable()` WITHOUT `.default()` on the three pick-only fields, deliberately: `.default()`
+// drops a field from the JSON-schema `required` array and adds a `default` keyword, which
+// OpenAI's json_schema strict mode (the default under @ai-sdk/openai) rejects outright — and
+// even where it's accepted, it stops telling the provider the field is mandatory once it
+// commits to `decision: "pick"`. Staying `required` (just nullable) keeps the shape valid for
+// strict-mode providers and keeps the schema honest; `superRefine` below still enforces the
+// pick-requires-candidate pairing at the value level.
 const LlmPickResponseSchema = z
   .object({
     decision: z.enum(['pick', 'none']),
-    candidate: z.number().int().nullable().default(null),
+    candidate: z.number().int().nullable(),
     releaseGroup: z
       .string()
       .nullable()
-      .default(null)
       .describe(
         'The release/fansub group name extracted from the picked candidate title (often bracketed, e.g. "[SubsPlease]" or "[喵萌奶茶屋&LoliHouse]"); null only when no group is identifiable',
       ),
-    confidence: z.enum(['high', 'medium', 'low']).nullable().default(null),
+    confidence: z.enum(['high', 'medium', 'low']).nullable(),
     reasoning: z.string(),
   })
   .superRefine((v, ctx) => {

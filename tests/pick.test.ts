@@ -27,7 +27,7 @@ describe('pickRelease', () => {
     expect(llm.calls[0].prompt).toContain('CHS');
   });
   it('passes through a none decision', async () => {
-    const llm = new FakeGenerator([{ decision: 'none', reasoning: 'nothing matches CHS requirement' }]);
+    const llm = new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches CHS requirement' }]);
     const res = await pickRelease({ llm, candidates: [candidate({})], ...base });
     expect(res.decision).toBe('none');
   });
@@ -50,7 +50,7 @@ describe('pickRelease', () => {
     { name: 'null (indexer silent)', seeders: null, expected: '? seeders' },
     { name: 'undefined (usenet release)', seeders: undefined as unknown as null, expected: '? seeders' },
   ])('renders $name as "$expected" in the candidate line', async ({ seeders, expected }) => {
-    const llm = new FakeGenerator([{ decision: 'none', reasoning: 'n/a' }]);
+    const llm = new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'n/a' }]);
     await pickRelease({ llm, candidates: [candidate({ seeders })], ...base });
     expect(llm.calls[0].prompt).toContain(expected);
   });
