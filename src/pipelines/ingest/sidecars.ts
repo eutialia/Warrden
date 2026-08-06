@@ -153,12 +153,18 @@ export function buildSidecarName(videoFileName: string, s: { lang: string | null
 }
 
 /**
- * Deterministically matches a sidecar filename to one of a series' episodes, with no
- * LLM involved — only unambiguous cases resolve here; everything else (including a
- * `parseEpisodeRef` miss) returns `null` for the LLM call-site to attempt instead.
- * Callers must pre-filter `episodes` to `hasFile: true` (this function trusts whatever
- * list it's given).
+ * Deterministically matches a sidecar (or leftover video) filename to one of a series'
+ * episodes, with no LLM involved — only unambiguous cases resolve here; everything else
+ * (including a `parseEpisodeRef` miss) returns `null` for the LLM call-site to attempt
+ * instead. This function trusts whatever `episodes` list it's given and matches purely
+ * by season/episode/absolute number — callers must pre-filter `episodes` to whichever
+ * subset is a legitimate mapping target for their use case: a sidecar needs a video
+ * that's already on disk, so `matchSidecarsWithLlm`'s caller filters to `hasFile: true`;
+ * bundle rescue (`planBundleImport` in `bundle.ts`) is filling in *missing* episodes, so
+ * it filters to `hasFile: false` instead, so a bare-number leftover file can never
+ * displace an episode that already has a file.
  *
+
  * - An `SxxEyy` ref matches by exact `(seasonNumber, episodeNumber)`.
  * - A bare ref, when the series has exactly one regular (non-special, `seasonNumber >
  *   0`) season, matches by `episodeNumber` within that season.

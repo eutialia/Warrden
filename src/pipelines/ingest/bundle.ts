@@ -28,6 +28,11 @@ const BundleMapResponseSchema = z.object({
   reasoning: z.string(),
 });
 
+/** The three-level gate every tier reports on, and the whole plan's overall risk —
+ * inferred from the schema so Task 10/12/13 (which act on a `BundlePlan`) share this
+ * exact type instead of re-declaring the union. */
+export type BundleConfidence = z.infer<typeof BundleMapResponseSchema>['confidence'];
+
 const CALLSITE = 'bundle-map';
 
 /** Renders one numbered episode table row for the bundle prompt: `renderEpisodeLine`'s
@@ -64,19 +69,23 @@ function toManualImportFile(item: ManualImportItem, episodeIds: number[], series
  * Asks the LLM to map every still-unresolved leftover file (deterministic mapping
  * already took what it could) to the episode(s) it contains — usually one, empty when
  * the file isn't an episode at all (sample/NCOP/NCED/menu/extra), never more than one
- * except a genuine double-episode file. As with `matchLlm.ts`'s sidecar call, a `file`
- * number outside `1..items.length` is a contract violation (the LLM referenced a file
- * it was never shown) and throws `LlmError`; an `episodeIds` entry naming an id outside
- * `episodes` is just a bad guess about one file and is silently dropped instead of
- * sinking the batch — nothing irreversible happens here, a file with no surviving id
- * just lands in `skipped` for a human to place manually.
+ * except a genuine double-episode file. Callers must not invoke this with an empty
+ * `episodes` table — mirror `matchSidecarsWithLlm`'s own short-circuit at the call site
+ * instead of paying for a guaranteed-useless round-trip.
+ *
+ * As with `matchLlm.ts`'s sidecar call, a `file` number outside `1..items.length` is a
+ * contract violation (the LLM referenced a file it was never shown) and throws
+ * `LlmError`; an `episodeIds` entry naming an id outside `episodes` is just a bad guess
+ * about one file and is silently dropped instead of sinking the batch — nothing
+ * irreversible happens here, a file with no surviving id just lands in `skipped` for a
+ * human to place manually.
  */
 async function mapBundleWithLlm(input: {
   llm: StructuredGenerator;
   seriesTitle: string;
   items: ManualImportItem[];
   episodes: EpisodeResource[];
-}): Promise<{ episodeIdsByFile: number[][]; confidence: 'high' | 'medium' | 'low'; reasoning: string }> {
+}): Promise<{ episodeIdsByFile: number[][]; confidence: BundleConfidence; reasoning: string }> {
   const { llm, seriesTitle, items, episodes } = input;
 
   const system = [
@@ -123,9 +132,9 @@ async function mapBundleWithLlm(input: {
 
 export interface BundlePlan {
   files: ManualImportFile[]; // ready for executeManualImport
-  confidence: 'high' | 'medium' | 'low';
+  confidence: BundleConfidence;
   reasoning: string;
-  skipped: string[]; // paths judged not-an-episode (samples, NC*, extras)
+  skipped: string[]; // paths judged not-an-episode (samples, NC*, extras), or dropped as unsafe
 }
 
 /**
@@ -139,18 +148,38 @@ export interface BundlePlan {
  * the first two could place:
  * 1. Items the arr already resolved on its own (`episodes.length > 0`, no rejections)
  *    round-trip straight into `files` — the arr's own manual-import parser already did
- *    the work, second-guessing it would only introduce risk.
+ *    the work, second-guessing it would only introduce risk. Its episode ids are still
+ *    validated against `episodes` (an id the caller's episode list doesn't recognize is
+ *    dropped); an item with no surviving id is NOT tier-1 material and falls through to
+ *    tiers 2/3 instead of importing with an empty `episodeIds`.
  * 2. Everything else gets one shot at `matchSidecarDeterministic` (from `sidecars.ts`;
- *    it works on any filename, not just sidecars) against the *full* episode list —
- *    an `SxxEyy` or absolute-number match here is exact, not a guess.
- * 3. Whatever's left after both goes to a single LLM call (`mapBundleWithLlm`). An
- *    empty (or fully-invalid-id) `episodeIds` for a file means the LLM judged it not an
+ *    it works on any filename, not just sidecars) — matched **only** against episodes
+ *    with `hasFile === false`. Bundle rescue exists to fill in missing episodes; a bare
+ *    trailing number that happens to parse as, say, "05" (an NCOP or sample that isn't
+ *    actually episode 5) must never displace a real file already sitting on disk. A file
+ *    that only matches an occupied episode falls through to the LLM tier instead, which
+ *    can see `hasFile` in the episode table and answer an empty `episodeIds` for it.
+ * 3. Whatever's left after both goes to a single LLM call (`mapBundleWithLlm`) — skipped
+ *    entirely (no call at all) when the episode table is empty, mirroring
+ *    `matchSidecarsWithLlm`'s own short-circuit, since no episode table means nothing
+ *    the LLM says can possibly be right. An empty (or fully-invalid-id) `episodeIds` for
+ *    a file, or a file the LLM's `mappings` never mentions at all, means it isn't an
  *    importable episode, so it lands in `skipped` rather than `files`.
  *
- * `confidence` reflects the riskiest tier actually used: `'high'` when every file
- * resolved via tiers 1-2 (no LLM guessing involved at all), otherwise whatever the LLM
- * itself reported. Returns `null` when nothing ended up importable — an empty `files`
- * plan isn't worth acting on.
+ * After all three tiers, two safety passes run over the assembled `files` before
+ * anything is returned, because this plan feeds an irreversible import:
+ * - **Duplicate-target guard**: if two or more files end up claiming the same episode id
+ *   (e.g. `Show - 05.mkv` and `Show - 05v2.mkv` both resolving to episode 5), none of
+ *   them is trustworthy enough to import unattended — ALL of them are pulled out of
+ *   `files` and appended to `skipped`, and `reasoning` gets a note. Picking one over the
+ *   other is a human call.
+ * - **Occupied-episode cap**: if any surviving file (from *any* tier, including tier 1)
+ *   targets an episode with `hasFile === true`, replacing an existing file is always a
+ *   human decision — the whole plan's `confidence` is capped at `'low'`. This only ever
+ *   downgrades, never upgrades, an otherwise-higher confidence.
+ *
+ * Returns `null` when nothing ended up importable — an empty `files` plan isn't worth
+ * acting on.
  */
 export async function planBundleImport(input: {
   llm: StructuredGenerator;
@@ -161,23 +190,27 @@ export async function planBundleImport(input: {
 }): Promise<BundlePlan | null> {
   const { llm, seriesTitle, seriesId, items, episodes } = input;
 
-  const files: ManualImportFile[] = [];
+  const validEpisodeIds = new Set(episodes.map((e) => e.id));
+  // Tier 2's mapping target set: only episodes still missing a file. A bare-number
+  // filename (an NCOP, a sample, a "05" that's really not episode 5) must never resolve
+  // onto an episode that already has a file on disk — see the occupied-episode cap for
+  // why that matters even for tiers that DO have a legitimate reason to touch one.
+  const missingFileEpisodes = episodes.filter((e) => !e.hasFile);
+
+  let files: ManualImportFile[] = [];
   const skipped: string[] = [];
   const remaining: ManualImportItem[] = [];
 
   for (const item of items) {
-    if (item.episodes.length > 0 && item.rejections.length === 0) {
-      files.push(
-        toManualImportFile(
-          item,
-          item.episodes.map((e) => e.id),
-          seriesId,
-        ),
-      );
-      continue;
+    if (item.rejections.length === 0 && item.episodes.length > 0) {
+      const validIds = item.episodes.map((e) => e.id).filter((id) => validEpisodeIds.has(id));
+      if (validIds.length > 0) {
+        files.push(toManualImportFile(item, validIds, seriesId));
+        continue;
+      }
     }
 
-    const deterministic = matchSidecarDeterministic(basename(item.path), episodes);
+    const deterministic = matchSidecarDeterministic(basename(item.path), missingFileEpisodes);
     if (deterministic) {
       files.push(toManualImportFile(item, [deterministic.id], seriesId));
       continue;
@@ -186,10 +219,15 @@ export async function planBundleImport(input: {
     remaining.push(item);
   }
 
-  let confidence: 'high' | 'medium' | 'low' = 'high';
+  let confidence: BundleConfidence = 'high';
   let reasoning = 'every file resolved via the arr or deterministic filename matching; no LLM call needed';
 
-  if (remaining.length > 0) {
+  if (remaining.length > 0 && episodes.length === 0) {
+    // No episode table at all — nothing the LLM could say about these files would mean
+    // anything, so they're unresolvable by construction. Skip the guaranteed-useless
+    // paid call, same as matchSidecarsWithLlm's empty-episode-table short-circuit.
+    skipped.push(...remaining.map((item) => item.path));
+  } else if (remaining.length > 0) {
     const llmResult = await mapBundleWithLlm({ llm, seriesTitle, items: remaining, episodes });
     confidence = llmResult.confidence;
     reasoning = llmResult.reasoning;
@@ -203,6 +241,38 @@ export async function planBundleImport(input: {
       }
     });
   }
+
+  // Duplicate-target guard: two files can each resolve "cleanly" on their own tier and
+  // still both claim the same episode id (two cuts of the same episode in one bundle).
+  // Neither is more trustworthy than the other, so both are pulled — silently keeping
+  // one would be an unattended guess about which release to keep.
+  const filesByEpisodeId = new Map<number, number[]>();
+  files.forEach((f, i) => {
+    for (const id of f.episodeIds ?? []) {
+      const indices = filesByEpisodeId.get(id) ?? [];
+      indices.push(i);
+      filesByEpisodeId.set(id, indices);
+    }
+  });
+  const duplicateIndices = new Set<number>();
+  for (const indices of filesByEpisodeId.values()) {
+    if (indices.length > 1) indices.forEach((i) => duplicateIndices.add(i));
+  }
+  if (duplicateIndices.size > 0) {
+    const kept: ManualImportFile[] = [];
+    files.forEach((f, i) => {
+      if (duplicateIndices.has(i)) skipped.push(f.path);
+      else kept.push(f);
+    });
+    files = kept;
+    reasoning += `; ${duplicateIndices.size} file(s) skipped — duplicate episode targets (multiple files claimed the same episode)`;
+  }
+
+  // Occupied-episode cap: replacing a file that's already on disk is always a human
+  // decision, regardless of which tier produced the mapping. This only ever downgrades.
+  const occupiedEpisodeIds = new Set(episodes.filter((e) => e.hasFile).map((e) => e.id));
+  const targetsOccupiedEpisode = files.some((f) => (f.episodeIds ?? []).some((id) => occupiedEpisodeIds.has(id)));
+  if (targetsOccupiedEpisode) confidence = 'low';
 
   if (files.length === 0) return null;
 

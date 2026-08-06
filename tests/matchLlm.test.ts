@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { LlmError } from '../src/llm/generator.js';
 import { matchSidecarsWithLlm } from '../src/pipelines/ingest/matchLlm.js';
 import { episodeResource, FakeGenerator } from './helpers.js';
 
@@ -43,7 +44,9 @@ describe('matchSidecarsWithLlm', () => {
   ])('throws LlmError naming the number when the LLM assigns an out-of-range file index ($name)', async ({ fileNumber }) => {
     const episodes = [episodeResource({ id: 10 })];
     const llm = new FakeGenerator([{ assignments: [{ file: fileNumber, episodeId: 10 }], reasoning: '?' }]);
-    await expect(matchSidecarsWithLlm({ llm, seriesTitle, files: ['a.ass'], episodes })).rejects.toThrow(String(fileNumber));
+    const call = matchSidecarsWithLlm({ llm, seriesTitle, files: ['a.ass'], episodes });
+    await expect(call).rejects.toThrow(LlmError);
+    await expect(call).rejects.toThrow(String(fileNumber));
   });
 
   it('a file the LLM omitted from assignments resolves to null', async () => {
