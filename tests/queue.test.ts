@@ -33,6 +33,17 @@ describe('JobQueue', () => {
     expect(q.claim(1_000)).toBeNull();
     expect(q.claim(6_000)).not.toBeNull();
   });
+
+  it('coalescing onto a pending twin resets its not_before to the new enqueue\'s effective value, so a fresh trigger overrides an existing retry backoff', () => {
+    const first = q.enqueue({ ...target, notBefore: 60_000 }); // waiting out a backoff, not yet claimable
+    expect(q.claim(30_000)).toBeNull();
+
+    const second = q.enqueue(target); // a fresh trigger, no explicit notBefore -> defaults to 0
+    expect(second.outcome).toBe('coalesced');
+    expect(second.id).toBe(first.id);
+    expect(q.get(first.id!)!.not_before).toBe(0);
+    expect(q.claim(0)).not.toBeNull(); // immediately claimable now, backoff overridden
+  });
   it.each([
     { attempts: 1, retried: true },
     { attempts: 2, retried: true },
@@ -45,6 +56,26 @@ describe('JobQueue', () => {
       res = q.fail(job.id, 'boom');
     }
     expect(res.retried).toBe(retried);
+  });
+
+  it('a terminal failure (max attempts exhausted) with a dirty flag inserts a fresh pending twin, same as complete() does — a trigger that arrived mid-run must not be lost just because that run ultimately failed for good', () => {
+    q.enqueue(target);
+    let job = q.claim(Number.MAX_SAFE_INTEGER)!;
+    q.fail(job.id, 'boom'); // attempts=1, retried
+    job = q.claim(Number.MAX_SAFE_INTEGER)!;
+    q.fail(job.id, 'boom'); // attempts=2, retried
+    job = q.claim(Number.MAX_SAFE_INTEGER)!; // running again; this attempt will be terminal (maxAttempts default 3)
+
+    expect(q.enqueue(target).outcome).toBe('marked-dirty'); // a trigger arrives while this final attempt is in flight
+    const result = q.fail(job.id, 'boom'); // attempts=3 -> terminal
+    expect(result.retried).toBe(false);
+    expect(q.get(job.id)!.status).toBe('failed');
+
+    const freshTwin = q.claim(Number.MAX_SAFE_INTEGER);
+    expect(freshTwin).not.toBeNull();
+    expect(freshTwin!.attempts).toBe(0); // a brand-new twin, not a continuation of the failed one
+    expect(freshTwin!.dirty).toBe(0);
+    expect(freshTwin!.not_before).toBe(0);
   });
 
   it('clears dirty on retry so a later completion is not spuriously requeued', () => {

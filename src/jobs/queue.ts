@@ -81,6 +81,11 @@ export class JobQueue {
         .get(j.pipeline, j.arrInstance, j.targetKind, j.targetId) as { id: number; status: JobStatus } | undefined;
 
       if (twin?.status === 'pending') {
+        // Reset not_before to this enqueue's own effective value (default 0, i.e.
+        // immediately claimable) rather than leaving the twin's existing one in place — a
+        // fresh trigger (a new webhook, a manual re-pick) legitimately overrides whatever
+        // retry backoff the pending twin was still waiting out.
+        this.db.prepare(`UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?`).run(j.notBefore ?? 0, now, twin.id);
         return { id: twin.id, outcome: 'coalesced' };
       }
       if (twin?.status === 'running') {
@@ -144,9 +149,7 @@ export class JobQueue {
     const maxAttempts = opts?.maxAttempts ?? 3;
     const now = Date.now();
     const tx = this.db.transaction((): { retried: boolean } => {
-      const job = this.db.prepare(`SELECT attempts, status FROM jobs WHERE id = ?`).get(id) as
-        | { attempts: number; status: JobStatus }
-        | undefined;
+      const job = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id) as JobRowRaw | undefined;
       if (!job) throw new Error(`fail: job ${id} not found`);
 
       const attempts = job.attempts + 1;
@@ -172,6 +175,19 @@ export class JobQueue {
         .run(attempts, err, now, id);
       if (info.changes === 0) {
         throw new Error(`fail: job ${id} is not running (status=${job.status})`);
+      }
+
+      // Same rationale as complete()'s own dirty-twin requeue: a duplicate enqueue that
+      // arrived while this run was in flight must not be lost just because the run ended
+      // in a *terminal* failure rather than success — the trigger that set `dirty` is
+      // still owed a fresh attempt.
+      if (job.dirty) {
+        this.db
+          .prepare(
+            `INSERT INTO jobs (pipeline, target_kind, target_id, arr_instance, payload, not_before, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+          )
+          .run(job.pipeline, job.target_kind, job.target_id, job.arr_instance, job.payload, now, now);
       }
       return { retried: false };
     });
