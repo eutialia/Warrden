@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { EventLog } from '../src/events/log.js';
@@ -118,6 +121,31 @@ describe('app', () => {
       controller.abort();
       await reader.cancel();
       await vi.waitFor(() => expect(events.subscriberCount).toBe(0));
+    });
+  });
+
+  describe('static serving (ctx.webDistDir)', () => {
+    it('serves index.html for a client-side route, keeps /api and /webhooks 404ing as JSON, and leaves /healthz alone', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'warrden-web-dist-'));
+      try {
+        const indexHtml = '<!doctype html><html><body>fixture shell</body></html>';
+        writeFileSync(join(dir, 'index.html'), indexHtml);
+        const app = createApp({ webDistDir: dir });
+
+        const deepLink = await app.request('/jobs/5');
+        expect(deepLink.status).toBe(200);
+        expect(await deepLink.text()).toBe(indexHtml);
+
+        const unknownApi = await app.request('/api/unknown');
+        expect(unknownApi.status).toBe(404);
+        expect(await unknownApi.json()).toEqual({ error: 'not found' });
+
+        const health = await app.request('/healthz');
+        expect(health.status).toBe(200);
+        expect(await health.json()).toEqual({ status: 'ok' });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

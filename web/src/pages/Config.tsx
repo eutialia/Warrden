@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { ApiError, fetchConfig, saveConfig, type ArrInstance, type ArrKind, type Config } from '@/api';
+import { ApiError, fetchConfig, saveConfig, SECRET_PLACEHOLDER, type ArrInstance, type ArrKind, type Config } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -11,18 +11,30 @@ const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: 
 export default function ConfigPage() {
   const [config, setConfig] = useState<Config | null>(null);
   const [tagsText, setTagsText] = useState('');
+  // Kept as free-form text (not the parsed numbers) so an in-progress edit — including a
+  // momentarily empty field while the user retypes it — never gets coerced to 0 and saved.
+  // Parsed and validated only in handleSave.
+  const [seederFloorText, setSeederFloorText] = useState('');
+  const [minSizeMBText, setMinSizeMBText] = useState('');
+  const [maxSizeMBText, setMaxSizeMBText] = useState('');
+  const [pickingError, setPickingError] = useState<string | null>(null);
   const [profilesText, setProfilesText] = useState('');
   const [profilesError, setProfilesError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  function loadFormState(c: Config): void {
+    setConfig(c);
+    setTagsText(c.picking.tags.join('\n'));
+    setSeederFloorText(String(c.picking.seederFloor));
+    setMinSizeMBText(String(c.picking.minSizeMB));
+    setMaxSizeMBText(String(c.picking.maxSizeMB));
+    setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
+  }
+
   useEffect(() => {
     fetchConfig()
-      .then((c) => {
-        setConfig(c);
-        setTagsText(c.picking.tags.join('\n'));
-        setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
-      })
+      .then(loadFormState)
       .catch((err: unknown) => toast.error(err instanceof ApiError ? err.message : 'failed to load config'));
   }, []);
 
@@ -42,8 +54,17 @@ export default function ConfigPage() {
     setConfig((prev) => (prev ? { ...prev, arrs: prev.arrs.filter((_, i) => i !== index) } : prev));
   }
 
-  function updatePicking(patch: Partial<Config['picking']>): void {
-    setConfig((prev) => (prev ? { ...prev, picking: { ...prev.picking, ...patch } } : prev));
+  /** Parses one of the picking number fields, rejecting blank/non-numeric text outright —
+   * `Number('')` is `0`, so without this a field the user cleared mid-edit would silently
+   * save as zero instead of blocking the save like the LLM-profiles JSON check does. */
+  function parsePickingNumber(label: string, text: string): number | undefined {
+    const trimmed = text.trim();
+    const value = Number(trimmed);
+    if (trimmed === '' || Number.isNaN(value)) {
+      setPickingError(`${label} must be a number`);
+      return undefined;
+    }
+    return value;
   }
 
   async function handleSave(): Promise<void> {
@@ -60,6 +81,15 @@ export default function ConfigPage() {
       return;
     }
 
+    setPickingError(null);
+    const seederFloor = parsePickingNumber('Seeder floor', seederFloorText);
+    const minSizeMB = parsePickingNumber('Min size', minSizeMBText);
+    const maxSizeMB = parsePickingNumber('Max size', maxSizeMBText);
+    if (seederFloor === undefined || minSizeMB === undefined || maxSizeMB === undefined) {
+      toast.error('Picking fields must all be numbers');
+      return;
+    }
+
     const tags = tagsText
       .split('\n')
       .map((t) => t.trim())
@@ -70,7 +100,7 @@ export default function ConfigPage() {
     // user) and the server merges it specially.
     const payload: Config = {
       ...config,
-      picking: { ...config.picking, tags },
+      picking: { tags, seederFloor, minSizeMB, maxSizeMB },
       llm: { ...config.llm, profiles },
     };
 
@@ -80,9 +110,7 @@ export default function ConfigPage() {
       const result = await saveConfig(payload);
       toast.success(result.restartRequired ? 'Config saved — restart required to apply' : 'Config saved');
       const fresh = await fetchConfig();
-      setConfig(fresh);
-      setTagsText(fresh.picking.tags.join('\n'));
-      setProfilesText(JSON.stringify(fresh.llm.profiles, null, 2));
+      loadFormState(fresh);
     } catch (err) {
       if (err instanceof ApiError) {
         const issueText = err.issues?.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
@@ -103,7 +131,8 @@ export default function ConfigPage() {
         <CardHeader>
           <CardTitle>Arr instances</CardTitle>
           <CardDescription>
-            Leave the API key as ••• to keep the stored value. Renaming an instance requires re-entering its key.
+            Leave the API key as {SECRET_PLACEHOLDER} to keep the stored value. Renaming an instance requires
+            re-entering its key.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -119,7 +148,12 @@ export default function ConfigPage() {
                 <option value="radarr">radarr</option>
               </select>
               <Input placeholder="base URL" value={arr.baseUrl} onChange={(e) => updateArr(i, { baseUrl: e.target.value })} />
-              <Input placeholder="API key" value={arr.apiKey} onChange={(e) => updateArr(i, { apiKey: e.target.value })} />
+              <Input
+                type="password"
+                placeholder="API key"
+                value={arr.apiKey}
+                onChange={(e) => updateArr(i, { apiKey: e.target.value })}
+              />
               <Button variant="ghost" size="sm" onClick={() => removeArr(i)}>
                 Remove
               </Button>
@@ -145,27 +179,37 @@ export default function ConfigPage() {
               <label className="mb-1 block text-sm font-medium">Seeder floor</label>
               <Input
                 type="number"
-                value={config.picking.seederFloor}
-                onChange={(e) => updatePicking({ seederFloor: Number(e.target.value) })}
+                value={seederFloorText}
+                onChange={(e) => {
+                  setSeederFloorText(e.target.value);
+                  setPickingError(null);
+                }}
               />
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium">Min size (MB)</label>
               <Input
                 type="number"
-                value={config.picking.minSizeMB}
-                onChange={(e) => updatePicking({ minSizeMB: Number(e.target.value) })}
+                value={minSizeMBText}
+                onChange={(e) => {
+                  setMinSizeMBText(e.target.value);
+                  setPickingError(null);
+                }}
               />
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium">Max size (MB)</label>
               <Input
                 type="number"
-                value={config.picking.maxSizeMB}
-                onChange={(e) => updatePicking({ maxSizeMB: Number(e.target.value) })}
+                value={maxSizeMBText}
+                onChange={(e) => {
+                  setMaxSizeMBText(e.target.value);
+                  setPickingError(null);
+                }}
               />
             </div>
           </div>
+          {pickingError && <p className="text-sm text-destructive">{pickingError}</p>}
         </CardContent>
       </Card>
 

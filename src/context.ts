@@ -16,4 +16,9 @@ export interface AppContext {
   // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly
   clients: Map<string, ArrApi>;
   llm: StructuredGenerator;
+  // Directory the dashboard's built assets (`index.html` + `assets/`) live in, served by
+  // `createApp` when present. Optional and injectable (rather than a module-level constant
+  // resolved off `import.meta.url`) so tests can point it at a small fixture dir instead of
+  // the real `web/dist` — production just omits it and gets the real build's location.
+  webDistDir?: string;
 }

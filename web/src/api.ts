@@ -43,18 +43,6 @@ export interface JobDetailResponse {
   acquireRecord: AcquireRecord | null;
 }
 
-export type EventLevel = 'info' | 'warn' | 'attention';
-
-export interface EventRow {
-  id: number;
-  ts: number;
-  kind: string;
-  level: EventLevel;
-  job_id: number | null;
-  message: string;
-  data: Record<string, unknown>;
-}
-
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
  * Leaving it untouched on `PUT` preserves the stored secret; sending a new value rotates it. */
 export const SECRET_PLACEHOLDER = '•••';
@@ -151,23 +139,3 @@ export function saveConfig(config: Config): Promise<SaveConfigResponse> {
   });
 }
 
-export function fetchEvents(opts?: { limit?: number; level?: string }): Promise<EventRow[]> {
-  const params = new URLSearchParams();
-  if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
-  if (opts?.level) params.set('level', opts.level);
-  const qs = params.toString();
-  return fetchJson<EventRow[]>(`/api/events${qs ? `?${qs}` : ''}`);
-}
-
-export function postAcquire(input: {
-  arrInstance: string;
-  targetKind: TargetKind;
-  targetId: number;
-  title?: string;
-}): Promise<{ outcome: string }> {
-  return fetchJson('/api/acquire', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-  });
-}

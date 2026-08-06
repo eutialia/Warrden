@@ -5,6 +5,7 @@ import { Toaster } from '@/components/ui/sonner';
 import Activity from '@/pages/Activity';
 import ConfigPage from '@/pages/Config';
 import JobDetail from '@/pages/JobDetail';
+import NotFound from '@/pages/NotFound';
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
               <Route path="/" element={<Activity />} />
               <Route path="/jobs/:id" element={<JobDetail />} />
               <Route path="/config" element={<ConfigPage />} />
+              <Route path="*" element={<NotFound />} />
             </Routes>
           </main>
         </SidebarInset>

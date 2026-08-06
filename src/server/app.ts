@@ -15,10 +15,11 @@ const DEFAULT_EVENTS_LIMIT = 100;
 const DEFAULT_JOBS_LIMIT = 50;
 const MAX_LIMIT = 1000;
 
-// Resolved relative to this module's own location (not process.cwd()), same convention as
-// `src/db/db.ts`'s MIGRATIONS_DIR — works the same whether running from `src/` (tsx) or
-// `dist/` (compiled), since both sit one level under the repo root at `server/`.
-const WEB_DIST_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
+// Default when `ctx.webDistDir` isn't given: resolved relative to this module's own
+// location (not process.cwd()), same convention as `src/db/db.ts`'s MIGRATIONS_DIR — works
+// the same whether running from `src/` (tsx) or `dist/` (compiled), since both sit one
+// level under the repo root at `server/`.
+const DEFAULT_WEB_DIST_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 
 // `?limit=` (empty) and `?limit=abc` (non-numeric) both fall back to `fallback` rather
 // than reaching better-sqlite3, which rejects NaN/negative bind params outright.
@@ -267,24 +268,32 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     });
   }
 
-  // Only mounted when `web/dist` actually exists — the dashboard is built separately
+  // Only mounted when the dist dir actually exists — the dashboard is built separately
   // (`npm run build:web`), and this server's own test suite (which asserts 404s for
   // routes that a given ctx doesn't mount) runs whether or not that build has happened,
   // so this can't turn into a hard dependency for `createApp` to work either way.
-  //
-  // `serveStatic` calls `next()`, not a 404, when a requested asset doesn't exist, so an
-  // unmatched request falls through to Hono's own `notFound` handler below — that's where
-  // the client-side-routing fallback to `index.html` lives, *except* for `/api/*` and
-  // `/webhooks/*`: those must keep 404ing as plain JSON (matching the no-`web/dist` case
-  // exactly) rather than serving the SPA shell for a mistyped or unmounted API route.
-  if (existsSync(WEB_DIST_DIR)) {
-    app.use('*', serveStatic({ root: WEB_DIST_DIR }));
+  const webDistDir = ctx.webDistDir ?? DEFAULT_WEB_DIST_DIR;
+  if (existsSync(webDistDir)) {
+    // `serveStatic` calls `next()`, not a 404, when a requested asset doesn't exist, so an
+    // unmatched request falls through to Hono's own `notFound` handler below — that's where
+    // the client-side-routing fallback to `index.html` lives, *except* for `/api` and
+    // `/webhooks` (bare or with a subpath): those must keep 404ing as plain JSON (matching
+    // the no-dist-dir case exactly) rather than serving the SPA shell for a mistyped or
+    // unmounted API route.
+    app.use('*', serveStatic({ root: webDistDir }));
     app.notFound(async (c) => {
-      if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/webhooks/')) {
+      const path = c.req.path;
+      const isApiOrWebhook = path === '/api' || path === '/webhooks' || path.startsWith('/api/') || path.startsWith('/webhooks/');
+      if (isApiOrWebhook) {
         return c.json({ error: 'not found' }, 404);
       }
-      await serveStatic({ path: join(WEB_DIST_DIR, 'index.html') })(c, async () => {});
-      return c.res;
+      // `serveStatic`'s middleware signature returns the `Response` it built rather than
+      // assigning it anywhere on `c` — awaiting it and discarding the result (as an earlier
+      // version of this did) serves an empty 200 instead of `index.html`'s actual bytes.
+      // `index.html` not existing (dist dir present but somehow missing it) is the only way
+      // this comes back undefined, hence the fallback.
+      const res = await serveStatic({ path: join(webDistDir, 'index.html') })(c, async () => {});
+      return res ?? c.text('not found', 404);
     });
   }
 

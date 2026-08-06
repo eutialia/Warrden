@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchJobs, type Job } from '@/api';
+import { ApiError, fetchJobs, type Job } from '@/api';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -10,12 +10,16 @@ const JOBS_LIMIT = 50;
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const refetch = useCallback(() => {
     fetchJobs(JOBS_LIMIT)
-      .then(setJobs)
-      .catch((err: unknown) => console.error('failed to load jobs', err))
+      .then((j) => {
+        setJobs(j);
+        setError(null);
+      })
+      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : 'failed to load jobs'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -35,6 +39,7 @@ export default function Activity() {
         <CardTitle>Activity</CardTitle>
       </CardHeader>
       <CardContent>
+        {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
         <Table>
           <TableHeader>
             <TableRow>
