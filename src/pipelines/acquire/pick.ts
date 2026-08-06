@@ -21,8 +21,7 @@ const CALLSITE = 'release-pick';
 /** Renders one numbered candidate line, e.g. `#1 [title] | 1.4 GB | 25 seeders | indexer`. */
 function renderCandidateLine(index: number, c: ReleaseCandidate): string {
   const sizeGB = (c.size / BYTES_PER_GB).toFixed(1);
-  const seeders = c.seeders ?? undefined;
-  const seedersLabel = seeders === null || seeders === undefined ? '? seeders' : `${seeders} seeders`;
+  const seedersLabel = c.seeders === null || c.seeders === undefined ? '? seeders' : `${c.seeders} seeders`;
   return `#${index + 1} [${c.title}] | ${sizeGB} GB | ${seedersLabel} | ${c.indexer}`;
 }
 
