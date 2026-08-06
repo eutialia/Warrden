@@ -56,7 +56,9 @@ describe('handleWebhook', () => {
     const { downloadId: _drop, ...withoutDownloadId } = seriesDownload;
     expect(handleWebhook(ctx, 'sonarr', withoutDownloadId).handled).toBe(true);
     const job = ctx.queue.claim()!;
-    expect(job.payload).toEqual({ title: 'Frieren', downloadId: undefined });
+    // `downloadId: undefined` is dropped by JSON serialization on the way into/out of
+    // the jobs table, so the claimed payload simply omits the key.
+    expect(job.payload).toEqual({ title: 'Frieren' });
   });
 
   it('acknowledges Test events without enqueueing', () => {

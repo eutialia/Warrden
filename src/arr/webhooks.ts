@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import type { TargetKind } from '../jobs/queue.js';
 
 // Zod object schemas strip unknown keys by default rather than rejecting them, so real
 // Sonarr/Radarr payloads — which carry many more fields than we care about — parse
@@ -69,45 +70,44 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
     return { handled: true };
   }
 
+  // Resolve what to dispatch per event type, then enqueue + log once below — every
+  // event here reduces to the same shape (a pipeline, a series-or-movie target, and a
+  // job payload), so branching only to fill that in keeps the two near-identical
+  // enqueue + append calls this used to have from drifting apart.
+  let pipeline: string;
+  let targetKind: TargetKind;
+  let target: { id: number; title: string } | undefined;
+  let jobPayload: object;
+  let extraData: Record<string, unknown> = {};
+
   if (event.eventType === 'Download') {
-    const target = event.series ?? event.movie;
-    if (!target) {
-      return { handled: false, reason: 'ignored' };
-    }
-    const targetKind = event.series ? 'series' : 'movie';
-
-    const result = ctx.queue.enqueue({
-      pipeline: 'ingest',
-      targetKind,
-      targetId: target.id,
-      arrInstance: instanceName,
-      payload: { title: target.title, downloadId: event.downloadId },
-    });
-    ctx.events.append({
-      kind: 'webhook.received',
-      jobId: result.id ?? undefined,
-      message: `${event.eventType} for "${target.title}" (${instanceName})`,
-      data: { instance: instanceName, eventType: event.eventType, targetId: target.id, outcome: result.outcome, isUpgrade: event.isUpgrade },
-    });
-
-    return { handled: true };
+    pipeline = 'ingest';
+    targetKind = event.series ? 'series' : 'movie';
+    target = event.series ?? event.movie;
+    extraData = { isUpgrade: event.isUpgrade };
+  } else {
+    pipeline = 'acquire';
+    targetKind = event.eventType === 'SeriesAdd' ? 'series' : 'movie';
+    target = event.eventType === 'SeriesAdd' ? event.series : event.movie;
   }
 
-  const target = event.eventType === 'SeriesAdd' ? event.series : event.movie;
-  const targetKind = event.eventType === 'SeriesAdd' ? 'series' : 'movie';
+  if (!target) {
+    return { handled: false, reason: 'ignored' };
+  }
+  jobPayload = event.eventType === 'Download' ? { title: target.title, downloadId: event.downloadId } : { title: target.title };
 
   const result = ctx.queue.enqueue({
-    pipeline: 'acquire',
+    pipeline,
     targetKind,
     targetId: target.id,
     arrInstance: instanceName,
-    payload: { title: target.title },
+    payload: jobPayload,
   });
   ctx.events.append({
     kind: 'webhook.received',
     jobId: result.id ?? undefined,
     message: `${event.eventType} for "${target.title}" (${instanceName})`,
-    data: { instance: instanceName, eventType: event.eventType, targetId: target.id, outcome: result.outcome },
+    data: { instance: instanceName, eventType: event.eventType, targetId: target.id, outcome: result.outcome, ...extraData },
   });
 
   return { handled: true };

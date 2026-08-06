@@ -1,5 +1,6 @@
 import type { AppContext } from '../context.js';
 import { ManagedObjects } from '../db/managedObjects.js';
+import type { NotificationSummary } from './types.js';
 import { errorMessage } from '../util/errors.js';
 
 const NOTIFICATION_NAME = 'Warrden';
@@ -28,6 +29,10 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
     try {
       const existing = await client.listNotifications();
       const found = existing.find((n) => n.name === NOTIFICATION_NAME);
+      // Set only when we've just deleted a stale registration — tracks both "recreate,
+      // not fresh-create" for the event payload below, and the removed id for the
+      // recreate-failure warning if the replacement create doesn't land.
+      let recreatedFromId: number | undefined;
       if (found) {
         if (found.onDownload === true && found.onUpgrade === true) {
           // Already present in the arr and subscribed to everything we need, but the
@@ -41,10 +46,11 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         // our own known-good body is simpler and idempotent under the name check above.
         await client.deleteNotification(found.id);
         managedObjects.delete(arr.name, 'notification', found.id);
+        recreatedFromId = found.id;
       }
 
       const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
-      const created = await client.createNotification({
+      const body = {
         name: NOTIFICATION_NAME,
         implementation: 'Webhook',
         configContract: 'WebhookSettings',
@@ -56,14 +62,37 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         onMovieAdded: true,
         onDownload: true,
         onUpgrade: true,
-      });
+      };
+
+      let created: NotificationSummary;
+      try {
+        created = await client.createNotification(body);
+      } catch (err) {
+        // A fresh-create failure (no prior delete) is just a normal registration
+        // failure — fall through to the outer catch's "webhook.register-failed". A
+        // recreate failure is worse: the old notification is already gone, so the arr
+        // has *no* Warrden webhook right now. Retry once immediately (cheap — every
+        // startup retries anyway) before reporting that explicitly.
+        if (recreatedFromId === undefined) throw err;
+        try {
+          created = await client.createNotification(body);
+        } catch (retryErr) {
+          ctx.events.append({
+            kind: 'webhook.recreate-failed',
+            level: 'warn',
+            message: `Removed the stale "${NOTIFICATION_NAME}" webhook on "${arr.name}" but failed to recreate it — the instance currently has no Warrden webhook: ${errorMessage(retryErr)}`,
+            data: { instance: arr.name, oldId: recreatedFromId },
+          });
+          continue;
+        }
+      }
 
       managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: created.id, name: NOTIFICATION_NAME });
 
       ctx.events.append({
         kind: 'webhook.registered',
         message: `Registered "${NOTIFICATION_NAME}" webhook on "${arr.name}"`,
-        data: { instance: arr.name, url },
+        data: recreatedFromId !== undefined ? { instance: arr.name, url, recreated: true } : { instance: arr.name, url },
       });
     } catch (err) {
       ctx.events.append({

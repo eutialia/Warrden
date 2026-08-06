@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { registerWebhooks } from '../src/arr/register.js';
 import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
+import { ManagedObjects } from '../src/db/managedObjects.js';
 import type { ArrApi } from '../src/arr/types.js';
 
 function managedObjectRows(ctx: ReturnType<typeof makeCtx>) {
@@ -49,6 +50,10 @@ describe('registerWebhooks', () => {
   ])('recreates a stale "Warrden" notification missing import events ($name)', async ({ notification }) => {
     const client = fakeArrClient({ notifications: [notification] });
     const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    // Seed the registry with the OLD notification's row up front, as a real Phase 1
+    // install would have it — otherwise the `managedObjects.delete` call in the recreate
+    // path has nothing to delete and this test can't tell it apart from a no-op.
+    new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
 
     await registerWebhooks(ctx);
 
@@ -66,8 +71,33 @@ describe('registerWebhooks', () => {
       onDownload: true,
       onUpgrade: true,
     });
-    // The old (id 7) row is gone from the registry, replaced by the newly created one.
+    const events = ctx.events.list();
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: 'webhook.registered', data: expect.objectContaining({ recreated: true }) }),
+    );
+    // The old (id 7) row is gone from the registry, replaced by the newly created one —
+    // and ONLY the new one: no leftover row from the seeded id 7.
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 1, name: 'Warrden' }]);
+  });
+
+  it('reports a recreate-failure — not a generic register-failure — when the replacement create fails twice after the old notification was already deleted', async () => {
+    const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden' }] });
+    client.createNotification = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
+
+    await registerWebhooks(ctx);
+
+    expect(client.deleteNotification).toHaveBeenCalledWith(7);
+    // Retried exactly once: the initial attempt plus one retry, no more.
+    expect(client.createNotification).toHaveBeenCalledTimes(2);
+
+    const warnEvents = ctx.events.list({ level: 'warn' });
+    expect(warnEvents).toHaveLength(1);
+    expect(warnEvents[0]).toMatchObject({ kind: 'webhook.recreate-failed', data: { instance: 'sonarr', oldId: 7 } });
+    expect(warnEvents[0]!.message).toContain('no Warrden webhook');
+    // The old row was deleted and no new one was ever created — the registry has none.
+    expect(managedObjectRows(ctx)).toEqual([]);
   });
 
   it('logs a warn event and continues to the next instance when an arr call throws', async () => {
