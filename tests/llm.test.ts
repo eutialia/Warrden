@@ -55,6 +55,31 @@ describe('withFallback', () => {
     expect(attempt).toHaveBeenCalledTimes(4);
   });
 
+  it('attaches every ladder error as an AggregateError cause on the thrown error, so a keyless-fallback failure does not mask the primary errors', async () => {
+    const primaryError = new Error('primary rate limited');
+    const fallbackError = new Error('fallback missing API key');
+    const attempt = vi
+      .fn()
+      .mockRejectedValueOnce(primaryError)
+      .mockRejectedValueOnce(primaryError)
+      .mockRejectedValueOnce(fallbackError)
+      .mockRejectedValueOnce(fallbackError);
+    let thrown: unknown;
+    try {
+      await withFallback(attempt, primary, fallback);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBe(fallbackError);
+    expect((thrown as Error).cause).toBeInstanceOf(AggregateError);
+    expect((thrown as Error & { cause: AggregateError }).cause.errors).toEqual([
+      primaryError,
+      primaryError,
+      fallbackError,
+      fallbackError,
+    ]);
+  });
+
   it('without fallback: two attempts only', async () => {
     const attempt = vi.fn().mockRejectedValue(new Error('down'));
     await expect(withFallback(attempt, primary)).rejects.toThrow('down');
@@ -74,6 +99,20 @@ describe('AiSdkGenerator', () => {
     expect(generateObjectMock).not.toHaveBeenCalled();
   });
 
+  it.each(['openrouter', 'openai', 'anthropic'] as const)(
+    'throws LlmError without calling generateObject when the %s API key is missing',
+    async (provider) => {
+      generateObjectMock.mockReset();
+      const cfg = baseConfig();
+      cfg.llm.profiles.prod['release-pick'] = { provider, model: 'some-model' };
+      const generator = new AiSdkGenerator(cfg);
+      await expect(
+        generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
+      ).rejects.toThrow(LlmError);
+      expect(generateObjectMock).not.toHaveBeenCalled();
+    },
+  );
+
   it('falls back to the configured fallback model after the primary fails twice', async () => {
     generateObjectMock.mockReset();
     generateObjectMock
@@ -91,7 +130,9 @@ describe('AiSdkGenerator', () => {
     expect(result).toEqual({ ok: true });
     expect(generateObjectMock).toHaveBeenCalledTimes(3);
     // maxRetries: 0 on every call — the SDK's own retries must not multiply our ladder.
-    expect(generateObjectMock).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
+    expect(generateObjectMock.mock.calls.every(([opts]) => (opts as { maxRetries: number }).maxRetries === 0)).toBe(
+      true,
+    );
   });
 
   it('wraps the final failure into an LlmError carrying the callsite and the original error as cause', async () => {

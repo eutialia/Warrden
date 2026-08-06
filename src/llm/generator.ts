@@ -58,6 +58,12 @@ export function resolveModel(cfg: Config, callsite: string): ModelRef & { fallba
  * fallback, fallback. Throws the last error once every attempt is exhausted. Pure,
  * AI-SDK-free, and generic over any `{provider, model}`-shaped ref (not just `ModelRef`'s
  * strict `Provider` union) so the retry/fallback ladder is unit-testable on its own.
+ *
+ * Every ladder attempt's error is collected and, when the last one is an `Error`
+ * without a `cause` of its own, attached as an `AggregateError` on its `cause` — so
+ * e.g. a keyless-fallback failure ("missing API key") doesn't silently mask what the
+ * primary provider actually failed with. The thrown value is still exactly the last
+ * error (same reference, same type); only its `cause` gains this extra context.
  */
 export async function withFallback<T, M extends { provider: string; model: string } = ModelRef>(
   attempt: (model: M) => Promise<T>,
@@ -65,13 +71,17 @@ export async function withFallback<T, M extends { provider: string; model: strin
   fallback?: M,
 ): Promise<T> {
   const models = fallback ? [primary, primary, fallback, fallback] : [primary, primary];
-  let lastError: unknown;
+  const errors: unknown[] = [];
   for (const model of models) {
     try {
       return await attempt(model);
     } catch (err) {
-      lastError = err;
+      errors.push(err);
     }
+  }
+  const lastError = errors[errors.length - 1];
+  if (errors.length > 1 && lastError instanceof Error && lastError.cause === undefined) {
+    lastError.cause = new AggregateError(errors, 'All ladder attempts failed; see errors for each one in order');
   }
   throw lastError;
 }
