@@ -31,11 +31,22 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV WARRDEN_DATA_DIR=/data
 
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/web/dist ./web/dist
+COPY --from=builder --chown=node:node /app/package.json ./package.json
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/dist ./dist
+COPY --from=builder --chown=node:node /app/web/dist ./web/dist
+
+# Owned by `node` (the image's built-in non-root user) before it's declared as a volume,
+# so a fresh named volume inherits that ownership instead of root's.
+RUN mkdir -p /data && chown node:node /data
+USER node
 
 VOLUME /data
 EXPOSE 9797
+# `curl`/`wget` aren't installed on this base image; Node's built-in `fetch` avoids
+# pulling either in just for the healthcheck. Hardcodes the *default* `server.port`
+# (9797, matching `EXPOSE` above) — a `config.json` that overrides the port needs a
+# matching override here too, since a healthcheck can't read the container's own config.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://localhost:9797/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 CMD ["node", "dist/index.js"]

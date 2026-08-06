@@ -1,0 +1,23 @@
+# Never let build context reach the image: this is real config, potentially real
+# API keys if the service has been run against this checkout.
+data
+.env
+
+# Rebuilt inside the image by the builder stage; copying the host's own (possibly
+# different-OS) build output in would either be dead weight or silently mask a build
+# failure by leaving a stale copy in place.
+dist
+web/dist
+
+# Host-installed deps: node_modules on the host may be built for a different
+# platform/arch than the image, and `COPY . .` would silently clobber the npm-ci'd
+# tree the builder stage just created (this only "worked" for better-sqlite3 because
+# it ships prebuilds for every platform — other native deps wouldn't be so lucky).
+node_modules
+web/node_modules
+
+# Not needed at runtime or build time; keeps the build context small.
+.git
+docs
+tests
+*.md
