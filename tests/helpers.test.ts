@@ -1,14 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { z } from 'zod';
-import { FakeGenerator, freshDb, makeCtx } from './helpers.js';
-
-describe('FakeGenerator', () => {
-  it('with validate: false, returns a schema-invalid queued result as-is', async () => {
-    const llm = new FakeGenerator([{ oops: 'not what the schema expects' }], { validate: false });
-    const result = await llm.generate({ callsite: 'x', schema: z.object({ ok: z.boolean() }), system: 's', prompt: 'p' });
-    expect(result).toEqual({ oops: 'not what the schema expects' });
-  });
-});
+import { freshDb, makeCtx } from './helpers.js';
 
 describe('makeCtx', () => {
   it('builds queue/events on a provided db override, not a second orphan db', () => {

@@ -24,6 +24,11 @@ export class ArrApiError extends Error {
 
 type QueryValue = string | number | boolean | undefined;
 
+// Every arr call gets a hard ceiling: an unreachable/hung arr instance would otherwise
+// leave a job (and the runner's single-tick-at-a-time poll loop) stuck forever waiting
+// on a `fetch` that never settles.
+const REQUEST_TIMEOUT_MS = 30_000;
+
 /**
  * Thin authenticated wrapper around the Sonarr/Radarr v3 HTTP API: every method is a
  * single `fetch` against `{baseUrl}/api/v3/...`. No retries, no caching — callers that
@@ -36,10 +41,6 @@ export class ArrClient implements ArrApi {
 
   constructor(private readonly inst: ArrInstance) {
     this.baseUrl = inst.baseUrl.replace(/\/+$/, '');
-  }
-
-  systemStatus(): Promise<unknown> {
-    return this.request('GET', '/system/status');
   }
 
   listSeries(): Promise<SeriesResource[]> {
@@ -134,6 +135,7 @@ export class ArrClient implements ArrApi {
         ...(opts?.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
