@@ -64,6 +64,17 @@ export const ConfigSchema = z
           });
         }
       }),
+    ingest: z
+      .object({
+        // Local (mapped) paths that must exist before any filesystem work — e.g. a marker
+        // file at the root of each NAS mount. Empty list = no mount verification.
+        mountMarkers: z.array(z.string()).default(() => []),
+        // ARR-side paths of the torrent clients' download roots. Used to derive a torrent's
+        // root folder from an imported file's path, and as a hard "never sweep this dir
+        // itself" guard.
+        downloadRoots: z.array(z.string()).default(() => []),
+      })
+      .prefault({}),
     llm: z
       .object({
         activeProfile: z.enum(['dev', 'prod']).default('prod'),

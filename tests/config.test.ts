@@ -12,6 +12,7 @@ describe('config store', () => {
     expect(cfg.arrs).toEqual([]);
     expect(cfg.llm.activeProfile).toBe('prod');
     expect(cfg.reconcileIntervalMinutes).toBe(15);
+    expect(cfg.ingest).toEqual({ mountMarkers: [], downloadRoots: [] });
   });
 
   it('round-trips saved config', () => {
@@ -19,6 +20,8 @@ describe('config store', () => {
     const cfg = loadConfig(dir);
     cfg.picking.tags = ['CHS subs', 'prefer dual audio'];
     cfg.arrs.push({ name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:8989', apiKey: 'k' });
+    cfg.ingest.mountMarkers.push('/mnt/nas/.mounted');
+    cfg.ingest.downloadRoots.push('/data/downloads');
     saveConfig(dir, cfg);
     expect(loadConfig(dir)).toEqual(cfg);
   });
