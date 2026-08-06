@@ -63,9 +63,17 @@ export function baseConfig(): Config {
 export class FakeGenerator implements StructuredGenerator {
   calls: GenerateOpts<unknown>[] = [];
   private readonly queue: unknown[];
+  private readonly validate: boolean;
 
-  constructor(queue: unknown[] = []) {
+  /**
+   * `validate: false` (default `true`) skips parsing queued results through
+   * `opts.schema`, returning them as-is — lets a test queue a schema-invalid
+   * shape to exercise a pipeline's own handling of a malformed LLM response,
+   * instead of every fixture being forced through zod first.
+   */
+  constructor(queue: unknown[] = [], opts?: { validate?: boolean }) {
     this.queue = [...queue];
+    this.validate = opts?.validate ?? true;
   }
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
@@ -75,7 +83,7 @@ export class FakeGenerator implements StructuredGenerator {
     }
     const next = this.queue.shift();
     if (next instanceof Error) throw next;
-    return opts.schema.parse(next);
+    return this.validate ? opts.schema.parse(next) : (next as T);
   }
 }
 
