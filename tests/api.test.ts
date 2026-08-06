@@ -94,12 +94,12 @@ describe('dashboard api', () => {
       expect(after.reconcileIntervalMinutes).toBe(30);
 
       // The webhook route builds its `HandleWebhookCtx.config` fresh per request rather
-      // than snapshotting it once at `createApp` time — an arr renamed away by that same
-      // PUT is unknown to the very next webhook delivery, not just to future app instances.
-      const renamed = { ...got, arrs: [] };
+      // than snapshotting it once at `createApp` time — an arr removed by that same PUT
+      // is unknown to the very next webhook delivery, not just to future app instances.
+      const removed = { ...got, arrs: [] };
       await app.request('/api/config', {
         method: 'PUT',
-        body: JSON.stringify(renamed),
+        body: JSON.stringify(removed),
         headers: { 'content-type': 'application/json' },
       });
       const webhookRes = await app.request('/webhooks/sonarr', {
@@ -179,6 +179,42 @@ describe('dashboard api', () => {
           expectedStatus: 400,
           verify: (ctx: AppContext) => {
             expect(ctx.config.llm.keys.openrouter).toBe('sk-or-secret'); // unchanged after rejection
+          },
+        },
+        {
+          label: 'renaming an arr instance while its apiKey is still the sentinel is rejected with 400',
+          mutate: (body: any) => {
+            body.arrs[0].name = 'sonarr-renamed'; // dashboard round-tripped the sentinel, unaware of the rename
+          },
+          expectedStatus: 400,
+          verify: (ctx: AppContext) => {
+            // Nothing was saved: the original instance survives under its original name
+            // and key, and no "sonarr-renamed" entry (holding the literal sentinel) exists.
+            expect(ctx.config.arrs.find((a) => a.name === 'sonarr')?.apiKey).toBe('sonarr-key');
+            expect(ctx.config.arrs.some((a) => a.name === 'sonarr-renamed')).toBe(false);
+          },
+        },
+        {
+          label: 'adding a brand-new arr instance with a real apiKey still succeeds',
+          mutate: (body: any) => {
+            body.arrs.push({ name: 'sonarr2', kind: 'sonarr', baseUrl: 'http://sonarr2:8989', apiKey: 'fresh-real-key' });
+          },
+          expectedStatus: 200,
+          verify: (ctx: AppContext) => {
+            expect(ctx.config.arrs.find((a) => a.name === 'sonarr2')?.apiKey).toBe('fresh-real-key');
+          },
+        },
+        {
+          label: 'duplicate arr instance names are rejected with 400',
+          mutate: (body: any) => {
+            // Both entries share the stored "sonarr" name, so restoreArrApiKey resolves
+            // each sentinel apiKey fine on its own — the rejection has to come from the
+            // schema's uniqueness check, not the secret-restore step.
+            body.arrs.push({ ...body.arrs[0] });
+          },
+          expectedStatus: 400,
+          verify: (ctx: AppContext) => {
+            expect(ctx.config.arrs.filter((a) => a.name === 'sonarr')).toHaveLength(1);
           },
         },
       ])('$label', async ({ mutate, expectedStatus, verify }) => {
