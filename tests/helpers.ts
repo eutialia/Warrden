@@ -2,7 +2,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
-import type { ArrApi, ReleaseCandidate } from '../src/arr/types.js';
+import { vi } from 'vitest';
+import type {
+  ArrApi,
+  MovieResource,
+  NotificationSummary,
+  ReleaseCandidate,
+  ReleaseProfileResource,
+  SeriesResource,
+  TagResource,
+} from '../src/arr/types.js';
 import type { AppContext } from '../src/context.js';
 import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -10,6 +19,7 @@ import { openDb } from '../src/db/db.js';
 import { EventLog } from '../src/events/log.js';
 import { JobQueue } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
+import { BYTES_PER_GB } from '../src/util/bytes.js';
 
 const createdDirs: string[] = [];
 const openDbs: Database.Database[] = [];
@@ -105,6 +115,126 @@ export function configWithArrs(...names: Array<'sonarr' | 'radarr'>): Config {
   });
 }
 
+export interface FakeArrClientSeed {
+  series?: SeriesResource[];
+  movies?: MovieResource[];
+  tags?: TagResource[];
+  profiles?: ReleaseProfileResource[];
+  releases?: ReleaseCandidate[];
+  notifications?: NotificationSummary[];
+}
+
+export interface FakeArrClient extends ArrApi {
+  series: SeriesResource[];
+  movies: MovieResource[];
+  tags: TagResource[];
+  profiles: ReleaseProfileResource[];
+  releases: ReleaseCandidate[];
+  notifications: NotificationSummary[];
+  /** Every `grabRelease` call, recorded in order — the pipeline test's grab assertion. */
+  grabbed: Array<{ guid: string; indexerId: number }>;
+  /** Seeds a tag directly into the store, bypassing `createTag`'s auto id — for tests
+   * that need a pre-existing tag with a specific id/label already in place. */
+  pushTag(tag: TagResource): TagResource;
+  /** Same as `pushTag`, for release profiles. */
+  pushProfile(profile: ReleaseProfileResource): ReleaseProfileResource;
+}
+
+/**
+ * In-memory `ArrApi` stand-in for pipeline tests (pin, acquire run, webhook
+ * registration): mutable arrays (`series`/`tags`/`profiles`/`releases`/`notifications`)
+ * double as both seed data and the live store the mutating methods read/write, so a test
+ * can seed state up front and read it straight back after exercising the pipeline (e.g.
+ * `client.series[0].tags` after a pin, `client.grabbed` after a grab). Mutating methods
+ * (create/update/delete/grab) are `vi.fn`-wrapped so a test can also assert exact call
+ * args (`toHaveBeenCalledWith`) instead of only inspecting the resulting state.
+ */
+export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
+  let nextTagId = 1;
+  let nextProfileId = 1;
+  let nextNotificationId = 1;
+
+  const client: FakeArrClient = {
+    series: (seed?.series ?? []).map((s) => ({ ...s, tags: [...s.tags] })),
+    movies: seed?.movies ? [...seed.movies] : [],
+    tags: seed?.tags ? [...seed.tags] : [],
+    profiles: seed?.profiles ? [...seed.profiles] : [],
+    releases: seed?.releases ? [...seed.releases] : [],
+    notifications: seed?.notifications ? [...seed.notifications] : [],
+    grabbed: [],
+
+    systemStatus: vi.fn(async (): Promise<unknown> => ({})),
+
+    async listSeries(): Promise<SeriesResource[]> {
+      return client.series.map((s) => ({ ...s, tags: [...s.tags] }));
+    },
+    async listMovies(): Promise<MovieResource[]> {
+      return [...client.movies];
+    },
+    async getSeries(id: number): Promise<SeriesResource> {
+      const s = client.series.find((x) => x.id === id);
+      if (!s) throw new Error(`fakeArrClient: no series with id ${id}`);
+      return { ...s, tags: [...s.tags] };
+    },
+    updateSeries: vi.fn(async (s: SeriesResource): Promise<SeriesResource> => {
+      const idx = client.series.findIndex((x) => x.id === s.id);
+      if (idx === -1) throw new Error(`fakeArrClient: no series with id ${s.id}`);
+      client.series[idx] = { ...s, tags: [...s.tags] };
+      return client.series[idx];
+    }),
+    async searchReleases(): Promise<ReleaseCandidate[]> {
+      return [...client.releases];
+    },
+    grabRelease: vi.fn(async (guid: string, indexerId: number): Promise<void> => {
+      client.grabbed.push({ guid, indexerId });
+    }),
+    async listTags(): Promise<TagResource[]> {
+      return [...client.tags];
+    },
+    createTag: vi.fn(async (label: string): Promise<TagResource> => {
+      const tag: TagResource = { id: nextTagId++, label };
+      client.tags.push(tag);
+      return tag;
+    }),
+    deleteTag: vi.fn(async (id: number): Promise<void> => {
+      client.tags = client.tags.filter((t) => t.id !== id);
+    }),
+    async listReleaseProfiles(): Promise<ReleaseProfileResource[]> {
+      return [...client.profiles];
+    },
+    createReleaseProfile: vi.fn(async (p: ReleaseProfileResource): Promise<ReleaseProfileResource> => {
+      const profile: ReleaseProfileResource = { ...p, id: nextProfileId++ };
+      client.profiles.push(profile);
+      return profile;
+    }),
+    deleteReleaseProfile: vi.fn(async (id: number): Promise<void> => {
+      client.profiles = client.profiles.filter((p) => p.id !== id);
+    }),
+    async listNotifications(): Promise<NotificationSummary[]> {
+      return [...client.notifications];
+    },
+    createNotification: vi.fn(async (body: object): Promise<NotificationSummary> => {
+      const created: NotificationSummary = { id: nextNotificationId++, name: (body as { name: string }).name };
+      client.notifications.push(created);
+      return created;
+    }),
+    deleteNotification: vi.fn(async (id: number): Promise<void> => {
+      client.notifications = client.notifications.filter((n) => n.id !== id);
+    }),
+
+    pushTag(tag: TagResource): TagResource {
+      client.tags.push(tag);
+      return tag;
+    },
+    pushProfile(profile: ReleaseProfileResource): ReleaseProfileResource {
+      client.profiles.push(profile);
+      return profile;
+    },
+  };
+
+  return client;
+}
+
 /**
  * A `ReleaseCandidate` fixture with sane defaults (a realistic 1080p dual-audio-style
  * anime release, ~1.4 GB, 25 seeders, not rejected) — override any field for the case
@@ -117,7 +247,7 @@ export function candidate(overrides?: Partial<ReleaseCandidate>): ReleaseCandida
     indexerId: 1,
     indexer: 'Nyaa',
     title: 'Sousou no Frieren - S01E01 [1080p][Dual Audio][HEVC 10bit]',
-    size: Math.round(1.4 * 1_073_741_824),
+    size: Math.round(1.4 * BYTES_PER_GB),
     seeders: 25,
     leechers: 2,
     rejected: false,
