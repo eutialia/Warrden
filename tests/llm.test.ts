@@ -72,10 +72,11 @@ describe('withFallback', () => {
     }
     expect(thrown).toBe(fallbackError);
     expect((thrown as Error).cause).toBeInstanceOf(AggregateError);
+    // The thrown error itself (the last attempt) is excluded — it's already the top-level
+    // error, so including it in its own `cause` would make it reference itself.
     expect((thrown as Error & { cause: AggregateError }).cause.errors).toEqual([
       primaryError,
       primaryError,
-      fallbackError,
       fallbackError,
     ]);
   });
@@ -108,7 +109,7 @@ describe('AiSdkGenerator', () => {
       const generator = new AiSdkGenerator(cfg);
       await expect(
         generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
-      ).rejects.toThrow(LlmError);
+      ).rejects.toThrow(/Missing API key/);
       expect(generateObjectMock).not.toHaveBeenCalled();
     },
   );
