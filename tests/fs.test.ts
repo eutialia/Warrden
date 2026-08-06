@@ -1,9 +1,28 @@
-import { describe, it, expect } from 'vitest';
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, vi } from 'vitest';
+import { chmodSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 import { mapArrPath } from '../src/fs/paths.js';
 import { walkFiles, atomicCopy, ensureMounts, MountError } from '../src/fs/files.js';
 import { tmpDir } from './helpers.js';
+
+// walkFiles' sort-order test below needs readdirSync to hand back one specific directory's
+// entries in a deliberately non-lexicographic order — real filesystems can't be coerced
+// into that from a test, so it's mocked instead. `readdirState.reverseDir` is unset (real
+// behavior) for every other test in this file, including the `.zfs` pruning test, which
+// relies on the real EACCES from an unreadable directory. `vi.mock` factories are hoisted
+// above imports, so the mutable state has to come from `vi.hoisted` (a plain `const` here
+// would hit a TDZ error).
+const readdirState = vi.hoisted(() => ({ reverseDir: null as string | null }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readdirSync: ((p: unknown, opts: unknown): unknown => {
+      const entries = (actual.readdirSync as (p: unknown, opts: unknown) => unknown)(p, opts);
+      return p === readdirState.reverseDir && Array.isArray(entries) ? [...entries].reverse() : entries;
+    }) as typeof actual.readdirSync,
+  };
+});
 
 describe('mapArrPath', () => {
   const MAPPINGS = [
@@ -62,17 +81,41 @@ describe('walkFiles', () => {
     expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'visible.srt')]);
   });
 
-  it('returns paths in sorted order even when recursive readdir order is not lexicographic', () => {
-    // Node's recursive readdirSync yields top-level entries before descending into
-    // subdirectories, so `b.srt` (top level) is visited before `a/z.srt` (nested) —
-    // the opposite of lexicographic order. Without an explicit sort, walkFiles would
-    // return [b.srt, a/z.srt] here instead of the sorted [a/z.srt, b.srt].
+  it('returns results sorted even when readdir yields entries in a non-lexicographic order', () => {
+    // walkFiles walks depth-first in whatever order readdirSync hands back each directory's
+    // entries — real filesystems often (but aren't guaranteed to) already return entries
+    // lexicographically, which would let a plain two-file fixture pass even with the final
+    // `.sort()` deleted. Forcing a genuinely reversed order via the module mock above is
+    // what makes this test actually discriminate the sort from directory-entry luck.
     const dir = tmpDir();
-    mkdirSync(join(dir, 'a'), { recursive: true });
-    writeFileSync(join(dir, 'a', 'z.srt'), '');
+    writeFileSync(join(dir, 'a.srt'), '');
     writeFileSync(join(dir, 'b.srt'), '');
 
-    expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'a', 'z.srt'), join(dir, 'b.srt')]);
+    readdirState.reverseDir = dir;
+    try {
+      expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'a.srt'), join(dir, 'b.srt')]);
+    } finally {
+      readdirState.reverseDir = null;
+    }
+  });
+
+  it('prunes a dot-directory before ever calling readdir on it', () => {
+    const dir = tmpDir();
+    const hidden = join(dir, '.zfs');
+    mkdirSync(hidden);
+    writeFileSync(join(hidden, 'ghost.srt'), '');
+    writeFileSync(join(dir, 'visible.srt'), '');
+
+    // chmod 0 makes `.zfs` unreadable: post-filtering (checking the dot-prefix only
+    // after readdir has already recursed into every subdirectory) would throw EACCES
+    // trying to list it; pruning by name *before* ever calling readdir on it never
+    // touches the directory at all, so this only passes under real pruning.
+    chmodSync(hidden, 0o000);
+    try {
+      expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'visible.srt')]);
+    } finally {
+      chmodSync(hidden, 0o755);
+    }
   });
 
   it('returns an empty array for a missing directory', () => {
