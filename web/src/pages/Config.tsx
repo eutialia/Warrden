@@ -56,15 +56,13 @@ export default function ConfigPage() {
 
   /** Parses one of the picking number fields, rejecting blank/non-numeric text outright —
    * `Number('')` is `0`, so without this a field the user cleared mid-edit would silently
-   * save as zero instead of blocking the save like the LLM-profiles JSON check does. */
-  function parsePickingNumber(label: string, text: string): number | undefined {
+   * save as zero instead of blocking the save like the LLM-profiles JSON check does. Has
+   * no side effect so the caller can collect every failing field's message rather than
+   * only the last one checked. */
+  function parsePickingNumber(text: string): number | undefined {
     const trimmed = text.trim();
     const value = Number(trimmed);
-    if (trimmed === '' || Number.isNaN(value)) {
-      setPickingError(`${label} must be a number`);
-      return undefined;
-    }
-    return value;
+    return trimmed === '' || Number.isNaN(value) ? undefined : value;
   }
 
   async function handleSave(): Promise<void> {
@@ -82,10 +80,18 @@ export default function ConfigPage() {
     }
 
     setPickingError(null);
-    const seederFloor = parsePickingNumber('Seeder floor', seederFloorText);
-    const minSizeMB = parsePickingNumber('Min size', minSizeMBText);
-    const maxSizeMB = parsePickingNumber('Max size', maxSizeMBText);
+    const seederFloor = parsePickingNumber(seederFloorText);
+    const minSizeMB = parsePickingNumber(minSizeMBText);
+    const maxSizeMB = parsePickingNumber(maxSizeMBText);
     if (seederFloor === undefined || minSizeMB === undefined || maxSizeMB === undefined) {
+      // Collects every failing field's message (not just the last one checked) so the
+      // user can fix them all in one pass instead of one save attempt per field.
+      const messages = [
+        seederFloor === undefined && 'Seeder floor must be a number',
+        minSizeMB === undefined && 'Min size must be a number',
+        maxSizeMB === undefined && 'Max size must be a number',
+      ].filter((m): m is string => m !== false);
+      setPickingError(messages.join('; '));
       toast.error('Picking fields must all be numbers');
       return;
     }
@@ -151,6 +157,7 @@ export default function ConfigPage() {
               <Input
                 type="password"
                 placeholder="API key"
+                autoComplete="new-password"
                 value={arr.apiKey}
                 onChange={(e) => updateArr(i, { apiKey: e.target.value })}
               />
