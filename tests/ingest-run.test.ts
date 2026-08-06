@@ -517,8 +517,56 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(true);
   });
 
+  it('dedupes manual-import items by path across the downloadId + folder scopes before planning: the same leftover file surfacing from both never double-imports', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    fx.client.queue = [
+      { id: 1, seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' },
+    ];
+    // The SAME physical file surfaces from both the stuck downloadId scope and the bundle
+    // folder scope (the arr's own manual-import queue and a plain directory listing agree).
+    const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
+    fx.client.manualImportByScope[`folder:${fx.torrentDir}`] = [item];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, episodeIds: [2] })], 'copy');
+  });
+
+  it('folder-scope root gating: with no downloadRoots configured, the rescue stage never queries a folder scope (dirname-fallback dirs are excluded); the downloadId scope is still queried', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    fx.ctx.config.ingest.downloadRoots = []; // forces the dirname() fallback for the sidecar sweep's own sourceDirsArr
+    fx.client.queue = [
+      { id: 1, seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' },
+    ];
+    const stuckItem = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [stuckItem];
+    // Seeded on a folder scope that must never be queried — if it were, this would ship too.
+    fx.client.manualImportByScope[`folder:${fx.torrentDir}`] = [manualImportItem({ path: '/downloads/Show/Should Not Ship.mkv' })];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1' });
+    expect(fx.client.listManualImport).not.toHaveBeenCalledWith(expect.objectContaining({ folder: expect.anything() }));
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: stuckItem.path })], 'copy');
+  });
+
   it('stuck download (movie): stuck items map 1:1 onto movieId with quality/languages/releaseGroup round-tripped, imported with no LLM call; a folder is never queried', async () => {
-    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    // movieFiles: [] — an unoccupied movie, so the occupied-guard below doesn't intercept it.
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
     fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
     const quality = { quality: { id: 3, name: 'Bluray-1080p' } };
     const languages = [{ id: 1, name: 'Japanese' }];
@@ -546,7 +594,91 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
       [{ path: item.path, folderName: item.folderName, movieId: 7, quality, languages, releaseGroup: item.releaseGroup }],
       'copy',
     );
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(true);
+
+    // Uniform event shape across branches: title in the message, skipped + reasoning in data.
+    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    expect(rescued).toBeTruthy();
+    expect(rescued!.message).toContain('Frieren'); // ingestFixture's default movie title
+    expect(rescued!.data.skipped).toEqual([]);
+    expect(rescued!.data.reasoning).toEqual(expect.any(String));
+  });
+
+  it('movie rescue filter: an item carrying a rejection is dropped, so the command carries only the clean file', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    const rejected = manualImportItem({
+      path: '/downloads/Movie/Sample.mkv',
+      folderName: 'Movie Torrent',
+      rejections: [{ reason: 'sample file' }],
+    });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [clean, rejected];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: clean.path })], 'copy');
+  });
+
+  it('movie rescue filter: an item whose item.movie names a DIFFERENT movie than the job target is dropped', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    const otherMovie = manualImportItem({ path: '/downloads/Movie/Featurette.mkv', folderName: 'Movie Torrent', movie: { id: 999 } });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [clean, otherMovie];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: clean.path })], 'copy');
+  });
+
+  it('movie occupied-guard: a movie that already has a file on disk proposes an attention item instead of executing', async () => {
+    // ingestFixture's default movieFiles seeds one entry — occupied.
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).not.toHaveBeenCalled();
+    const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0]!.data).toEqual({
+      action: 'bundle-import',
+      instance: fx.arrInstance,
+      targetKind: 'movie',
+      targetId: 7,
+      files: [expect.objectContaining({ path: item.path })],
+      reasoning: expect.any(String),
+    });
+  });
+
+  it('movie occupied-guard breaks the re-execution loop: once the movie has a file (post-import), a lingering stuck record proposes instead of re-executing', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
+
+    const job1 = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job1);
+    expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1); // unoccupied -> executed
+    fx.ctx.queue.complete(job1.id); // free the singleton slot so a second job can be claimed below
+
+    // The import landed: the movie now has a file. The arr's queue record for the same
+    // download lingers (it hasn't cleared it yet), so the next run sees it as stuck again.
+    fx.client.movieFiles.push({ id: 200, movieId: 7, relativePath: 'Movie.mkv', path: fx.videoPath });
+    const job2 = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job2);
+
+    expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1); // NOT re-executed
+    const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0]!.data).toMatchObject({ action: 'bundle-import', instance: fx.arrInstance, targetKind: 'movie', targetId: 7 });
   });
 
   it('nothing leftover: listManualImport returns nothing for every scope -> no manual-import command, no attention, no rescue event noise', async () => {

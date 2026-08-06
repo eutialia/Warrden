@@ -66,6 +66,68 @@ describe('AttentionItems', () => {
     expect(items.list()).toHaveLength(2);
   });
 
+  describe('target-key dedupe (data carries instance/targetKind/targetId)', () => {
+    it('collapses cross-job repeat proposals for the same target into one open row, refreshing ts/message/data/job_id to the latest', () => {
+      vi.useFakeTimers();
+      try {
+        const items = new AttentionItems(freshDb());
+        vi.setSystemTime(1_000);
+        const first = items.open({
+          kind: 'ingest.rescue-proposed',
+          message: 'first proposal',
+          jobId: 10,
+          data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a'], reasoning: 'r1' },
+        });
+
+        vi.setSystemTime(2_000);
+        const second = items.open({
+          kind: 'ingest.rescue-proposed',
+          message: 'second proposal',
+          jobId: 11, // a different job re-triggered the same rescue
+          data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a', 'b'], reasoning: 'r2' },
+        });
+
+        expect(second.id).toBe(first.id);
+        expect(items.list()).toHaveLength(1);
+        expect(items.get(first.id)).toMatchObject({
+          ts: 2_000,
+          message: 'second proposal',
+          job_id: 11,
+          data: { instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a', 'b'], reasoning: 'r2' },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps proposals for different targets (series id, instance, or kind) as separate open rows', () => {
+      const items = new AttentionItems(freshDb());
+      items.open({ kind: 'ingest.rescue-proposed', message: 'series 42', jobId: 1, data: { instance: 'sonarr', targetKind: 'series', targetId: 42 } });
+      items.open({ kind: 'ingest.rescue-proposed', message: 'series 43', jobId: 2, data: { instance: 'sonarr', targetKind: 'series', targetId: 43 } });
+      items.open({ kind: 'ingest.rescue-proposed', message: 'radarr movie 42', jobId: 3, data: { instance: 'radarr', targetKind: 'movie', targetId: 42 } });
+
+      expect(items.list()).toHaveLength(3);
+    });
+
+    it('does not dedupe against a target-keyed row that is no longer open', () => {
+      const items = new AttentionItems(freshDb());
+      const data = { instance: 'sonarr', targetKind: 'series', targetId: 42 };
+      const first = items.open({ kind: 'ingest.rescue-proposed', message: 'first', jobId: 1, data });
+      items.setStatus(first.id, 'resolved');
+      const second = items.open({ kind: 'ingest.rescue-proposed', message: 'second', jobId: 2, data });
+      expect(second.id).not.toBe(first.id);
+      expect(items.list()).toHaveLength(2);
+    });
+
+    it('a different kind with the same target does not dedupe (kind is still part of the key)', () => {
+      const items = new AttentionItems(freshDb());
+      const data = { instance: 'sonarr', targetKind: 'series', targetId: 42 };
+      items.open({ kind: 'ingest.rescue-proposed', message: 'first', jobId: 1, data });
+      items.open({ kind: 'ingest.mount-missing', message: 'second', jobId: 1, data });
+      expect(items.list()).toHaveLength(2);
+    });
+  });
+
   describe('setStatus', () => {
     it('transitions an open row and stamps resolved_at', () => {
       vi.useFakeTimers();

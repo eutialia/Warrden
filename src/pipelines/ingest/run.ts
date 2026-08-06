@@ -21,7 +21,7 @@ import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
 import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, SIDECAR_EXTS } from './sidecars.js';
-import { resolveSourceDirs } from './sources.js';
+import { resolveRootDerivedSourceDirs, resolveSourceDirs } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
 export const SETTLE_DEADLINE_MS = 24 * 60 * 60_000;
@@ -70,9 +70,11 @@ type TargetContext = SeriesTargetContext | MovieTargetContext;
  * video, so a whole extra episode file needs its own manual import instead. A
  * high/medium-confidence mapping imports immediately (`copy` mode); a low-confidence one
  * is proposed as an `attention` item instead of executed unattended. Movies only ever
- * rescue a stuck download 1:1 onto `movieId` — leftover movie-folder videos are extras
- * and are never imported. The whole stage runs in its own try/catch so a planning/import
- * failure there can never undo the sidecar work above, or fail the job outright.
+ * rescue a stuck download 1:1 onto `movieId` (dropping rejected/other-movie items first)
+ * — leftover movie-folder videos are extras and are never imported; a movie that already
+ * has a file on disk proposes instead of executing, mirroring the series occupied-episode
+ * cap. The whole stage runs in its own try/catch so a planning/import failure there can
+ * never undo the sidecar work above, or fail the job outright.
  */
 export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> {
   const client = ctx.clients.get(job.arr_instance);
@@ -115,7 +117,9 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   const sidecarPaths = [...new Set(sourceDirsLocal.flatMap((d) => walkFiles(d, SIDECAR_EXTS)))];
   await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths);
 
-  await rescueStuckImports(ctx, job, client, target, assessment, sourceDirsArr);
+  // Narrower than sourceDirsArr on purpose — see resolveRootDerivedSourceDirs's own doc.
+  const bundleFolders = resolveRootDerivedSourceDirs(droppedPaths, ctx.config.ingest.downloadRoots);
+  await rescueStuckImports(ctx, job, client, target, assessment, bundleFolders);
 }
 
 /** Verifies every configured mount marker is present, translating a `MountError` into an
@@ -461,13 +465,13 @@ async function rescueStuckImports(
   client: ArrApi,
   target: TargetContext,
   assessment: QueueAssessment,
-  sourceDirsArr: string[],
+  bundleFolders: string[],
 ): Promise<void> {
   try {
     if (target.kind === 'series') {
-      await rescueSeries(ctx, job, client, target, assessment, sourceDirsArr);
+      await rescueSeries(ctx, job, client, target, assessment, bundleFolders);
     } else {
-      await rescueMovie(ctx, job, client, assessment);
+      await rescueMovie(ctx, job, client, target, assessment);
     }
   } catch (err) {
     ctx.events.append({
@@ -510,14 +514,14 @@ async function rescueSeries(
   client: ArrApi,
   target: SeriesTargetContext,
   assessment: QueueAssessment,
-  sourceDirsArr: string[],
+  bundleFolders: string[],
 ): Promise<void> {
   const stuckDownloadIds = assessment.state === 'stuck' ? assessment.downloadIds : [];
   const seriesId = job.target_id;
 
   const itemsByScope = await Promise.all([
     ...stuckDownloadIds.map((downloadId) => client.listManualImport({ downloadId })),
-    ...sourceDirsArr.map((folder) => client.listManualImport({ folder, seriesId, filterExistingFiles: true })),
+    ...bundleFolders.map((folder) => client.listManualImport({ folder, seriesId, filterExistingFiles: true })),
   ]);
   const items = dedupeManualImportItems(itemsByScope.flat());
 
@@ -562,15 +566,33 @@ async function rescueSeries(
  * Movie rescue: only ever retries a `'stuck'` download's own manual-import queue — a
  * leftover video sitting in a movie's torrent folder that ISN'T the stuck download is an
  * extra (behind-the-scenes, trailer, ...) and must never be imported as the movie itself,
- * so there's no folder-scoped sweep here (unlike the series branch). Each item maps 1:1
- * onto `job.target_id` with `quality`/`languages`/`releaseGroup` round-tripped verbatim —
- * no LLM call, since there's no episode to guess at.
+ * so there's no folder-scoped sweep here (unlike the series branch).
+ *
+ * Two filters run before anything is built into a command, same intent as
+ * `planBundleImport`'s own safety passes for the series branch:
+ * - An item carrying a rejection (the arr already flagged it — wrong format, bad quality,
+ *   ...) is dropped; a stuck import gave up on it, retrying it unattended would too.
+ * - An item whose `movie` names a movie other than `job.target_id` (the arr's own guess,
+ *   when it has one) is dropped — a sample/featurette/other-movie mismatch must never
+ *   ship as this movie's file. An item with no `movie` guess at all still passes through:
+ *   it's exactly the "unresolved, needs 1:1 mapping" case this rescue exists for.
+ *
+ * Surviving items map 1:1 onto `job.target_id` with `quality`/`languages`/`releaseGroup`
+ * round-tripped verbatim — no LLM call, since there's no episode to guess at. If the movie
+ * already has a file on disk (`target.movieFiles`, fetched once up front in
+ * `resolveTarget` — the movie equivalent of the series occupied-episode cap), replacing it
+ * is always a human decision: the command is proposed as an `attention` item instead of
+ * executed, using the same `bundle-import` payload shape the series branch uses. This also
+ * breaks a re-execution loop: without it, a stuck queue record that lingers after a
+ * successful import would re-run (and re-execute) this same rescue every job run.
  */
-async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, assessment: QueueAssessment): Promise<void> {
+async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target: MovieTargetContext, assessment: QueueAssessment): Promise<void> {
   if (assessment.state !== 'stuck') return;
 
   const itemsByScope = await Promise.all(assessment.downloadIds.map((downloadId) => client.listManualImport({ downloadId })));
-  const items = dedupeManualImportItems(itemsByScope.flat());
+  const items = dedupeManualImportItems(itemsByScope.flat()).filter(
+    (item) => item.rejections.length === 0 && (item.movie === undefined || item.movie.id === job.target_id),
+  );
   if (items.length === 0) return;
 
   const files: ManualImportFile[] = items.map((item) => ({
@@ -582,11 +604,38 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, assessm
     releaseGroup: item.releaseGroup,
   }));
 
+  const movieTitle = await resolveTargetTitle(client, job);
+
+  if (target.movieFiles.length > 0) {
+    ctx.events.append({
+      kind: 'ingest.rescue-proposed',
+      level: 'attention',
+      jobId: job.id,
+      message: `Movie rescue for "${movieTitle}" needs review — it already has a file on disk`,
+      data: {
+        action: 'bundle-import',
+        instance: job.arr_instance,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        files,
+        reasoning: `"${movieTitle}" already has a file on disk; replacing it is a human decision`,
+      },
+    });
+    return;
+  }
+
   await client.executeManualImport(files, 'copy');
   ctx.events.append({
     kind: 'ingest.rescued',
     jobId: job.id,
-    message: `Rescued ${files.length} file(s) via manual import`,
-    data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, files },
+    message: `Rescued ${files.length} file(s) for "${movieTitle}" via manual import`,
+    data: {
+      instance: job.arr_instance,
+      targetKind: job.target_kind,
+      targetId: job.target_id,
+      files,
+      skipped: [],
+      reasoning: `stuck download(s) mapped 1:1 onto "${movieTitle}"`,
+    },
   });
 }
