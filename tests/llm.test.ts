@@ -1,6 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LlmError, resolveModel, withFallback } from '../src/llm/generator.js';
+import { z } from 'zod';
+import { AiSdkGenerator, LlmError, resolveModel, withFallback } from '../src/llm/generator.js';
 import { baseConfig } from './helpers.js';
+
+// AiSdkGenerator.generate composes resolveModel + withFallback around `ai`'s generateObject.
+// Mocking just that call keeps these tests network-free while still exercising the real
+// composition (unlike the pure resolveModel/withFallback tests below, which never touch it).
+// `vi.mock` factories are hoisted above imports, so the mock fn must be created via
+// `vi.hoisted` rather than a plain `const` — otherwise the factory would see a TDZ error.
+const { generateObjectMock } = vi.hoisted(() => ({ generateObjectMock: vi.fn() }));
+vi.mock('ai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ai')>();
+  return { ...actual, generateObject: (...args: unknown[]) => generateObjectMock(...args) };
+});
 
 describe('resolveModel', () => {
   it('resolves from the active profile', () => {
@@ -47,5 +59,55 @@ describe('withFallback', () => {
     const attempt = vi.fn().mockRejectedValue(new Error('down'));
     await expect(withFallback(attempt, primary)).rejects.toThrow('down');
     expect(attempt).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('AiSdkGenerator', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  it('propagates LlmError from an unconfigured callsite without calling generateObject', async () => {
+    generateObjectMock.mockReset();
+    const generator = new AiSdkGenerator(baseConfig());
+    await expect(
+      generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
+    ).rejects.toThrow(LlmError);
+    expect(generateObjectMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the configured fallback model after the primary fails twice', async () => {
+    generateObjectMock.mockReset();
+    generateObjectMock
+      .mockRejectedValueOnce(new Error('rate limited'))
+      .mockRejectedValueOnce(new Error('rate limited'))
+      .mockResolvedValue({ object: { ok: true } });
+    const cfg = baseConfig();
+    cfg.llm.profiles.prod['release-pick'] = {
+      provider: 'claude-code',
+      model: 'primary-model',
+      fallback: { provider: 'claude-code', model: 'fallback-model' },
+    };
+    const generator = new AiSdkGenerator(cfg);
+    const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+    expect(result).toEqual({ ok: true });
+    expect(generateObjectMock).toHaveBeenCalledTimes(3);
+    // maxRetries: 0 on every call — the SDK's own retries must not multiply our ladder.
+    expect(generateObjectMock).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
+  });
+
+  it('wraps the final failure into an LlmError carrying the callsite and the original error as cause', async () => {
+    generateObjectMock.mockReset();
+    const original = new Error('down');
+    generateObjectMock.mockRejectedValue(original);
+    const cfg = baseConfig();
+    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    const generator = new AiSdkGenerator(cfg);
+    expect.assertions(3);
+    try {
+      await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(LlmError);
+      expect((err as InstanceType<typeof LlmError>).callsite).toBe('release-pick');
+      expect((err as Error).cause).toBe(original);
+    }
   });
 });

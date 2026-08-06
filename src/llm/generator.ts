@@ -5,7 +5,7 @@ import type { LanguageModel } from 'ai';
 import { generateObject } from 'ai';
 import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import type { z } from 'zod';
-import type { Config } from '../config/schema.js';
+import type { Config, Provider } from '../config/schema.js';
 
 export interface GenerateOpts<T> {
   callsite: string; // e.g. 'release-pick'
@@ -22,22 +22,24 @@ export class LlmError extends Error {
   constructor(
     msg: string,
     public callsite: string,
+    options?: ErrorOptions,
   ) {
-    super(msg);
+    super(msg, options);
     this.name = 'LlmError';
   }
 }
 
 /** A resolved provider + model id, e.g. from a callsite's config entry. */
 export interface ModelRef {
-  provider: string;
+  provider: Provider;
   model: string;
 }
 
 /**
  * Resolves a callsite (e.g. 'release-pick') to its configured model, plus optional
  * fallback, from `cfg.llm.profiles[cfg.llm.activeProfile]`. Throws `LlmError` when the
- * callsite has no entry in the active profile.
+ * callsite has no entry in the active profile. Returns a copy, not the live config
+ * object, so callers can't accidentally mutate `cfg` through it.
  */
 export function resolveModel(cfg: Config, callsite: string): ModelRef & { fallback?: ModelRef } {
   const entry = cfg.llm.profiles[cfg.llm.activeProfile]?.[callsite];
@@ -47,19 +49,20 @@ export function resolveModel(cfg: Config, callsite: string): ModelRef & { fallba
       callsite,
     );
   }
-  return entry;
+  return { ...entry, fallback: entry.fallback ? { ...entry.fallback } : undefined };
 }
 
 /**
  * Runs `attempt` against `primary`, retrying once on failure, then against `fallback`
  * (if configured), retrying once more on failure, in that order: primary, primary,
- * fallback, fallback. Throws the last error once every attempt is exhausted. Pure and
- * AI-SDK-free so the retry/fallback ladder is unit-testable on its own.
+ * fallback, fallback. Throws the last error once every attempt is exhausted. Pure,
+ * AI-SDK-free, and generic over any `{provider, model}`-shaped ref (not just `ModelRef`'s
+ * strict `Provider` union) so the retry/fallback ladder is unit-testable on its own.
  */
-export async function withFallback<T>(
-  attempt: (model: ModelRef) => Promise<T>,
-  primary: ModelRef,
-  fallback?: ModelRef,
+export async function withFallback<T, M extends { provider: string; model: string } = ModelRef>(
+  attempt: (model: M) => Promise<T>,
+  primary: M,
+  fallback?: M,
 ): Promise<T> {
   const models = fallback ? [primary, primary, fallback, fallback] : [primary, primary];
   let lastError: unknown;
@@ -85,11 +88,16 @@ function createModel(cfg: Config, ref: ModelRef, callsite: string): LanguageMode
     case 'claude-code':
       // Subscription OAuth via the Claude Code CLI — no API key needed.
       return createClaudeCode()(ref.model);
-    default:
-      throw new LlmError(`Unknown LLM provider "${ref.provider}"`, callsite);
+    default: {
+      // Exhaustiveness check: fails to compile if `Provider` grows a case not handled above.
+      const unreachable: never = ref.provider;
+      throw new LlmError(`Unknown LLM provider "${String(unreachable)}"`, callsite);
+    }
   }
 }
 
+// Keys come from `cfg.llm.keys` only (not provider SDKs' own env-var fallback) so config.json
+// stays the single source of truth for credentials.
 function requireKey(cfg: Config, provider: 'openrouter' | 'openai' | 'anthropic', callsite: string): string {
   const key = cfg.llm.keys[provider];
   if (!key) {
@@ -113,6 +121,10 @@ export class AiSdkGenerator implements StructuredGenerator {
             schema: opts.schema,
             system: opts.system,
             prompt: opts.prompt,
+            // Our own primary/primary/fallback/fallback ladder owns the retry count;
+            // the AI SDK's default internal retries would otherwise multiply each
+            // ladder slot into up to 3 provider calls of its own.
+            maxRetries: 0,
           });
           return object;
         },
@@ -122,7 +134,9 @@ export class AiSdkGenerator implements StructuredGenerator {
     } catch (err) {
       if (err instanceof LlmError) throw err;
       const message = err instanceof Error ? err.message : String(err);
-      throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite);
+      throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite, {
+        cause: err,
+      });
     }
   }
 }

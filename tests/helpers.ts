@@ -56,24 +56,26 @@ export function baseConfig(): Config {
 /**
  * Fake `StructuredGenerator` for pipeline tests: queue up results (or `Error`s to throw) via
  * the constructor, consumed one per `generate()` call in order. Every call's `opts` is recorded
- * in `calls` so tests can assert on prompts/schemas/callsites without a real LLM.
+ * in `calls` so tests can assert on prompts/schemas/callsites without a real LLM. Queued results
+ * are parsed through `opts.schema`, same as the real generator would validate an LLM response,
+ * so a fixture shaped wrong for the callsite under test fails loudly instead of masking a bug.
  */
 export class FakeGenerator implements StructuredGenerator {
   calls: GenerateOpts<unknown>[] = [];
-  private readonly queue: Array<unknown | Error>;
+  private readonly queue: unknown[];
 
-  constructor(queue: Array<unknown | Error> = []) {
+  constructor(queue: unknown[] = []) {
     this.queue = [...queue];
   }
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
     this.calls.push(opts as GenerateOpts<unknown>);
     if (this.queue.length === 0) {
-      throw new Error('FakeGenerator: no queued result for this call');
+      throw new Error(`FakeGenerator: no queued result for call #${this.calls.length} (callsite "${opts.callsite}")`);
     }
     const next = this.queue.shift();
     if (next instanceof Error) throw next;
-    return next as T;
+    return opts.schema.parse(next);
   }
 }
 

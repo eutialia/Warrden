@@ -60,3 +60,4 @@ export const ConfigSchema = z.object({
 });
 export type Config = z.infer<typeof ConfigSchema>;
 export type ArrInstance = z.infer<typeof ArrInstanceSchema>;
+export type Provider = z.infer<typeof ProviderSchema>;
