@@ -1,25 +1,31 @@
 import { copyFileSync, existsSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 
 const TMP_PREFIX = '.warrden-tmp-';
 
 /**
  * Recursively lists files under `dir` whose extension (case-insensitive) is in `exts`
- * (each given with its leading dot, e.g. `.srt`). Dotfiles and anything whose basename
- * starts with the atomic-copy temp prefix (`.warrden-tmp-`) are skipped — the latter is a
- * copy in flight, never a real sidecar. A missing `dir` returns `[]` rather than throwing,
- * since sweeping an ingest root that hasn't been created yet is a normal, not exceptional,
- * state. Returned paths are absolute and sorted for deterministic ordering.
+ * (each given with its leading dot, e.g. `.srt`). Dotfiles are skipped, as is anything
+ * under a dot-directory — NAS shares commonly carry OS/filesystem housekeeping trees like
+ * `.Trashes`, `.zfs`, or `.AppleDouble`, whose contents must never become sidecar
+ * candidates (this also covers the atomic-copy temp prefix `.warrden-tmp-`, itself a
+ * dotfile: a copy in flight, never a real sidecar). A missing `dir` returns `[]` rather
+ * than throwing, since sweeping an ingest root that hasn't been created yet is a normal,
+ * not exceptional, state. Returned paths are always absolute (resolved against `dir`) and
+ * sorted for deterministic ordering.
  */
 export function walkFiles(dir: string, exts: string[]): string[] {
-  if (!existsSync(dir)) return [];
+  const root = resolve(dir);
+  if (!existsSync(root)) return [];
   const wanted = new Set(exts.map((e) => e.toLowerCase()));
   const results: string[] = [];
-  const entries = readdirSync(dir, { recursive: true, withFileTypes: true });
+  const entries = readdirSync(root, { recursive: true, withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     if (entry.name.startsWith('.')) continue;
-    const ext = entry.name.slice(entry.name.lastIndexOf('.')).toLowerCase();
+    const relDir = relative(root, entry.parentPath);
+    if (relDir.split(sep).some((segment) => segment.startsWith('.'))) continue;
+    const ext = extname(entry.name).toLowerCase();
     if (!wanted.has(ext)) continue;
     results.push(join(entry.parentPath, entry.name));
   }
@@ -30,8 +36,9 @@ export function walkFiles(dir: string, exts: string[]): string[] {
  * Copies `src` to `dest` without ever leaving a partially-written file at `dest`: writes to
  * a `.warrden-tmp-`-prefixed sibling first, then renames it into place (`rename` is atomic
  * on the same filesystem). The temp file is unlinked on any failure — including a failed
- * `copyFileSync` — so a crash mid-copy never leaves a `.warrden-tmp-*` file for `walkFiles`
- * (or a human) to trip over.
+ * `copyFileSync` or `renameSync` — so a crash mid-copy never leaves a `.warrden-tmp-*` file
+ * for `walkFiles` (or a human) to trip over. The cleanup unlink has its own try/catch so a
+ * failure to remove the temp file can't mask the original error.
  */
 export function atomicCopy(src: string, dest: string): void {
   const tmp = join(dirname(dest), TMP_PREFIX + basename(dest));
@@ -39,14 +46,18 @@ export function atomicCopy(src: string, dest: string): void {
     copyFileSync(src, tmp);
     renameSync(tmp, dest);
   } catch (err) {
-    if (existsSync(tmp)) unlinkSync(tmp);
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      // best-effort cleanup — the original error below is the one that matters
+    }
     throw err;
   }
 }
 
 /** Thrown by `ensureMounts` when one or more expected mount markers are absent. */
 export class MountError extends Error {
-  missing: string[];
+  readonly missing: string[];
 
   constructor(missing: string[]) {
     super(`missing mount marker(s): ${missing.join(', ')}`);

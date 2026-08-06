@@ -11,16 +11,19 @@ export interface PathMapping {
  * or starts with `from` followed by a path separator — a bare prefix match would wrongly
  * rewrite `/data/downloadsX` under a `/data/downloads` mapping. When more than one mapping
  * applies, the longest `from` wins (the more specific mapping). No applicable mapping
- * returns `p` unchanged.
+ * returns `p` unchanged. Trailing slashes on both `from` and `to` are stripped before use —
+ * these mapped paths get stored/compared later (e.g. provenance rows), so a stray trailing
+ * slash on either side would otherwise leak a `//` artifact into the result.
  */
 export function mapArrPath(mappings: PathMapping[], p: string): string {
   let best: PathMapping | undefined;
   for (const mapping of mappings) {
     const from = mapping.from.replace(/\/+$/, '');
+    const to = mapping.to.replace(/\/+$/, '');
     const applies = p === from || p.startsWith(from + '/');
     if (!applies) continue;
     if (!best || from.length > best.from.length) {
-      best = { from, to: mapping.to };
+      best = { from, to };
     }
   }
   if (!best) return p;

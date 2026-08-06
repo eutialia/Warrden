@@ -12,13 +12,23 @@ describe('mapArrPath', () => {
   ];
 
   it.each([
-    ['/data/downloads/t/a.mkv', '/mnt/nas/downloads/t/a.mkv'], // longest prefix wins
-    ['/data/library/Show/a.mkv', '/mnt/nas/data/library/Show/a.mkv'],
-    ['/elsewhere/a.mkv', '/elsewhere/a.mkv'], // no mapping → unchanged
-    ['/data/downloadsX/a.mkv', '/mnt/nas/data/downloadsX/a.mkv'], // prefix must end at a path segment
-    ['/data/downloads', '/mnt/nas/downloads'], // exact dir match
-  ])('maps %s -> %s', (input, expected) => {
-    expect(mapArrPath(MAPPINGS, input)).toBe(expected);
+    { mappings: MAPPINGS, input: '/data/downloads/t/a.mkv', expected: '/mnt/nas/downloads/t/a.mkv' }, // longest prefix wins
+    { mappings: MAPPINGS, input: '/data/library/Show/a.mkv', expected: '/mnt/nas/data/library/Show/a.mkv' },
+    { mappings: MAPPINGS, input: '/elsewhere/a.mkv', expected: '/elsewhere/a.mkv' }, // no mapping → unchanged
+    { mappings: MAPPINGS, input: '/data/downloadsX/a.mkv', expected: '/mnt/nas/data/downloadsX/a.mkv' }, // prefix must end at a path segment
+    { mappings: MAPPINGS, input: '/data/downloads', expected: '/mnt/nas/downloads' }, // exact dir match
+    {
+      mappings: [{ from: '/data/downloads/', to: '/mnt/nas/downloads' }],
+      input: '/data/downloads/t/a.mkv',
+      expected: '/mnt/nas/downloads/t/a.mkv',
+    }, // trailing slash on `from` is stripped before matching
+    {
+      mappings: [{ from: '/data', to: '/mnt/nas/data/' }],
+      input: '/data/x.mkv',
+      expected: '/mnt/nas/data/x.mkv',
+    }, // trailing slash on `to` is stripped too (avoid a `//` artifact in the result)
+  ])('maps $input -> $expected', ({ mappings, input, expected }) => {
+    expect(mapArrPath(mappings, input)).toBe(expected);
   });
 });
 
@@ -31,7 +41,7 @@ describe('walkFiles', () => {
     writeFileSync(join(dir, 'ignored.txt'), '');
 
     const result = walkFiles(dir, ['.srt', '.ass']);
-    expect(result).toEqual([join(dir, 'a.srt'), join(dir, 'sub', 'b.ASS')].sort());
+    expect(result).toEqual([join(dir, 'a.srt'), join(dir, 'sub', 'b.ASS')]);
   });
 
   it('skips dotfiles and .warrden-tmp- prefixed files', () => {
@@ -43,12 +53,26 @@ describe('walkFiles', () => {
     expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'visible.srt')]);
   });
 
-  it('returns sorted absolute paths', () => {
+  it('skips files under dot-directories (NAS housekeeping trees like .Trashes/.zfs/.AppleDouble)', () => {
     const dir = tmpDir();
-    writeFileSync(join(dir, 'z.srt'), '');
-    writeFileSync(join(dir, 'a.srt'), '');
+    mkdirSync(join(dir, '.recycle'), { recursive: true });
+    writeFileSync(join(dir, '.recycle', 'ghost.srt'), '');
+    writeFileSync(join(dir, 'visible.srt'), '');
 
-    expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'a.srt'), join(dir, 'z.srt')]);
+    expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'visible.srt')]);
+  });
+
+  it('returns paths in sorted order even when recursive readdir order is not lexicographic', () => {
+    // Node's recursive readdirSync yields top-level entries before descending into
+    // subdirectories, so `b.srt` (top level) is visited before `a/z.srt` (nested) —
+    // the opposite of lexicographic order. Without an explicit sort, walkFiles would
+    // return [b.srt, a/z.srt] here instead of the sorted [a/z.srt, b.srt].
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'a'), { recursive: true });
+    writeFileSync(join(dir, 'a', 'z.srt'), '');
+    writeFileSync(join(dir, 'b.srt'), '');
+
+    expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'a', 'z.srt'), join(dir, 'b.srt')]);
   });
 
   it('returns an empty array for a missing directory', () => {
@@ -93,16 +117,21 @@ describe('atomicCopy', () => {
     expect(readFileSync(dest, 'utf8')).toBe('new content');
   });
 
-  it('does not leave a temp file behind when the copy fails', () => {
+  it('does not leave a temp file behind when the rename into place fails', () => {
     const dir = tmpDir();
-    const src = join(dir, 'does-not-exist.txt');
-    const dest = join(dir, 'dest.txt');
+    const src = join(dir, 'src.txt');
+    // `dest` is a directory, not a file: copyFileSync to the temp sibling succeeds, but
+    // renameSync onto an existing directory throws EISDIR — this is what actually
+    // exercises the cleanup unlink (a missing src, by contrast, fails before the temp
+    // file is ever created, so it never touches the cleanup path at all).
+    const dest = join(dir, 'dest');
+    writeFileSync(src, 'content');
+    mkdirSync(dest);
 
     expect(() => atomicCopy(src, dest)).toThrow();
 
     const leftovers = readdirSync(dir).filter((f) => f.startsWith('.warrden-tmp-'));
     expect(leftovers).toEqual([]);
-    expect(existsSync(dest)).toBe(false);
   });
 });
 
