@@ -91,6 +91,40 @@ export class FakeGenerator implements StructuredGenerator {
   }
 }
 
+/**
+ * Directly seeds a `managed_objects` row for a `warrden-` tag and/or its release profile,
+ * bypassing `pinReleaseGroup` — for reconcile/GC tests that need a registry row already in
+ * place (at a specific `createdAt`, often backdated past GC's grace window) without caring
+ * how it got there. Pass only `tag` or only `profile` for a test that seeds one without the
+ * other (e.g. a tag registered without ever getting a matching profile row).
+ */
+export function seedManagedPin(
+  db: Database.Database,
+  opts: {
+    arrInstance: string;
+    group: string;
+    createdAt: number;
+    tag?: { id: number; label: string };
+    // `id` is optional here only to accept a `pushProfile()` return value as-is (its type
+    // is the general `ReleaseProfileResource`, whose `id` is optional for the create-body
+    // case) — `pushProfile` itself always assigns one, so this asserts that rather than
+    // widening every caller to handle a case that can't actually happen in a test.
+    profile?: { id?: number; name: string };
+  },
+): void {
+  const data = JSON.stringify({ group: opts.group });
+  const insert = db.prepare(
+    `INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  if (opts.tag) {
+    insert.run(opts.arrInstance, 'tag', opts.tag.id, opts.tag.label, data, opts.createdAt);
+  }
+  if (opts.profile) {
+    if (opts.profile.id === undefined) throw new Error('seedManagedPin: profile.id is required');
+    insert.run(opts.arrInstance, 'release_profile', opts.profile.id, opts.profile.name, data, opts.createdAt);
+  }
+}
+
 /** A valid `ArrInstance` config entry, defaulting to a `sonarr` instance named "sonarr". */
 export function arrInstance(overrides?: Partial<ArrInstance>): ArrInstance {
   return {

@@ -105,6 +105,20 @@ export class JobQueue {
     return tx.immediate();
   }
 
+  /** Whether any job (any status — pending, running, done, or failed) already exists for
+   * this exact (pipeline, arrInstance, targetKind, targetId) target. Unlike the
+   * pending/running-only twin check inside `enqueue()`, this also matches a job that has
+   * already finished — e.g. a webhook-triggered acquire that ran to completion before a
+   * later reconcile pass sees the same target and would otherwise mistake it for missed. */
+  hasJobFor(pipeline: string, arrInstance: string, targetKind: TargetKind, targetId: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM jobs WHERE pipeline = ? AND arr_instance = ? AND target_kind = ? AND target_id = ? LIMIT 1`,
+      )
+      .get(pipeline, arrInstance, targetKind, targetId);
+    return row !== undefined;
+  }
+
   claim(now: number = Date.now()): JobRow | null {
     const row = this.db
       .prepare(

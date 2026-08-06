@@ -1,8 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ConfigSchema } from '../src/config/schema.js';
+import { ManagedObjects } from '../src/db/managedObjects.js';
+import { SyncState } from '../src/db/syncState.js';
 import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
 import { reconcile } from '../src/reconcile/reconcile.js';
-import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seriesResource } from './helpers.js';
+import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource } from './helpers.js';
 
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
 
@@ -31,6 +33,75 @@ describe('reconcile', () => {
     await reconcile(ctx);
     expect(ctx.queue.claim()).toMatchObject({ pipeline: 'acquire', target_id: 9 });
   });
+  it('does not double-enqueue a target that already has an acquire job (e.g. a webhook already ran it) before reconcile ever saw it — just catches `seen` up; a genuinely new target still enqueues', async () => {
+    const client = fakeArrClient({ series: [series(1)] });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    await reconcile(ctx); // bootstrap: series(1) already seen
+
+    // A webhook adds series(2) and its acquire job runs to completion — all before
+    // reconcile's next pass, so `seen:sonarr` doesn't know about id 2 yet.
+    client.series.push(series(2));
+    ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 2, arrInstance: 'sonarr', payload: { title: 'S2' } });
+    ctx.queue.complete(ctx.queue.claim()!.id);
+
+    // A genuinely new series with no job at all.
+    client.series.push(series(3));
+
+    await reconcile(ctx);
+
+    // series(2) was not re-enqueued — the only claimable job is series(3)'s.
+    expect(ctx.queue.claim()).toMatchObject({ target_id: 3 });
+    expect(ctx.queue.claim()).toBeNull();
+
+    const event = ctx.events.list().find((e) => e.kind === 'reconcile.missed-adds')!;
+    expect(event.data).toMatchObject({ count: 1, ids: [3], alreadyHandled: 1 });
+  });
+
+  it('skips an instance whose ctx.clients name has no matching arrs[] entry (e.g. renamed/removed via a live config PUT) — no list calls, a single config-drift warn, other instances unaffected', async () => {
+    const drifted = fakeArrClient({ series: [series(1)] });
+    const healthy = fakeArrClient({ series: [series(2)] });
+    const ctx = makeCtx({
+      config: ConfigSchema.parse({ arrs: [arrInstance({ name: 'healthy', kind: 'sonarr', baseUrl: 'http://healthy:0' })] }),
+      clients: new Map([
+        ['sonarr', drifted], // stale name: ctx.clients still has it, but config.arrs no longer does
+        ['healthy', healthy],
+      ]),
+    });
+
+    await reconcile(ctx);
+
+    expect(drifted.listMovies).not.toHaveBeenCalled(); // fetchInstanceResources never ran for it
+    expect(new SyncState(ctx.db).read('bootstrap:sonarr')).toBeUndefined(); // reconcileInstance never ran either
+
+    const driftEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.config-drift');
+    expect(driftEvents).toHaveLength(1);
+    expect(driftEvents[0]).toMatchObject({ level: 'warn', data: { instance: 'sonarr' } });
+    expect(driftEvents[0]!.message).toContain('sonarr');
+
+    // The healthy instance bootstrapped normally, unaffected by the drifted one.
+    expect(ctx.events.list().some((e) => e.kind === 'reconcile.bootstrapped' && e.data?.instance === 'healthy')).toBe(true);
+  });
+
+  it('a gc() failure that escapes its own per-instance handling is caught as reconcile.gc-failed-global, and reconcile() still resolves', async () => {
+    const client = fakeArrClient({ series: [series(1)] });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const listSpy = vi.spyOn(ManagedObjects.prototype, 'list').mockImplementation(() => {
+      throw new Error('managed_objects table is gone');
+    });
+
+    await expect(reconcile(ctx)).resolves.toBeUndefined();
+
+    const failedEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.gc-failed-global');
+    expect(failedEvents).toHaveLength(1);
+    expect(failedEvents[0]).toMatchObject({ level: 'warn' });
+    expect(failedEvents[0]!.message).toContain('managed_objects table is gone');
+
+    // The missed-adds phase, independent of GC, still ran normally.
+    expect(ctx.events.list().some((e) => e.kind === 'reconcile.bootstrapped')).toBe(true);
+
+    listSpy.mockRestore();
+  });
+
   // GC gives every registry row one full reconcile interval of "grace" before it's even a
   // deletion candidate (see the TOCTOU test below) — these fixtures backdate `created_at`
   // past that window (default interval 15 minutes) so they exercise deletion itself, not
@@ -42,10 +113,7 @@ describe('reconcile', () => {
     const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('warrden-deadgroup');
     const prof = client.pushProfile({ name: 'warrden: [DeadGroup]', enabled: true, required: ['DeadGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
-    const created = wellPastGrace();
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('sonarr','tag',?,?,'{"group":"DeadGroup"}',?), ('sonarr','release_profile',?,?,'{"group":"DeadGroup"}',?)`)
-      .run(tag.id, tag.label, created, prof.id, prof.name, created);
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'DeadGroup', createdAt: wellPastGrace(), tag, profile: prof });
     await reconcile(ctx);
     expect(client.tags).toHaveLength(0);
     expect(client.profiles).toHaveLength(0);
@@ -59,10 +127,7 @@ describe('reconcile', () => {
     client.series.push(series(1, [tag.id]));
     const prof = client.pushProfile({ name: 'warrden: [LiveGroup]', enabled: true, required: ['LiveGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
     const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
-    const created = wellPastGrace();
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('sonarr','tag',?,?,'{"group":"LiveGroup"}',?), ('sonarr','release_profile',?,?,'{"group":"LiveGroup"}',?)`)
-      .run(tag.id, tag.label, created, prof.id, prof.name, created);
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'LiveGroup', createdAt: wellPastGrace(), tag, profile: prof });
     await reconcile(ctx);
     expect(client.tags).toHaveLength(1);
     expect(client.profiles).toHaveLength(1);
@@ -76,17 +141,19 @@ describe('reconcile', () => {
     // "DeadGroup": registered in managed_objects, but nothing in the arr's live tag/profile
     // lists matches — e.g. deleted directly from Sonarr's UI, or a previous GC pass crashed
     // between the arr-side delete and this registry cleanup.
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('sonarr','tag',9001,'warrden-deadgroup','{"group":"DeadGroup"}',?),
-      ('sonarr','release_profile',9002,'warrden: [DeadGroup]','{"group":"DeadGroup"}',?)`).run(created, created);
+    seedManagedPin(ctx.db, {
+      arrInstance: 'sonarr',
+      group: 'DeadGroup',
+      createdAt: created,
+      tag: { id: 9001, label: 'warrden-deadgroup' },
+      profile: { id: 9002, name: 'warrden: [DeadGroup]' },
+    });
 
     // "OtherGroup": a real, still-orphaned pair — proves the stale row above didn't abort
     // the rest of this instance's GC.
     const tag = client.pushTag('warrden-othergroup');
     const prof = client.pushProfile({ name: 'warrden: [OtherGroup]', enabled: true, required: ['OtherGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('sonarr','tag',?,?,'{"group":"OtherGroup"}',?), ('sonarr','release_profile',?,?,'{"group":"OtherGroup"}',?)`)
-      .run(tag.id, tag.label, created, prof.id, prof.name, created);
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'OtherGroup', createdAt: created, tag, profile: prof });
 
     await expect(reconcile(ctx)).resolves.toBeUndefined();
 
@@ -103,10 +170,8 @@ describe('reconcile', () => {
     const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('warrden-freshgroup');
     const prof = client.pushProfile({ name: 'warrden: [FreshGroup]', enabled: true, required: ['FreshGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
-    const now = Date.now(); // freshly "registered" — well within the grace window
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('sonarr','tag',?,?,'{"group":"FreshGroup"}',?), ('sonarr','release_profile',?,?,'{"group":"FreshGroup"}',?)`)
-      .run(tag.id, tag.label, now, prof.id, prof.name, now);
+    // freshly "registered" — well within the grace window
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'FreshGroup', createdAt: Date.now(), tag, profile: prof });
 
     await reconcile(ctx);
 
@@ -122,10 +187,7 @@ describe('reconcile', () => {
     // Simulates pinReleaseGroup adopting a *user's* profile by tag membership (see its
     // matching comment) — its name was never "warrden: ...".
     const prof = client.pushProfile({ name: 'My Custom Profile', enabled: true, required: [], ignored: [], tags: [tag.id], indexerId: 0 });
-    const created = wellPastGrace();
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('sonarr','tag',?,?,'{"group":"Adopted"}',?), ('sonarr','release_profile',?,?,'{"group":"Adopted"}',?)`)
-      .run(tag.id, tag.label, created, prof.id, prof.name, created);
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'Adopted', createdAt: wellPastGrace(), tag, profile: prof });
 
     await reconcile(ctx);
 
@@ -152,12 +214,7 @@ describe('reconcile', () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the registered tag looks unused
     const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('user-tag'); // not warrden-owned, but somehow ended up registered
-    const created = wellPastGrace();
-    ctx.db
-      .prepare(
-        `INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES ('sonarr','tag',?,?,'{"group":"Mystery"}',?)`,
-      )
-      .run(tag.id, tag.label, created);
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'Mystery', createdAt: wellPastGrace(), tag });
 
     await reconcile(ctx);
 
@@ -174,10 +231,7 @@ describe('reconcile', () => {
     const ctx = makeCtx({ config: configWithArrs('radarr'), clients: new Map([['radarr', client]]) });
     const tag = client.pushTag('warrden-somegroup');
     const prof = client.pushProfile({ name: 'warrden: [SomeGroup]', enabled: true, required: ['SomeGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
-    const created = wellPastGrace();
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('radarr','tag',?,?,'{"group":"SomeGroup"}',?), ('radarr','release_profile',?,?,'{"group":"SomeGroup"}',?)`)
-      .run(tag.id, tag.label, created, prof.id, prof.name, created);
+    seedManagedPin(ctx.db, { arrInstance: 'radarr', group: 'SomeGroup', createdAt: wellPastGrace(), tag, profile: prof });
 
     await reconcile(ctx);
 
@@ -228,23 +282,8 @@ describe('reconcile', () => {
         ['healthy', healthyClient],
       ]),
     });
-    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
-      ('broken','tag',?,?,'{"group":"BrokenGroup"}',?), ('broken','release_profile',?,?,'{"group":"BrokenGroup"}',?),
-      ('healthy','tag',?,?,'{"group":"HealthyGroup"}',?), ('healthy','release_profile',?,?,'{"group":"HealthyGroup"}',?)`)
-      .run(
-        brokenTag.id,
-        brokenTag.label,
-        created,
-        brokenProf.id,
-        brokenProf.name,
-        created,
-        healthyTag.id,
-        healthyTag.label,
-        created,
-        healthyProf.id,
-        healthyProf.name,
-        created,
-      );
+    seedManagedPin(ctx.db, { arrInstance: 'broken', group: 'BrokenGroup', createdAt: created, tag: brokenTag, profile: brokenProf });
+    seedManagedPin(ctx.db, { arrInstance: 'healthy', group: 'HealthyGroup', createdAt: created, tag: healthyTag, profile: healthyProf });
 
     await expect(reconcile(ctx)).resolves.toBeUndefined();
 

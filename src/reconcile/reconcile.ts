@@ -4,10 +4,10 @@ import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { SyncState } from '../db/syncState.js';
 import type { TargetKind } from '../jobs/queue.js';
-import { WARRDEN_TAG_PREFIX } from '../pipelines/acquire/pin.js';
+import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../pipelines/acquire/pin.js';
+import { errorMessage } from '../util/errors.js';
 
 const RECONCILE_SOURCE = 'reconcile';
-const WARRDEN_PROFILE_PREFIX = 'warrden: ';
 
 interface Resource {
   id: number;
@@ -21,7 +21,9 @@ interface Resource {
  * collects `warrden-` tags/profiles nothing needs anymore. Never throws — a failure
  * against one instance is reported as a `warn` event and does not stop the rest, and the
  * two phases (missed-adds, then GC) are independent so a GC bug can't block missed-add
- * detection or vice versa.
+ * detection or vice versa; GC itself is wrapped in its own try/catch too, so even a
+ * failure building its own bookkeeping (not just a per-instance failure inside it) can't
+ * escape and crash the caller (`scheduleReconcile`'s own net is strictly a last resort).
  *
  * The very first reconciliation for a given instance is a *bootstrap*, not a catch-up: an
  * instance's whole existing library would otherwise look "missed" and mass-enqueue every
@@ -34,6 +36,23 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   const seriesByInstance = new Map<string, SeriesResource[]>();
 
   for (const [name, client] of ctx.clients) {
+    // `ctx.clients` (built once at startup) and `ctx.config.arrs` (live — a `PUT
+    // /api/config` reassigns it immediately) can drift: renaming or removing an arr
+    // instance leaves its old `ArrClient` in `ctx.clients` under a name `instanceKind`
+    // no longer recognizes. Guessing at its kind would make `fetchInstanceResources` call
+    // BOTH list endpoints, and the one the real arr flavor doesn't implement 404s — taking
+    // this whole instance's reconcile+GC down every single pass until a restart rebuilds
+    // `ctx.clients`. Skip it outright instead, touching neither `seen` nor GC.
+    if (instanceKind(ctx, name) === undefined) {
+      ctx.events.append({
+        kind: 'reconcile.config-drift',
+        level: 'warn',
+        message: `Skipping reconcile for "${name}" — no matching arrs[] entry in the current config (renamed or removed since this process started); restart to pick up the change`,
+        data: { instance: name },
+      });
+      continue;
+    }
+
     try {
       const { series, movies } = await fetchInstanceResources(ctx, name, client);
       seriesByInstance.set(name, series);
@@ -42,19 +61,29 @@ export async function reconcile(ctx: AppContext): Promise<void> {
       ctx.events.append({
         kind: 'reconcile.failed',
         level: 'warn',
-        message: `Reconcile failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        message: `Reconcile failed for "${name}": ${errorMessage(err)}`,
         data: { instance: name },
       });
     }
   }
 
-  await gc(ctx, seriesByInstance);
+  try {
+    await gc(ctx, seriesByInstance);
+  } catch (err) {
+    ctx.events.append({
+      kind: 'reconcile.gc-failed-global',
+      level: 'warn',
+      message: `GC pass crashed outright, before/beyond its own per-instance handling: ${errorMessage(err)}`,
+    });
+  }
 }
 
 /** The configured `kind` for arr instance `name`, or `undefined` if it isn't in
- * `ctx.config.arrs` at all — only really happens for an `ArrApi` registered without
- * matching config (in practice, only in tests: `main()` always builds `ctx.clients`
- * straight from `ctx.config.arrs`). */
+ * `ctx.config.arrs` at all. Not just a theoretical/test-only case: a `PUT /api/config`
+ * that renames or drops an arr instance updates `ctx.config` immediately, while
+ * `ctx.clients` keeps the old `ArrClient` under its old name until a restart rebuilds it
+ * (see the README's config docs) — `reconcile()`'s instance loop above checks this and
+ * skips rather than guesses. */
 function instanceKind(ctx: AppContext, name: string): ArrInstance['kind'] | undefined {
   return ctx.config.arrs.find((a) => a.name === name)?.kind;
 }
@@ -101,22 +130,38 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
   const seenIds = new Set<number>(syncState.read<number[]>(seenKey) ?? []);
   const missed = resources.filter((r) => !seenIds.has(r.id));
 
+  const enqueuedIds: number[] = [];
+  let alreadyHandled = 0;
+
   for (const r of missed) {
-    ctx.queue.enqueue({
-      pipeline: 'acquire',
-      targetKind: r.kind,
-      targetId: r.id,
-      arrInstance: name,
-      payload: { title: r.title, source: RECONCILE_SOURCE },
-    });
+    // `seen` is only ever written by reconcile itself, so a series/movie a webhook already
+    // enqueued (and possibly already ran to completion) looks exactly like a genuine miss
+    // the very first time reconcile sees it. Enqueuing again would duplicate the grab (and
+    // the LLM spend behind it) once the webhook's own job runs — checking for ANY existing
+    // job for this target (any status, not just pending/running) catches that case, and
+    // this pass just catches `seen` up to match instead.
+    if (ctx.queue.hasJobFor('acquire', name, r.kind, r.id)) {
+      alreadyHandled++;
+    } else {
+      ctx.queue.enqueue({
+        pipeline: 'acquire',
+        targetKind: r.kind,
+        targetId: r.id,
+        arrInstance: name,
+        payload: { title: r.title, source: RECONCILE_SOURCE },
+      });
+      enqueuedIds.push(r.id);
+    }
     seenIds.add(r.id);
   }
 
   if (missed.length > 0) {
     ctx.events.append({
       kind: 'reconcile.missed-adds',
-      message: `Enqueued ${missed.length} item(s) on "${name}" missed by webhooks`,
-      data: { instance: name, count: missed.length, ids: missed.map((r) => r.id) },
+      message: `Enqueued ${enqueuedIds.length} item(s) on "${name}" missed by webhooks${
+        alreadyHandled > 0 ? ` (${alreadyHandled} already had a job and needed no re-enqueue)` : ''
+      }`,
+      data: { instance: name, count: enqueuedIds.length, ids: enqueuedIds, alreadyHandled },
     });
   }
 
@@ -171,7 +216,7 @@ async function gc(ctx: AppContext, seriesByInstance: Map<string, SeriesResource[
       ctx.events.append({
         kind: 'reconcile.gc-failed',
         level: 'warn',
-        message: `GC failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        message: `GC failed for "${name}": ${errorMessage(err)}`,
         data: { instance: name },
       });
     }
@@ -203,7 +248,7 @@ async function gcInstance(
       ctx.events.append({
         kind: 'reconcile.gc-row-failed',
         level: 'warn',
-        message: `GC failed for tag id ${tagRow.external_id} on "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        message: `GC failed for tag id ${tagRow.external_id} on "${name}": ${errorMessage(err)}`,
         data: { instance: name, tagId: tagRow.external_id },
       });
     }
