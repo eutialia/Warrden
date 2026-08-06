@@ -9,6 +9,8 @@ import type { StructuredGenerator } from './llm/generator.js';
 export interface AppContext {
   db: Database.Database;
   config: Config;
+  // where config.json (and, via `openDb`, warrden.db) lives — PUT /api/config needs it to persist
+  dataDir: string;
   queue: JobQueue;
   events: EventLog;
   // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly

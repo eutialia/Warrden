@@ -40,7 +40,8 @@ export function freshDb(): Database.Database {
 
 /**
  * Builds a real `AppContext` backed by a fresh temp db, wired with a real queue and
- * event log, default config, and an empty arr clients map. Individual fields can be
+ * event log, default config, its own fresh temp `dataDir` (for `PUT /api/config` to
+ * `saveConfig` into), and an empty arr clients map. Individual fields can be
  * swapped via `overrides` — notably `db`: if given, `queue`/`events` are built on
  * *that* db (not a second, orphaned one), so a caller providing its own db can still
  * see everything the queue/event log write.
@@ -50,6 +51,7 @@ export function makeCtx(overrides?: Partial<AppContext>): AppContext {
   return {
     db,
     config: ConfigSchema.parse({}),
+    dataDir: tmpDir(),
     queue: new JobQueue(db),
     events: new EventLog(db),
     clients: new Map<string, ArrApi>(),

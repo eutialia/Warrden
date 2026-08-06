@@ -25,6 +25,7 @@ function buildContext(dataDir: string): AppContext {
   return {
     db,
     config,
+    dataDir,
     queue: new JobQueue(db),
     events: new EventLog(db),
     clients,
