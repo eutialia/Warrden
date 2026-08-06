@@ -25,6 +25,7 @@ export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): Poli
     'If no candidate is viable given those preferences, declare none viable instead of forcing a pick.',
     'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
     "Answer with the candidate's number (the # prefix on its line in the list, e.g. 2 for \"#2 [...]\") — not its title or any other identifier.",
+    'When you pick, also extract the release group — the fansub/release group name in the picked title, usually bracketed at the start or end — into releaseGroup; use null only if no group is identifiable.',
     'Respond with JSON matching the schema provided — no prose outside the JSON.',
   ].join(' ');
 

@@ -12,16 +12,29 @@ import { synthesizePolicyPrompt } from './policy.js';
  * the real candidate (and its guid) internally; see `PickResultSchema` below for the
  * shape callers of `pickRelease` actually get back.
  */
-const LlmPickResponseSchema = z.discriminatedUnion('decision', [
-  z.object({
-    decision: z.literal('pick'),
-    candidate: z.number().int(),
-    releaseGroup: z.string().nullable(),
-    confidence: z.enum(['high', 'medium', 'low']),
+// A flat object, NOT a discriminated union: providers that take the schema as a tool /
+// structured-output definition (Anthropic, OpenAI json_schema, claude-code) require a
+// root-level `type: "object"`, and a union serializes to a bare `anyOf` they 400 on.
+// The pick-only fields are nullable instead; the superRefine enforces the pairing.
+const LlmPickResponseSchema = z
+  .object({
+    decision: z.enum(['pick', 'none']),
+    candidate: z.number().int().nullable().default(null),
+    releaseGroup: z
+      .string()
+      .nullable()
+      .default(null)
+      .describe(
+        'The release/fansub group name extracted from the picked candidate title (often bracketed, e.g. "[SubsPlease]" or "[喵萌奶茶屋&LoliHouse]"); null only when no group is identifiable',
+      ),
+    confidence: z.enum(['high', 'medium', 'low']).nullable().default(null),
     reasoning: z.string(),
-  }),
-  z.object({ decision: z.literal('none'), reasoning: z.string() }),
-]);
+  })
+  .superRefine((v, ctx) => {
+    if (v.decision === 'pick' && v.candidate === null) {
+      ctx.addIssue({ code: 'custom', path: ['candidate'], message: 'candidate number is required when decision is "pick"' });
+    }
+  });
 
 /** External shape `pickRelease` resolves to — a `guid`, not the candidate number the LLM
  * actually answered with, so every other caller (`run.ts`, tests) keeps working against a
@@ -87,8 +100,12 @@ export async function pickRelease(input: {
     prompt,
   });
 
-  if (result.decision === 'none') return result;
+  if (result.decision === 'none') return { decision: 'none', reasoning: result.reasoning };
 
+  // Unreachable after the schema's superRefine, but keeps the nullable type honest.
+  if (result.candidate === null) {
+    throw new LlmError('LLM said "pick" without a candidate number', CALLSITE);
+  }
   const picked = candidates[result.candidate - 1];
   if (!picked) {
     throw new LlmError(
@@ -101,7 +118,7 @@ export async function pickRelease(input: {
     decision: 'pick',
     guid: picked.guid,
     releaseGroup: result.releaseGroup,
-    confidence: result.confidence,
+    confidence: result.confidence ?? 'low',
     reasoning: result.reasoning,
   };
 }

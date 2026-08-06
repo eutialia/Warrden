@@ -28,6 +28,9 @@ type QueryValue = string | number | boolean | undefined;
 // leave a job (and the runner's single-tick-at-a-time poll loop) stuck forever waiting
 // on a `fetch` that never settles.
 const REQUEST_TIMEOUT_MS = 30_000;
+// Interactive release search fans out to every indexer and routinely runs 30-90s;
+// it gets its own, much longer deadline than ordinary API calls.
+const SEARCH_TIMEOUT_MS = 180_000;
 
 /**
  * Thin authenticated wrapper around the Sonarr/Radarr v3 HTTP API: every method is a
@@ -64,6 +67,7 @@ export class ArrClient implements ArrApi {
   searchReleases(p: { seriesId?: number; seasonNumber?: number; movieId?: number }): Promise<ReleaseCandidate[]> {
     return this.request('GET', '/release', {
       query: { seriesId: p.seriesId, seasonNumber: p.seasonNumber, movieId: p.movieId },
+      timeoutMs: SEARCH_TIMEOUT_MS,
     });
   }
 
@@ -116,7 +120,7 @@ export class ArrClient implements ArrApi {
   private async request<T>(
     method: string,
     path: string,
-    opts?: { query?: Record<string, QueryValue>; body?: unknown },
+    opts?: { query?: Record<string, QueryValue>; body?: unknown; timeoutMs?: number },
   ): Promise<T> {
     let url = `${this.baseUrl}/api/v3${path}`;
     if (opts?.query) {
@@ -135,7 +139,7 @@ export class ArrClient implements ArrApi {
         ...(opts?.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: opts?.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
