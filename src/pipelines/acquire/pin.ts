@@ -55,16 +55,22 @@ export async function pinReleaseGroup(
   // (e.g. "SubsPlease" vs "subsplease") — name comparison and tag comparison would each
   // pick a different "existing" profile, so neither alone is reliable. Matching on
   // *either* means whichever one already carries the tag wins, and nothing new is created.
-  const profile =
-    existingProfiles.find((pr) => pr.name === profileName || pr.tags.includes(tag.id)) ??
-    (await client.createReleaseProfile({
-      name: profileName,
-      enabled: true,
-      required: [p.group],
-      ignored: [],
-      indexerId: 0,
-      tags: [tag.id],
-    }));
+  let profile = existingProfiles.find((pr) => pr.name === profileName || pr.tags.includes(tag.id));
+  if (profile && !profile.tags.includes(tag.id)) {
+    // Matched by name only, and its tag list doesn't include the current tag id — e.g. GC
+    // (Task 12) deleted the old tag and this profile got recreated/re-registered under a
+    // new one. Leaving the mismatch in place would pin a real profile to a dead tag id, a
+    // silently inert pin, so fold the current tag in rather than leaving it stale.
+    profile = await client.updateReleaseProfile({ ...profile, tags: [...profile.tags, tag.id] });
+  }
+  profile ??= await client.createReleaseProfile({
+    name: profileName,
+    enabled: true,
+    required: [p.group],
+    ignored: [],
+    indexerId: 0,
+    tags: [tag.id],
+  });
   if (profile.id === undefined) {
     throw new Error(`pinReleaseGroup: release profile "${profileName}" was created/found without an id`);
   }

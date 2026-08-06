@@ -68,6 +68,7 @@ export interface ArrApi {
   deleteTag(id: number): Promise<void>;
   listReleaseProfiles(): Promise<ReleaseProfileResource[]>;
   createReleaseProfile(p: ReleaseProfileResource): Promise<ReleaseProfileResource>;
+  updateReleaseProfile(p: ReleaseProfileResource): Promise<ReleaseProfileResource>;
   deleteReleaseProfile(id: number): Promise<void>;
   listNotifications(): Promise<NotificationSummary[]>;
   createNotification(body: object): Promise<NotificationSummary>;

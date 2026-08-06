@@ -90,6 +90,12 @@ export class ArrClient implements ArrApi {
     return this.request('POST', '/releaseprofile', { body: p });
   }
 
+  // Round-trip an existing profile only (same rationale as updateSeries) — a hand-built
+  // partial PUT body would wipe any unlisted release-profile fields server-side.
+  updateReleaseProfile(p: ReleaseProfileResource): Promise<ReleaseProfileResource> {
+    return this.request('PUT', `/releaseprofile/${p.id}`, { body: p });
+  }
+
   async deleteReleaseProfile(id: number): Promise<void> {
     await this.request('DELETE', `/releaseprofile/${id}`);
   }

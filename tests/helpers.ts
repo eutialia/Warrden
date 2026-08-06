@@ -207,6 +207,12 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       client.profiles.push(profile);
       return profile;
     }),
+    updateReleaseProfile: vi.fn(async (p: ReleaseProfileResource): Promise<ReleaseProfileResource> => {
+      const idx = client.profiles.findIndex((x) => x.id === p.id);
+      if (idx === -1) throw new Error(`fakeArrClient: no release profile with id ${p.id}`);
+      client.profiles[idx] = { ...p };
+      return client.profiles[idx];
+    }),
     deleteReleaseProfile: vi.fn(async (id: number): Promise<void> => {
       client.profiles = client.profiles.filter((p) => p.id !== id);
     }),
