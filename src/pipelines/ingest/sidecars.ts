@@ -3,13 +3,20 @@ import type { EpisodeResource } from '../../arr/types.js';
 /** Sidecar file extensions Warrden ingests alongside a video file: external audio
  * tracks (`.mka`) and subtitles (`.srt`/`.ass`), most commonly produced by anime
  * fansub groups shipping multi-audio/multi-sub releases as separate files. */
-export const SIDECAR_EXTS = ['.mka', '.srt', '.ass'];
+export const SIDECAR_EXTS: readonly string[] = ['.mka', '.srt', '.ass'];
+
+/** Case-insensitive `SIDECAR_EXTS` membership test — the one place that contract is
+ * enforced, so callers never need to remember to lowercase first. */
+export function isSidecarExt(ext: string): boolean {
+  return SIDECAR_EXTS.includes(ext.toLowerCase());
+}
 
 export type SidecarKind = 'audio' | 'subtitle';
 
-/** `.mka` is an external audio track; every other sidecar extension is a subtitle. */
+/** `.mka` (case-insensitive) is an external audio track; every other sidecar
+ * extension is a subtitle. */
 export function sidecarKindForExt(ext: string): SidecarKind {
-  return ext === '.mka' ? 'audio' : 'subtitle';
+  return ext.toLowerCase() === '.mka' ? 'audio' : 'subtitle';
 }
 
 export interface EpisodeRef {
@@ -68,14 +75,22 @@ const LANG_TOKENS: Record<string, string> = {
   en: 'en', eng: 'en',
 };
 
+/** Separators fansub groups use to cram multiple language tags into one bracket, e.g.
+ * `[CHS_JPN]`, `[GB&JP]`, `[繁中/日語]` — split on these (and plain whitespace) before
+ * looking a bracket's content up as a single token. */
+const LANG_SUBTOKEN_SPLIT = /[\s_&+/]+/;
+
 /**
  * Splits the extension-less name into every dot-separated segment plus the inner
- * content of every `[...]` bracket group, each tagged with the string offset where it
+ * content of every `[...]` bracket group (further split into its own sub-tokens — see
+ * `LANG_SUBTOKEN_SPLIT`), each tagged with the string offset where its bracket/segment
  * ends. Sorted so the caller can scan from the end of the filename toward the front —
  * the token nearest the extension is the fansub convention's most authoritative one
- * (`Show.sc.ass`), and ties (a bracket group that happens to touch the extension, e.g.
- * `Title [JPSC].ass`) keep left-to-right insertion order, which is what a stable sort
- * over [dot tokens..., bracket tokens...] gives for free.
+ * (`Show.sc.ass`). Ties (multiple sub-tokens of one bracket, or a bracket group that
+ * happens to touch the extension, e.g. `Title [JPSC].ass`) keep left-to-right
+ * insertion order, which is what a stable sort over [dot tokens..., bracket
+ * sub-tokens...] gives for free — so e.g. `[CHS_JPN]` resolves to the Chinese variant
+ * (the part fansub groups list first), not the language-origin tag.
  */
 function langCandidatesFromEnd(name: string): string[] {
   const tokens: { token: string; end: number }[] = [];
@@ -88,7 +103,12 @@ function langCandidatesFromEnd(name: string): string[] {
   }
 
   for (const m of name.matchAll(/\[([^\]]*)\]/g)) {
-    tokens.push({ token: m[1] ?? '', end: m.index + m[0].length });
+    const content = m[1] ?? '';
+    const end = m.index + m[0].length;
+    const parts = content.split(LANG_SUBTOKEN_SPLIT).filter((p) => p.length > 0);
+    for (const part of parts.length > 0 ? parts : [content]) {
+      tokens.push({ token: part, end });
+    }
   }
 
   return tokens.sort((a, b) => b.end - a.end).map((t) => t.token);

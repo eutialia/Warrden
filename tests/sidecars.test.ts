@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   SIDECAR_EXTS,
+  isSidecarExt,
   sidecarKindForExt,
   parseEpisodeRef,
   parseLangTag,
@@ -18,8 +19,23 @@ describe('SIDECAR_EXTS / sidecarKindForExt', () => {
     ['.mka', 'audio'],
     ['.srt', 'subtitle'],
     ['.ass', 'subtitle'],
+    // extension casing must never matter — Windows-authored sidecar names commonly
+    // carry an uppercase extension
+    ['.MKA', 'audio'],
   ])('sidecarKindForExt(%s) -> %s', (ext, expected) => {
     expect(sidecarKindForExt(ext)).toBe(expected);
+  });
+
+  it.each([
+    ['.mka', true],
+    ['.srt', true],
+    ['.ass', true],
+    ['.MKA', true],
+    ['.Srt', true],
+    ['.mkv', false],
+    ['.txt', false],
+  ])('isSidecarExt(%s) -> %s', (ext, expected) => {
+    expect(isSidecarExt(ext)).toBe(expected);
   });
 });
 
@@ -38,6 +54,12 @@ describe('parseEpisodeRef', () => {
     ['[Nekomoe] Title - 05 [1080p][JPSC].ass', { season: null, episode: 5 }],
     ['[Group] Title [05][GB].srt', { season: null, episode: 5 }],
     ['[Group] Title - 05v2 [720p].ass', { season: null, episode: 5 }],
+    // dots are a valid delimiter too, not just space/bracket/underscore/dash
+    ['Show.Name.05.1080p.ass', { season: null, episode: 5 }],
+    // a parenthesized year alongside a real bare episode number: exercises both the
+    // paren delimiter (leading `(`/trailing `)` must be recognized, same as brackets)
+    // and the year-range guard filtering the captured 2023 out of the candidate set
+    ['[Group] Title (2023) - 05 [1080p].ass', { season: null, episode: 5 }],
     // resolutions, years, and CRC-ish tokens never count
     ['[Group] Title [1080].ass', null],
     ['[Group] Title (2023) [1080p].ass', null],
@@ -90,6 +112,22 @@ describe('parseLangTag', () => {
     // a trailing dot token beats an earlier bracket token, even when the bracket token
     // would (wrongly) match first under a naive scan
     ['Show - 05 [CHT].sc.ass', 'zh-Hans'],
+    // 'constructor' is inherited from Object.prototype, not an own LANG_TOKENS key — a
+    // plain `key in LANG_TOKENS` or unguarded index lookup would wrongly resolve it
+    ['Show - S01E05.constructor.ass', null],
+    // padding inside a bracket is a real fansub shape too — sub-splitting on
+    // whitespace already strips it, but it must resolve either way
+    ['Show - S01E05 [ CHS ].ass', 'zh-Hans'],
+    // a padded *dot* token isn't sub-split, so this is the row that actually pins the
+    // trim() call in parseLangTag's lookup (removing it makes " chs " fail the exact
+    // LANG_TOKENS key match and falls through to null)
+    ['Show - S01E05 . CHS .ass', 'zh-Hans'],
+    // multi-tag brackets: sub-split on _ / & / + / whitespace, the Chinese-variant part
+    // (listed first, per fansub convention) wins over the trailing language-origin tag
+    ['[Group] Title - 05 [CHS_JPN].ass', 'zh-Hans'],
+    ['[Group] Title - 05 [GB_JP].ass', 'zh-Hans'],
+    ['[Group] Title - 05 [CHS&JPN].ass', 'zh-Hans'],
+    ['[Group] Title - 05 [繁中+日語].ass', 'zh-Hant'],
   ])('parseLangTag(%s) -> %s', (name, expected) => {
     expect(parseLangTag(name)).toBe(expected);
   });
