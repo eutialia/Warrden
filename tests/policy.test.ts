@@ -24,4 +24,10 @@ describe('synthesizePolicyPrompt', () => {
     const { user } = synthesizePolicyPrompt({ tags: [], title: 'X', kind: 'movie' });
     expect(user).not.toContain('undefined');
   });
+
+  it('normalizes an internal newline in a tag to a single space, so one tag stays one bullet', () => {
+    const { user } = synthesizePolicyPrompt({ tags: ['prefer CHS\nsubs over dubs'], title: 'X', kind: 'movie' });
+    expect(user).toContain('- prefer CHS subs over dubs');
+    expect(user.split('\n').filter((line) => line.startsWith('-'))).toHaveLength(1);
+  });
 });

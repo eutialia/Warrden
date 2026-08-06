@@ -31,8 +31,11 @@ export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): Poli
     ? `${input.title}, Season ${input.seasonNumber}`
     : input.title;
 
+  // Internal newlines are normalized to single spaces so one tag always renders as
+  // exactly one bullet — a tag containing a literal newline would otherwise fracture
+  // into multiple bullet-list lines, and the extra ones wouldn't start with "- ".
   const preferences = input.tags.length > 0
-    ? `Preferences:\n${input.tags.map((t) => `- ${t}`).join('\n')}`
+    ? `Preferences:\n${input.tags.map((t) => `- ${t.replace(/\s*\n\s*/g, ' ')}`).join('\n')}`
     : 'Preferences: none specified.';
 
   const user = [`Target: ${target}`, preferences].join('\n\n');
