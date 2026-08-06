@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
-import { freshDb, fakeArrClient } from './helpers.js';
+import { freshDb, fakeArrClient, seriesResource } from './helpers.js';
 
 describe('pinReleaseGroup', () => {
   it('creates tag + profile, attaches tag, registers managed objects', async () => {
-    const client = fakeArrClient({ series: [{ id: 42, title: 'Frieren', year: 2023, tvdbId: 1, tags: [], added: '' }] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'Frieren' })] });
     const db = freshDb();
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
     expect(client.tags.map((t) => t.label)).toContain('warrden-subsplease');
@@ -14,7 +14,7 @@ describe('pinReleaseGroup', () => {
     expect(rows.map((r: any) => r.kind).sort()).toEqual(['release_profile', 'tag']);
   });
   it('is idempotent for the same group', async () => {
-    const client = fakeArrClient({ series: [{ id: 42, title: 'F', year: 0, tvdbId: 1, tags: [], added: '' }] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
     const db = freshDb();
     const p = { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' };
     await pinReleaseGroup({ client, db }, p);
@@ -26,7 +26,7 @@ describe('pinReleaseGroup', () => {
   });
 
   it('reuses an existing profile already carrying the pinned tag even when the group string differs only in a way that slugifies the same (no duplicate, differently-named profile)', async () => {
-    const client = fakeArrClient({ series: [{ id: 42, title: 'F', year: 0, tvdbId: 1, tags: [], added: '' }] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
     const db = freshDb();
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'subsplease' });
@@ -34,7 +34,7 @@ describe('pinReleaseGroup', () => {
     expect(client.profiles).toHaveLength(1); // reused by tag membership, not re-created under the new name
   });
   it('reconciles a name-matched profile whose tags are stale (e.g. after its old tag was GC\'d) by adding the current tag id', async () => {
-    const client = fakeArrClient({ series: [{ id: 42, title: 'F', year: 0, tvdbId: 1, tags: [], added: '' }] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
     client.pushProfile({ name: 'warrden: [SubsPlease]', enabled: true, required: ['SubsPlease'], ignored: [], tags: [999], indexerId: 0 });
     const db = freshDb();
 
@@ -47,7 +47,7 @@ describe('pinReleaseGroup', () => {
   });
 
   it('re-pinning a different group swaps the series tag', async () => {
-    const client = fakeArrClient({ series: [{ id: 42, title: 'F', year: 0, tvdbId: 1, tags: [], added: '' }] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
     const db = freshDb();
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'GroupA' });
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'GroupB' });

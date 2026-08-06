@@ -11,6 +11,11 @@ export interface ReleaseCandidate {
   publishDate: string;
 }
 
+export interface SeasonResource {
+  seasonNumber: number;
+  monitored: boolean;
+}
+
 export interface SeriesResource {
   id: number;
   title: string;
@@ -18,6 +23,9 @@ export interface SeriesResource {
   tvdbId: number;
   tags: number[];
   added: string;
+  // Season 0 is Sonarr's convention for "Specials" — acquire deliberately skips it (see
+  // runAcquireJob's per-season loop) rather than treating specials like a regular season.
+  seasons: SeasonResource[];
 }
 
 export interface MovieResource {
@@ -56,7 +64,6 @@ export interface NotificationSummary {
  * with no cast, and `AppContext.clients` can hold either a real client or a fake.
  */
 export interface ArrApi {
-  systemStatus(): Promise<unknown>;
   listSeries(): Promise<SeriesResource[]>;
   listMovies(): Promise<MovieResource[]>;
   getSeries(id: number): Promise<SeriesResource>;

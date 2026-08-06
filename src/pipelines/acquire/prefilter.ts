@@ -56,3 +56,28 @@ export function prefilter(candidates: ReleaseCandidate[], opts: PrefilterOpts): 
 
   return { kept, dropped };
 }
+
+/** Cap on how many prefiltered candidates ever reach the LLM pick step (and get persisted
+ * in `acquire_records.candidates_json`) — an unbounded list is both a needless token cost
+ * and, past some size, actively confuses picking. One constant, used by both the cap
+ * itself and `run.ts`'s cap-notice event. */
+export const MAX_CANDIDATES_FOR_PICK = 30;
+
+/**
+ * Caps an already-prefiltered candidate list to the top `max` by seeders (highest first;
+ * missing/`null` seeders sort last, same as prefilter's own treatment of an indexer that
+ * doesn't report them). Pure, like `prefilter` itself — cut candidates come back as
+ * `DroppedCandidate`s with a `capped:` reason rather than silently vanishing, so the full
+ * audit trail survives in `acquire_records.candidates_json` even though only the kept
+ * ones are shown to the LLM.
+ */
+export function capCandidates(candidates: ReleaseCandidate[], max: number = MAX_CANDIDATES_FOR_PICK): PrefilterResult {
+  if (candidates.length <= max) return { kept: candidates, dropped: [] };
+
+  const sorted = [...candidates].sort((a, b) => (b.seeders ?? -1) - (a.seeders ?? -1));
+  const dropped = sorted.slice(max).map((c) => ({
+    candidate: c,
+    reason: `capped: ${candidates.length} candidates survived prefilter, kept only the top ${max} by seeders`,
+  }));
+  return { kept: sorted.slice(0, max), dropped };
+}

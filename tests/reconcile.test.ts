@@ -1,13 +1,23 @@
 import { describe, it, expect } from 'vitest';
+import { ConfigSchema } from '../src/config/schema.js';
 import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
 import { reconcile } from '../src/reconcile/reconcile.js';
-import { configWithArrs, makeCtx, fakeArrClient } from './helpers.js';
+import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seriesResource } from './helpers.js';
 
-const series = (id: number, tags: number[] = []) => ({ id, title: `S${id}`, year: 2024, tvdbId: id, tags, added: '' });
+const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
 
 describe('reconcile', () => {
+  it('a sonarr-kind instance only fetches series, never movies (Sonarr has no /movie endpoint)', async () => {
+    const client = fakeArrClient({ series: [series(1)] });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+
+    await reconcile(ctx);
+
+    expect(client.listMovies).not.toHaveBeenCalled();
+  });
+
   it('bootstrap: marks existing library seen without enqueueing', async () => {
-    const ctx = makeCtx({ clients: new Map([['sonarr', fakeArrClient({ series: [series(1), series(2)] })]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient({ series: [series(1), series(2)] })]]) });
     await reconcile(ctx);
     expect(ctx.queue.claim()).toBeNull();
     await reconcile(ctx); // second run, nothing changed
@@ -15,7 +25,7 @@ describe('reconcile', () => {
   });
   it('enqueues acquire for series added after bootstrap', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     await reconcile(ctx);
     client.series.push(series(9));
     await reconcile(ctx);
@@ -29,7 +39,7 @@ describe('reconcile', () => {
 
   it('gc removes orphaned warrden tag + profile from arr and registry', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('warrden-deadgroup');
     const prof = client.pushProfile({ name: 'warrden: [DeadGroup]', enabled: true, required: ['DeadGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
     const created = wellPastGrace();
@@ -48,7 +58,7 @@ describe('reconcile', () => {
     const tag = client.pushTag('warrden-livegroup');
     client.series.push(series(1, [tag.id]));
     const prof = client.pushProfile({ name: 'warrden: [LiveGroup]', enabled: true, required: ['LiveGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const created = wellPastGrace();
     ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
       ('sonarr','tag',?,?,'{"group":"LiveGroup"}',?), ('sonarr','release_profile',?,?,'{"group":"LiveGroup"}',?)`)
@@ -60,7 +70,7 @@ describe('reconcile', () => {
 
   it('gc cleans a registry row whose tag/profile are already gone from the arr, without throwing, and still processes other rows', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const created = wellPastGrace();
 
     // "DeadGroup": registered in managed_objects, but nothing in the arr's live tag/profile
@@ -90,7 +100,7 @@ describe('reconcile', () => {
     // series(1) carries no tags, so this pin would look orphaned against this snapshot —
     // exactly what a concurrent acquire job's pin landing mid-pass would look like too.
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('warrden-freshgroup');
     const prof = client.pushProfile({ name: 'warrden: [FreshGroup]', enabled: true, required: ['FreshGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
     const now = Date.now(); // freshly "registered" — well within the grace window
@@ -107,7 +117,7 @@ describe('reconcile', () => {
 
   it('gc never deletes a profile whose live name is not warrden-owned, and leaves its tag alone too (deleting it would cascade into the profile)', async () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the tag looks orphaned
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('warrden-adopted');
     // Simulates pinReleaseGroup adopting a *user's* profile by tag membership (see its
     // matching comment) — its name was never "warrden: ...".
@@ -140,7 +150,7 @@ describe('reconcile', () => {
 
   it('gc never deletes a tag from the arr whose live label is not warrden-owned — drops the registry row only, with a warn event', async () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the registered tag looks unused
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('user-tag'); // not warrden-owned, but somehow ended up registered
     const created = wellPastGrace();
     ctx.db
@@ -207,6 +217,12 @@ describe('reconcile', () => {
     });
 
     const ctx = makeCtx({
+      config: ConfigSchema.parse({
+        arrs: [
+          arrInstance({ name: 'broken', kind: 'sonarr', baseUrl: 'http://broken:0' }),
+          arrInstance({ name: 'healthy', kind: 'sonarr', baseUrl: 'http://healthy:0' }),
+        ],
+      }),
       clients: new Map([
         ['broken', brokenClient],
         ['healthy', healthyClient],
@@ -247,8 +263,8 @@ describe('reconcile', () => {
   });
 
   it('re-pinning an old registry row refreshes created_at, so a stale-snapshot race does not gc it out from under a fresh pin', async () => {
-    const client = fakeArrClient({ series: [{ id: 42, title: 'F', year: 2024, tvdbId: 1, tags: [], added: '' }] });
-    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 2024 })] });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
 
     await pinReleaseGroup({ client, db: ctx.db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
     // Backdate as if this pin were 3 days old — well past grace, and normally gc-eligible.

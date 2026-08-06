@@ -94,4 +94,27 @@ export class AcquireRecords {
       .all(arrInstance, targetKind, targetId) as AcquireRecordRowRaw[];
     return rows.map(parseRow);
   }
+
+  /**
+   * Aggregate outcome for one job's own run against this target: `'grabbed'` if any record
+   * that job itself produced (`created_at >= sinceCreatedAt`, the job's own `created_at`) is
+   * `'grabbed'`, else `'none-viable'` if any is that, else `'no-candidates'` if any record
+   * exists at all, else `null` (no record yet — the job hasn't run, or crashed before
+   * recording anything). Needed because a multi-season series job (`runAcquireJob`'s series
+   * branch, `src/pipelines/acquire/run.ts`) writes one row per season: the single latest row
+   * alone doesn't tell you "did *any* season grab" when a later season's own outcome was
+   * worse than an earlier one's.
+   */
+  outcomeForJob(arrInstance: string, targetKind: TargetKind, targetId: number, sinceCreatedAt: number): AcquireStatus | null {
+    const rows = this.db
+      .prepare(
+        `SELECT status FROM acquire_records
+         WHERE arr_instance = ? AND target_kind = ? AND target_id = ? AND created_at >= ?`,
+      )
+      .all(arrInstance, targetKind, targetId, sinceCreatedAt) as { status: AcquireStatus | null }[];
+    if (rows.some((r) => r.status === 'grabbed')) return 'grabbed';
+    if (rows.some((r) => r.status === 'none-viable')) return 'none-viable';
+    if (rows.some((r) => r.status === 'no-candidates')) return 'no-candidates';
+    return null;
+  }
 }

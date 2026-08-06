@@ -75,17 +75,9 @@ export function baseConfig(): Config {
 export class FakeGenerator implements StructuredGenerator {
   calls: GenerateOpts<unknown>[] = [];
   private readonly queue: unknown[];
-  private readonly validate: boolean;
 
-  /**
-   * `validate: false` (default `true`) skips parsing queued results through
-   * `opts.schema`, returning them as-is — lets a test queue a schema-invalid
-   * shape to exercise a pipeline's own handling of a malformed LLM response,
-   * instead of every fixture being forced through zod first.
-   */
-  constructor(queue: unknown[] = [], opts?: { validate?: boolean }) {
+  constructor(queue: unknown[] = []) {
     this.queue = [...queue];
-    this.validate = opts?.validate ?? true;
   }
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
@@ -95,7 +87,7 @@ export class FakeGenerator implements StructuredGenerator {
     }
     const next = this.queue.shift();
     if (next instanceof Error) throw next;
-    return this.validate ? opts.schema.parse(next) : (next as T);
+    return opts.schema.parse(next);
   }
 }
 
@@ -165,8 +157,6 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     notifications: seed?.notifications ? [...seed.notifications] : [],
     grabbed: [],
 
-    systemStatus: vi.fn(async (): Promise<unknown> => ({})),
-
     async listSeries(): Promise<SeriesResource[]> {
       return client.series.map((s) => ({ ...s, tags: [...s.tags] }));
     },
@@ -183,9 +173,19 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       return client.series[idx];
     }),
     searchReleases: vi.fn(
-      async (_params: { seriesId?: number; seasonNumber?: number; movieId?: number }): Promise<ReleaseCandidate[]> => [
-        ...client.releases,
-      ],
+      async (params: { seriesId?: number; seasonNumber?: number; movieId?: number }): Promise<ReleaseCandidate[]> => {
+        // Mirrors Sonarr's actual `ReleaseController`: a `seriesId` search without a
+        // `seasonNumber` falls through to `GetRss()` (the full RSS feed) server-side —
+        // unrelated candidates, wrong-series grabs. A real caller must always pass both
+        // together for a series search; this throws instead of silently returning
+        // `client.releases` so a regression back to `{seriesId}`-only search fails loudly.
+        if (params.seriesId !== undefined && params.seasonNumber === undefined) {
+          throw new Error(
+            'fakeArrClient.searchReleases: seriesId given without seasonNumber — this would hit Sonarr\'s GetRss() fallback in the real API, not a per-series search',
+          );
+        }
+        return [...client.releases];
+      },
     ),
     grabRelease: vi.fn(async (guid: string, indexerId: number): Promise<void> => {
       client.grabbed.push({ guid, indexerId });
@@ -243,6 +243,24 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
   };
 
   return client;
+}
+
+/**
+ * A `SeriesResource` fixture with sane defaults (one monitored season, `#1`) — override
+ * any field, most commonly `seasons`, for a test exercising per-season search (see
+ * `runAcquireJob`'s series branch in `src/pipelines/acquire/run.ts`).
+ */
+export function seriesResource(overrides?: Partial<SeriesResource>): SeriesResource {
+  return {
+    id: 42,
+    title: 'Frieren',
+    year: 2023,
+    tvdbId: 1,
+    tags: [],
+    added: '',
+    seasons: [{ seasonNumber: 1, monitored: true }],
+    ...overrides,
+  };
 }
 
 /**

@@ -1,19 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { freshDb } from './helpers.js';
 
 describe('AcquireRecords', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
   it('inserts a record and reads it back via listByTarget, newest first', () => {
     const records = new AcquireRecords(freshDb());
     records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'no-candidates', source: 'webhook' });
-    // The table's uniqueness key includes created_at (ms resolution) — in production
-    // recordOutcome only ever fires once per serially-processed job, so two inserts for
-    // the same target in the same millisecond can't happen there; advance the fake clock
-    // here purely so this test's two back-to-back inserts don't collide with each other.
-    vi.advanceTimersByTime(1);
     records.insert({
       arrInstance: 'sonarr',
       targetKind: 'series',
@@ -47,5 +39,30 @@ describe('AcquireRecords', () => {
     const records = new AcquireRecords(freshDb());
     records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'none-viable' });
     expect(records.listByTarget('sonarr', 'series', 42)[0]).toMatchObject({ source: null });
+  });
+
+  describe('outcomeForJob', () => {
+    it.each([
+      { statuses: ['no-candidates', 'grabbed', 'none-viable'], expected: 'grabbed' },
+      { statuses: ['no-candidates', 'none-viable'], expected: 'none-viable' },
+      { statuses: ['no-candidates', 'no-candidates'], expected: 'no-candidates' },
+      { statuses: [], expected: null },
+    ] as const)('aggregates $statuses to $expected (grabbed > none-viable > no-candidates)', ({ statuses, expected }) => {
+      const db = freshDb();
+      const records = new AcquireRecords(db);
+      const sinceCreatedAt = Date.now();
+      for (const status of statuses) {
+        records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status });
+      }
+      expect(records.outcomeForJob('sonarr', 'series', 42, sinceCreatedAt)).toBe(expected);
+    });
+
+    it('ignores records older than the job itself', () => {
+      const db = freshDb();
+      const records = new AcquireRecords(db);
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed' });
+      const sinceCreatedAt = Date.now() + 1000; // job enqueued strictly after that old record
+      expect(records.outcomeForJob('sonarr', 'series', 42, sinceCreatedAt)).toBeNull();
+    });
   });
 });
