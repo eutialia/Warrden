@@ -164,14 +164,21 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.skipped-collision')).toHaveLength(1);
   });
 
-  it('restore: a placed file removed from the library (video intact) is restored from its recorded source, and the row is refreshed', async () => {
+  it('restore: a placed file removed from the library (video intact) is restored from its recorded source WITHOUT re-matching — no second LLM call — and the row is refreshed', async () => {
     const fx = ingestFixture();
-    const sourcePath = join(fx.torrentDir, 'Show - 05 [JPSC].ass');
+    // Deterministically-unmatchable on purpose: this must go through the LLM on the first
+    // run, so a "restore" that's secretly falling through to full re-matching (instead of
+    // genuinely restoring from the row) would need a SECOND LLM call — which the
+    // single-response FakeGenerator below doesn't have, and would throw.
+    const sourcePath = join(fx.torrentDir, 'Random Title - XYZ.ass');
     writeFileSync(sourcePath, 'subtitle-content');
+    const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 1 }], reasoning: 'x' }]);
+    fx.ctx.llm = llm;
     const job = claimIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
-    const targetPath = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
+    expect(llm.calls).toHaveLength(1);
+    const targetPath = join(fx.libraryDir, 'Show - S01E05.ass');
     expect(existsSync(targetPath)).toBe(true);
     const firstJobId = job.id;
     fx.ctx.queue.complete(job.id); // free the singleton slot so a second job can be claimed below
@@ -184,6 +191,7 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     const job2 = claimIngestJob(fx); // a fresh job — proves the row's job_id gets refreshed too
     await runIngestJob(fx.ctx, job2);
 
+    expect(llm.calls).toHaveLength(1); // still just the one call — restore never re-matched
     expect(existsSync(targetPath)).toBe(true);
     expect(readFileSync(targetPath, 'utf-8')).toBe('subtitle-content');
     expect(existsSync(sourcePath)).toBe(true); // source untouched by the restore
