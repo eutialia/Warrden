@@ -1,17 +1,24 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, fetchJobs, type Job } from '@/api';
-import { StatusBadge } from '@/components/StatusBadge';
+import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
 const JOBS_LIMIT = 50;
+// SSE fires one event per job-queue/acquire-record write, and a busy pipeline (a
+// multi-season series job, several webhooks landing together) can write several in quick
+// succession — without coalescing, each one would independently trigger its own
+// `fetchJobs` round trip. Trailing-debounced to one refetch per burst instead.
+const REFETCH_DEBOUNCE_MS = 500;
 
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [disconnected, setDisconnected] = useState(false);
   const navigate = useNavigate();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refetch = useCallback(() => {
     fetchJobs(JOBS_LIMIT)
@@ -23,15 +30,28 @@ export default function Activity() {
       .finally(() => setLoading(false));
   }, []);
 
+  const refetchDebounced = useCallback(() => {
+    if (debounceRef.current !== null) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(refetch, REFETCH_DEBOUNCE_MS);
+  }, [refetch]);
+
   useEffect(() => {
     refetch();
 
     // Any event (job update, acquire result, etc.) can mean the job list changed, so just
     // refetch wholesale on every message rather than trying to reconcile individual rows.
     const source = new EventSource('/api/events/stream');
-    source.onmessage = () => refetch();
-    return () => source.close();
-  }, [refetch]);
+    source.onmessage = () => refetchDebounced();
+    source.onopen = () => {
+      setDisconnected(false);
+      refetch(); // reconnected — catch up on anything missed while the stream was down
+    };
+    source.onerror = () => setDisconnected(true);
+    return () => {
+      source.close();
+      if (debounceRef.current !== null) clearTimeout(debounceRef.current);
+    };
+  }, [refetch, refetchDebounced]);
 
   return (
     <Card>
@@ -39,6 +59,7 @@ export default function Activity() {
         <CardTitle>Activity</CardTitle>
       </CardHeader>
       <CardContent>
+        {disconnected && <p className="mb-3 text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
         {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
         <Table>
           <TableHeader>
@@ -63,8 +84,9 @@ export default function Activity() {
                 <TableCell>
                   {job.arr_instance} · {job.target_kind} #{job.target_id}
                 </TableCell>
-                <TableCell>
+                <TableCell className="flex items-center gap-1.5">
                   <StatusBadge status={job.status} />
+                  <AcquireOutcomeBadge outcome={job.acquireOutcome} />
                 </TableCell>
                 <TableCell>{new Date(job.updated_at).toLocaleString()}</TableCell>
               </TableRow>

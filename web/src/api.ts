@@ -20,6 +20,11 @@ export interface Job {
   error: string | null;
   created_at: number;
   updated_at: number;
+  // Aggregate outcome across every acquire_records row this job's own run produced —
+  // `null` for a non-acquire pipeline, or an acquire job with no record yet. See
+  // `AcquireRecords.outcomeForJob` (server) for why this is an aggregate, not just the
+  // latest record: a multi-season series job can grab one season and not another.
+  acquireOutcome?: AcquireStatus | null;
 }
 
 export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
@@ -41,6 +46,7 @@ export interface AcquireRecord {
 export interface JobDetailResponse {
   job: Job;
   acquireRecord: AcquireRecord | null;
+  acquireOutcome: AcquireStatus | null;
 }
 
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
@@ -136,6 +142,19 @@ export function saveConfig(config: Config): Promise<SaveConfigResponse> {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(config),
+  });
+}
+
+export function postAcquire(input: {
+  arrInstance: string;
+  targetKind: TargetKind;
+  targetId: number;
+  title?: string;
+}): Promise<{ outcome: string }> {
+  return fetchJson('/api/acquire', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
   });
 }
 

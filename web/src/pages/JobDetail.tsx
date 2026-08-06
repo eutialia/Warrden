@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ApiError, fetchJob, type JobDetailResponse } from '@/api';
-import { StatusBadge } from '@/components/StatusBadge';
+import { toast } from 'sonner';
+import { ApiError, fetchJob, postAcquire, type JobDetailResponse } from '@/api';
+import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -9,15 +10,60 @@ export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<JobDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [repicking, setRepicking] = useState(false);
+
+  const load = useCallback(
+    (opts?: { isStale: () => boolean }) => {
+      if (!id) return;
+      fetchJob(id)
+        .then((result) => {
+          if (opts?.isStale()) return; // a newer request (route change, refetch) already landed
+          setData(result);
+        })
+        .catch((err: unknown) => {
+          if (opts?.isStale()) return;
+          setError(err instanceof ApiError ? err.message : 'failed to load job');
+        });
+    },
+    [id],
+  );
 
   useEffect(() => {
     if (!id) return;
+    let stale = false;
     setData(null);
     setError(null);
-    fetchJob(id)
-      .then(setData)
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : 'failed to load job'));
-  }, [id]);
+    load({ isStale: () => stale });
+    return () => {
+      stale = true; // ignore this effect's fetch if it resolves after `id` changed again
+    };
+  }, [id, load]);
+
+  useEffect(() => {
+    if (!id) return;
+    // Any event can mean this job (or its acquire record) changed — refetch wholesale
+    // rather than trying to reconcile individual fields.
+    const source = new EventSource('/api/events/stream');
+    source.onmessage = () => load();
+    return () => source.close();
+  }, [id, load]);
+
+  async function handleRepick(): Promise<void> {
+    if (!data) return;
+    setRepicking(true);
+    try {
+      await postAcquire({
+        arrInstance: data.job.arr_instance,
+        targetKind: data.job.target_kind,
+        targetId: data.job.target_id,
+      });
+      toast.success('Re-pick queued');
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed to queue re-pick');
+    } finally {
+      setRepicking(false);
+    }
+  }
 
   if (error) {
     return (
@@ -37,7 +83,7 @@ export default function JobDetail() {
     );
   }
 
-  const { job, acquireRecord } = data;
+  const { job, acquireRecord, acquireOutcome } = data;
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
 
   return (
@@ -49,6 +95,7 @@ export default function JobDetail() {
           <CardTitle className="flex items-center gap-2">
             Job #{job.id} — {job.pipeline}
             <StatusBadge status={job.status} />
+            <AcquireOutcomeBadge outcome={acquireOutcome} />
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-1 text-sm">
@@ -60,6 +107,11 @@ export default function JobDetail() {
           <p>Created: {new Date(job.created_at).toLocaleString()}</p>
           <p>Updated: {new Date(job.updated_at).toLocaleString()}</p>
           {job.error && <p className="text-destructive">Error: {job.error}</p>}
+          {job.pipeline === 'acquire' && (
+            <Button variant="outline" size="sm" className="mt-2" disabled={repicking} onClick={() => void handleRepick()}>
+              {repicking ? 'Queuing…' : 'Re-pick'}
+            </Button>
+          )}
         </CardContent>
       </Card>
 
@@ -97,9 +149,9 @@ function BackLink() {
   );
 }
 
-/** `candidates_json` is `{ kept: [...], dropped: [...] }` (written by `runAcquireJob` /
- * `recordOutcome` in `src/pipelines/acquire/run.ts`) — total considered is both arrays
- * combined, not just the ones that survived prefilter. */
+/** `candidates_json` is `{ kept: [...], dropped: [...] }` for a movie (or a single
+ * series-season row), written by `runAcquireJob` in `src/pipelines/acquire/run.ts` —
+ * total considered is both arrays combined, not just the ones that survived prefilter. */
 function candidatesConsidered(candidatesJson: Record<string, unknown> | null | undefined): number | undefined {
   if (!candidatesJson) return undefined;
   const kept = Array.isArray(candidatesJson.kept) ? candidatesJson.kept.length : 0;
