@@ -177,6 +177,8 @@ export interface FakeArrClientSeed {
   episodes?: EpisodeResource[];
   episodeFiles?: EpisodeFileResource[];
   movieFiles?: MovieFileResource[];
+  /** Seeds `listManualImport`'s per-scope responses — see `FakeArrClient.manualImportByScope`. */
+  manualImportByScope?: Record<string, ManualImportItem[]>;
 }
 
 export interface FakeArrClient extends ArrApi {
@@ -196,6 +198,12 @@ export interface FakeArrClient extends ArrApi {
   movieFiles: MovieFileResource[];
   /** Every `grabRelease` call, recorded in order — the pipeline test's grab assertion. */
   grabbed: Array<{ guid: string; indexerId: number }>;
+  /** `listManualImport`'s canned responses, keyed by `` `downloadId:${id}` `` or
+   * `` `folder:${path}` `` (whichever the call under test is scoped by) — a test seeds
+   * this directly (`client.manualImportByScope['downloadId:dl-1'] = [...]`) rather than
+   * the fake replicating the arr's own manual-import query semantics. An unseeded scope
+   * returns `[]`, same as "nothing left to import". */
+  manualImportByScope: Record<string, ManualImportItem[]>;
   /** Seeds a tag directly into the store, auto-assigning an id the same way `createTag`
    * would — for tests that need a pre-existing tag without going through `pinReleaseGroup`. */
   pushTag(label: string): TagResource;
@@ -231,6 +239,7 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     episodeFiles: seed?.episodeFiles ? [...seed.episodeFiles] : [],
     movieFiles: seed?.movieFiles ? [...seed.movieFiles] : [],
     grabbed: [],
+    manualImportByScope: seed?.manualImportByScope ? { ...seed.manualImportByScope } : {},
 
     async listSeries(): Promise<SeriesResource[]> {
       return client.series.map((s) => ({ ...s, tags: [...s.tags] }));
@@ -315,7 +324,23 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     listEpisodes: async (): Promise<EpisodeResource[]> => [...client.episodes],
     listEpisodeFiles: async (): Promise<EpisodeFileResource[]> => [...client.episodeFiles],
     listMovieFiles: async (): Promise<MovieFileResource[]> => [...client.movieFiles],
-    listManualImport: async (): Promise<ManualImportItem[]> => [],
+    listManualImport: vi.fn(
+      async (p: {
+        folder?: string;
+        downloadId?: string;
+        seriesId?: number;
+        movieId?: number;
+        filterExistingFiles?: boolean;
+      }): Promise<ManualImportItem[]> => {
+        // Real Sonarr/Radarr manual-import scopes are exclusive (a `downloadId` lookup
+        // vs. a `folder` lookup) — mirrored here rather than merging both, so a caller
+        // accidentally passing both would silently only hit the `downloadId` branch, same
+        // as it would against a real arr.
+        if (p.downloadId !== undefined) return [...(client.manualImportByScope[`downloadId:${p.downloadId}`] ?? [])];
+        if (p.folder !== undefined) return [...(client.manualImportByScope[`folder:${p.folder}`] ?? [])];
+        return [];
+      },
+    ),
     executeManualImport: vi.fn(async (): Promise<void> => {}),
     deleteNotification: vi.fn(async (id: number): Promise<void> => {
       client.notifications = client.notifications.filter((n) => n.id !== id);
