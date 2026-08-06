@@ -1,17 +1,21 @@
 import { copyFileSync, existsSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
-import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 
 const TMP_PREFIX = '.warrden-tmp-';
 
 /**
  * Recursively lists files under `dir` whose extension (case-insensitive) is in `exts`
- * (each given with its leading dot, e.g. `.srt`). Dotfiles are skipped, as is anything
- * under a dot-directory — NAS shares commonly carry OS/filesystem housekeeping trees like
- * `.Trashes`, `.zfs`, or `.AppleDouble`, whose contents must never become sidecar
- * candidates (this also covers the atomic-copy temp prefix `.warrden-tmp-`, itself a
- * dotfile: a copy in flight, never a real sidecar). A missing `dir` returns `[]` rather
- * than throwing, since sweeping an ingest root that hasn't been created yet is a normal,
- * not exceptional, state. Returned paths are always absolute (resolved against `dir`) and
+ * (each given with its leading dot, e.g. `.srt`). Dotfiles are skipped, and a dot-named
+ * directory is skipped *before* descending into it rather than after — NAS shares commonly
+ * carry OS/filesystem housekeeping trees like `.Trashes`, `.zfs`, or `.AppleDouble` that can
+ * be enormous (e.g. a `.zfs` snapshot directory mirrors the entire dataset tree once per
+ * snapshot), so enumerating their contents just to discard every entry would stall a sweep
+ * for minutes even though it returns nothing from them. This also covers the atomic-copy
+ * temp prefix `.warrden-tmp-`, itself a dotfile: a copy in flight, never a real sidecar.
+ * Walks directory-by-directory (not `fs.readdirSync`'s `recursive` option, which has no way
+ * to prune a subtree before descending into it). A missing `dir` returns `[]` rather than
+ * throwing, since sweeping an ingest root that hasn't been created yet is a normal, not
+ * exceptional, state. Returned paths are always absolute (resolved against `dir`) and
  * sorted for deterministic ordering.
  */
 export function walkFiles(dir: string, exts: string[]): string[] {
@@ -19,16 +23,20 @@ export function walkFiles(dir: string, exts: string[]): string[] {
   if (!existsSync(root)) return [];
   const wanted = new Set(exts.map((e) => e.toLowerCase()));
   const results: string[] = [];
-  const entries = readdirSync(root, { recursive: true, withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    if (entry.name.startsWith('.')) continue;
-    const relDir = relative(root, entry.parentPath);
-    if (relDir.split(sep).some((segment) => segment.startsWith('.'))) continue;
-    const ext = extname(entry.name).toLowerCase();
-    if (!wanted.has(ext)) continue;
-    results.push(join(entry.parentPath, entry.name));
-  }
+
+  const visit = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue; // dotfiles and dot-directories, pruned pre-descent
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        visit(full);
+      } else if (entry.isFile() && wanted.has(extname(entry.name).toLowerCase())) {
+        results.push(full);
+      }
+    }
+  };
+  visit(root);
+
   return results.sort();
 }
 

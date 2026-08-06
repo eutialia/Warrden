@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { mapArrPath } from '../src/fs/paths.js';
 import { walkFiles, atomicCopy, ensureMounts, MountError } from '../src/fs/files.js';
 import { tmpDir } from './helpers.js';
@@ -79,6 +79,17 @@ describe('walkFiles', () => {
     const dir = join(tmpDir(), 'does-not-exist');
     expect(walkFiles(dir, ['.srt'])).toEqual([]);
   });
+
+  it('returns absolute paths even when given a relative directory', () => {
+    const dir = tmpDir();
+    writeFileSync(join(dir, 'a.srt'), '');
+    const relDir = relative(process.cwd(), dir);
+
+    const result = walkFiles(relDir, ['.srt']);
+
+    expect(result).toEqual([join(dir, 'a.srt')]);
+    expect(result.every((p) => isAbsolute(p))).toBe(true);
+  });
 });
 
 describe('atomicCopy', () => {
@@ -115,6 +126,16 @@ describe('atomicCopy', () => {
     atomicCopy(src, dest);
 
     expect(readFileSync(dest, 'utf8')).toBe('new content');
+  });
+
+  it('leaves dest absent when the copy fails (missing src)', () => {
+    const dir = tmpDir();
+    const src = join(dir, 'does-not-exist.txt');
+    const dest = join(dir, 'dest.txt');
+
+    expect(() => atomicCopy(src, dest)).toThrow();
+
+    expect(existsSync(dest)).toBe(false);
   });
 
   it('does not leave a temp file behind when the rename into place fails', () => {
