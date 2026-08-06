@@ -18,11 +18,13 @@ interface Resource {
 
 /**
  * Runs one reconciliation pass over every configured arr instance: catches up on
- * series/movies a webhook missed (arr was down, a webhook got dropped, etc.), and garbage
- * collects `warrden-` tags/profiles nothing needs anymore. Never throws — a failure
- * against one instance is reported as a `warn` event and does not stop the rest, and the
- * two phases (missed-adds, then GC) are independent so a GC bug can't block missed-add
- * detection or vice versa; GC itself is wrapped in its own try/catch too, so even a
+ * series/movies a webhook missed (arr was down, a webhook got dropped, etc.), catches up on
+ * import history a webhook missed via `ingestBackstop`, and garbage collects `warrden-`
+ * tags/profiles nothing needs anymore. Never throws — a failure against one instance is
+ * reported as a `warn` event and does not stop the rest. The missed-adds and ingest-backstop
+ * phases deliberately share one per-instance `try` — a failure in either surfaces as the same
+ * `reconcile.failed` and only skips the rest of *that* instance's pass, never the others'. GC
+ * is a fully independent phase after the loop, wrapped in its own try/catch too, so even a
  * failure building its own bookkeeping (not just a per-instance failure inside it) can't
  * escape and crash the caller (`scheduleReconcile`'s own net is strictly a last resort).
  *
@@ -209,20 +211,44 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
     return;
   }
 
+  // The arr's history ids can restart below the tracked cursor if its database was ever
+  // rebuilt or restored from a backup taken before this cursor's value — a plain
+  // `cursor` sitting above every live id would otherwise make EVERY record look
+  // at-or-below it forever, silently killing the backstop for good. Only possible when
+  // there's at least one live record (an empty page proves nothing about what the arr's
+  // ids actually are right now). Treat it like a fresh bootstrap: reset to the new max and
+  // enqueue nothing this pass — the next pass resumes normally from there.
+  if (records.length > 0 && maxId < cursor) {
+    syncState.write(cursorKey, maxId);
+    ctx.events.append({
+      kind: 'reconcile.history-cursor-reset',
+      level: 'warn',
+      message: `Import-history for "${name}" reports ids below the tracked cursor (arr database likely rebuilt/restored) — resetting cursor from ${cursor} to ${maxId}; nothing enqueued this pass`,
+      data: { instance: name, cursor, maxId },
+    });
+    return;
+  }
+
   const fresh = records.filter((r) => r.id > cursor);
   const enqueuedTargets: string[] = [];
   const seen = new Set<string>();
+  // Deliberately does not consult ctx.queue.hasJobFor, unlike reconcileInstance's acquire-side
+  // check above: ingest is a recurring per-target pipeline — the same series/movie
+  // legitimately gets a fresh ingest job for every new import, not just once ever.
+  // hasJobFor's any-status match would find that target's very first (possibly long-done)
+  // ingest job and treat every later import as "already handled," permanently silencing this
+  // backstop. The cursor above is the actual dedupe axis here, not job history.
   for (const r of fresh) {
-    const targetKind: TargetKind | null = r.seriesId !== undefined ? 'series' : r.movieId !== undefined ? 'movie' : null;
-    if (targetKind === null) continue;
-    const targetId = (targetKind === 'series' ? r.seriesId : r.movieId)!;
-    const key = `${targetKind}:${targetId}`;
+    const target: { kind: TargetKind; id: number } | null =
+      r.seriesId !== undefined ? { kind: 'series', id: r.seriesId } : r.movieId !== undefined ? { kind: 'movie', id: r.movieId } : null;
+    if (target === null) continue;
+    const key = `${target.kind}:${target.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
     ctx.queue.enqueue({
       pipeline: 'ingest',
-      targetKind,
-      targetId,
+      targetKind: target.kind,
+      targetId: target.id,
       arrInstance: name,
       payload: { source: RECONCILE_SOURCE, downloadId: r.data.downloadId },
     });

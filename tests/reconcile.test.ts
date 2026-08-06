@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { HistoryRecord } from '../src/arr/types.js';
+import type { HistoryRecord, MovieResource } from '../src/arr/types.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { SyncState } from '../src/db/syncState.js';
@@ -8,6 +8,7 @@ import { reconcile } from '../src/reconcile/reconcile.js';
 import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource } from './helpers.js';
 
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
+const movie = (id: number): MovieResource => ({ id, title: `M${id}`, year: 2024, tmdbId: id, added: '', hasFile: true });
 
 /** A `downloadFolderImported` history record fixture for `ingestBackstop` tests — `data.downloadId`
  * defaults to a value derived from `id` so tests that don't care about it don't have to spell it out. */
@@ -336,9 +337,53 @@ describe('reconcile', () => {
   });
 
   describe('ingestBackstop (missed import webhooks)', () => {
+    it('a listRecentImports failure isolates to that instance via reconcile.failed; another instance still bootstraps, and GC still runs', async () => {
+      const brokenClient = fakeArrClient({ series: [series(1)] });
+      brokenClient.listRecentImports = async () => {
+        throw new Error('sonarr history endpoint is down');
+      };
+      const healthyClient = fakeArrClient({ series: [series(2)] });
+      const ctx = makeCtx({
+        config: ConfigSchema.parse({
+          arrs: [
+            arrInstance({ name: 'broken', kind: 'sonarr', baseUrl: 'http://broken:0' }),
+            arrInstance({ name: 'healthy', kind: 'sonarr', baseUrl: 'http://healthy:0' }),
+          ],
+        }),
+        clients: new Map([
+          ['broken', brokenClient],
+          ['healthy', healthyClient],
+        ]),
+      });
+      // Not mocked, just spied — asserting it was called is proof GC's per-instance loop
+      // actually ran, independent of the per-instance loop above that "broken" failed in.
+      const listSpy = vi.spyOn(ManagedObjects.prototype, 'list');
+
+      await expect(reconcile(ctx)).resolves.toBeUndefined();
+
+      const failedEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.failed');
+      expect(failedEvents).toHaveLength(1);
+      expect(failedEvents[0]).toMatchObject({ level: 'warn', data: { instance: 'broken' } });
+      expect(failedEvents[0]!.message).toContain('sonarr history endpoint is down');
+
+      // reconcileInstance's own missed-adds bootstrap ran fine before the throw (it's the
+      // step immediately before ingestBackstop, in the same try) — only ingestBackstop's own
+      // cursor write never happened, since it throws on its very first await.
+      expect(new SyncState(ctx.db).read('bootstrap:broken')).toBe(true);
+      expect(new SyncState(ctx.db).read('history:broken')).toBeUndefined();
+
+      // The healthy instance, unaffected, still bootstrapped normally on both axes — proving
+      // "broken"'s failure is isolated to its own instance, not the whole reconcile() loop.
+      expect(ctx.events.list().some((e) => e.kind === 'reconcile.bootstrapped' && e.data?.instance === 'healthy')).toBe(true);
+      expect(new SyncState(ctx.db).read('history:healthy')).toBeDefined();
+
+      expect(listSpy).toHaveBeenCalled();
+      listSpy.mockRestore();
+    });
+
     it('bootstrap: records the history cursor at the current max id without enqueueing', async () => {
       const client = fakeArrClient({ series: [series(1)] });
-      client.listRecentImports = async () => [historyRecord({ id: 5, seriesId: 1 }), historyRecord({ id: 9, seriesId: 1 })];
+      client.listRecentImports = async () => [historyRecord({ id: 9, seriesId: 1 }), historyRecord({ id: 5, seriesId: 1 })];
       const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
 
       await reconcile(ctx);
@@ -350,50 +395,59 @@ describe('reconcile', () => {
       expect(event!.data).toMatchObject({ instance: 'sonarr', cursor: 9 });
     });
 
-    it('a later pass enqueues one ingest job per record above the cursor and advances it to the new max, ignoring records at or below the old cursor', async () => {
-      const client = fakeArrClient({ series: [series(1), series(2)] });
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
-      client.listRecentImports = async () => [historyRecord({ id: 3, seriesId: 1 })];
-      await reconcile(ctx); // bootstrap: cursor -> 3
+    it.each([
+      { kind: 'series' as const, field: 'seriesId' as const, arrName: 'sonarr' as const, seed: (c: ReturnType<typeof fakeArrClient>) => c.series.push(series(1), series(2)) },
+      { kind: 'movie' as const, field: 'movieId' as const, arrName: 'radarr' as const, seed: (c: ReturnType<typeof fakeArrClient>) => c.movies.push(movie(1), movie(2)) },
+    ])(
+      'a later pass enqueues one ingest job per $kind import above the cursor and advances it to the new max, ignoring records at or below the old cursor',
+      async ({ kind, field, arrName, seed }) => {
+        const client = fakeArrClient();
+        seed(client);
+        const ctx = makeCtx({ config: configWithArrs(arrName), clients: new Map([[arrName, client]]) });
+        client.listRecentImports = async () => [historyRecord({ id: 3, [field]: 1 })];
+        await reconcile(ctx); // bootstrap: cursor -> 3
 
-      client.listRecentImports = async () => [
-        historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }), // at old cursor — ignored
-        historyRecord({ id: 4, seriesId: 1, data: { downloadId: 'dl-4' } }),
-        historyRecord({ id: 6, seriesId: 2, data: { downloadId: 'dl-6' } }),
-      ];
-      await reconcile(ctx);
+        client.listRecentImports = async () => [
+          historyRecord({ id: 6, [field]: 2, data: { downloadId: 'dl-6' } }), // newest-first, per the real /history contract
+          historyRecord({ id: 4, [field]: 1, data: { downloadId: 'dl-4' } }),
+          historyRecord({ id: 3, [field]: 1, data: { downloadId: 'dl-3' } }), // at old cursor — ignored
+        ];
+        await reconcile(ctx);
 
-      const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
-      expect(jobs).toHaveLength(2);
-      expect(jobs.map((j) => j.target_id).sort()).toEqual([1, 2]);
-      const series1Job = jobs.find((j) => j.target_id === 1)!;
-      expect(series1Job).toMatchObject({
-        arr_instance: 'sonarr',
-        target_kind: 'series',
-        payload: { source: 'reconcile', downloadId: 'dl-4' },
-      });
+        const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
+        expect(jobs).toHaveLength(2);
+        expect(jobs.map((j) => j.target_id).sort()).toEqual([1, 2]);
+        const target1Job = jobs.find((j) => j.target_id === 1)!;
+        expect(target1Job).toMatchObject({
+          arr_instance: arrName,
+          target_kind: kind,
+          payload: { source: 'reconcile', downloadId: 'dl-4' },
+        });
 
-      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(6);
-      const event = ctx.events.list().find((e) => e.kind === 'reconcile.missed-imports');
-      expect(event!.data).toMatchObject({ instance: 'sonarr', targets: ['series:1', 'series:2'] });
-      expect(event!.message).toContain('2');
-    });
+        expect(new SyncState(ctx.db).read(`history:${arrName}`)).toBe(6);
+        const event = ctx.events.list().find((e) => e.kind === 'reconcile.missed-imports');
+        expect(event!.data).toMatchObject({ instance: arrName, targets: [`${kind}:2`, `${kind}:1`] });
+        expect(event!.message).toContain('2');
+      },
+    );
 
-    it('multiple new records for the same target collapse into a single enqueue', async () => {
+    it('multiple new records for the same target collapse into a single enqueue, keeping the newest (first-in-page) downloadId', async () => {
       const client = fakeArrClient({ series: [series(1)] });
       const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
       client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
       await reconcile(ctx); // bootstrap: cursor -> 1
 
+      // Real /history is newest-first — the newest (highest id) record for a target is the
+      // first one seen for its key, so it's the one whose downloadId reaches the enqueue.
       client.listRecentImports = async () => [
-        historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } }),
         historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }),
+        historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } }),
       ];
       await reconcile(ctx);
 
       const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
       expect(jobs).toHaveLength(1);
-      expect(jobs[0]).toMatchObject({ target_kind: 'series', target_id: 1, payload: { downloadId: 'dl-2' } });
+      expect(jobs[0]).toMatchObject({ target_kind: 'series', target_id: 1, payload: { downloadId: 'dl-3' } });
     });
 
     it('a record with neither seriesId nor movieId is skipped', async () => {
@@ -421,6 +475,37 @@ describe('reconcile', () => {
       expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
       expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
       expect(new SyncState(ctx.db).read('history:sonarr')).toBe(3);
+    });
+
+    it('cursor regression (arr history ids restarted, e.g. its database was rebuilt/restored from an old backup): resets the cursor to the new max, warns, and enqueues nothing that pass — then resumes normally', async () => {
+      const client = fakeArrClient({ series: [series(1)] });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      client.listRecentImports = async () => [historyRecord({ id: 50, seriesId: 1 })];
+      await reconcile(ctx); // bootstrap: cursor -> 50
+
+      // Every id the arr reports now is lower than the tracked cursor — impossible under
+      // normal operation (ids only grow), the signature of a rebuilt/restored history table.
+      client.listRecentImports = async () => [historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } })];
+      await reconcile(ctx);
+
+      expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
+      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(2);
+      const event = ctx.events.list().find((e) => e.kind === 'reconcile.history-cursor-reset');
+      expect(event).toBeDefined();
+      expect(event!.level).toBe('warn');
+      expect(event!.data).toMatchObject({ instance: 'sonarr', cursor: 50, maxId: 2 });
+      expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
+
+      // Next pass resumes normally from the reset cursor: the id at it is ignored, a genuinely
+      // new one above it enqueues.
+      client.listRecentImports = async () => [
+        historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }),
+        historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } }),
+      ];
+      await reconcile(ctx);
+      const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ target_id: 1, payload: { downloadId: 'dl-3' } });
     });
   });
 });
