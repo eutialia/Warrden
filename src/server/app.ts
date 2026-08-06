@@ -146,11 +146,14 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   const app = new Hono();
 
   // Blocks a cross-origin browser POST/PUT/etc. that dodges CORS preflight by using a
-  // "simple" content type (`text/plain`, form-urlencoded, multipart) — the classic CSRF
-  // vector against a JSON API that parses the body regardless of its declared type (see
-  // `c.req.json()` below, used everywhere). A request with no Origin header at all —
-  // Sonarr/Radarr's own webhook POSTs, or any other server-to-server call — is allowed
-  // through unaffected; only a browser sends Origin in the first place.
+  // "simple" content type (`text/plain`, form-urlencoded, multipart, or no content-type
+  // header at all — hono/csrf treats a missing header the same as `text/plain`) — the
+  // classic CSRF vector against a JSON API that parses the body regardless of its declared
+  // type (see `c.req.json()` below, used everywhere). What actually exempts a
+  // server-to-server call like Sonarr/Radarr's own webhook POST is its `application/json`
+  // content-type, not the absence of an Origin header: hono/csrf only skips the check for
+  // a non-"simple" content-type, so a bare origin-less POST sent with no content-type (or
+  // a form one) is still blocked, same as a browser's would be.
   app.use('/api/*', csrf());
   app.use('/webhooks/*', csrf());
 
@@ -210,6 +213,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // non-acquire pipeline, or an acquire job with no record yet (still pending/running,
     // or it crashed before recording). See `AcquireRecords.outcomeForJob` for why this is
     // an aggregate over every record the job's own run produced, not just the latest one.
+    // A job is "terminal" once its own run has fully finished (done or failed) — its
+    // record window is closed at that point, so it can be bounded exactly rather than
+    // left open to whatever a later re-pick writes for the same target.
+    function isTerminal(job: { status: string }): boolean {
+      return job.status === 'done' || job.status === 'failed';
+    }
+
     function acquireOutcome(job: {
       pipeline: string;
       arr_instance: string;
@@ -221,14 +231,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     }) {
       if (job.pipeline !== 'acquire') return null;
       // Terminal jobs are bounded to their own run window so a later re-pick's records
-      // can't retroactively change this job's badge; live jobs stay unbounded.
-      const terminal = job.status === 'done' || job.status === 'failed';
+      // can't retroactively change this job's badge; live jobs stay unbounded above.
       return acquireRecords.outcomeForJob(
         job.arr_instance,
         job.target_kind,
         job.target_id,
         job.created_at,
-        terminal ? job.updated_at : undefined,
+        isTerminal(job) ? job.updated_at : undefined,
       );
     }
 
@@ -242,10 +251,16 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const id = Number(c.req.param('id'));
       const job = Number.isInteger(id) ? queue.get(id) : null;
       if (!job) return c.json({ error: 'job not found' }, 404);
-      // `listByTarget` orders newest first, so [0] is the latest outcome for this target —
-      // shown for its detail (reasoning, candidates); `acquireOutcome` above is the
-      // aggregate used for the status badge.
-      const acquireRecord = acquireRecords.listByTarget(job.arr_instance, job.target_kind, job.target_id)[0] ?? null;
+      // Bounded to this job's own run window — exactly like `acquireOutcome` above —
+      // rather than the target's unbounded latest record, which could belong to a
+      // different job entirely (an earlier or later re-pick of the same target). Within
+      // that window, `listByTarget` orders newest first, so [0] is this run's latest
+      // outcome, shown for its detail (reasoning, candidates).
+      const acquireRecord =
+        acquireRecords.listByTarget(job.arr_instance, job.target_kind, job.target_id, {
+          since: job.created_at,
+          until: isTerminal(job) ? job.updated_at : undefined,
+        })[0] ?? null;
       return c.json({ job, acquireRecord, acquireOutcome: acquireOutcome(job) });
     });
   }
