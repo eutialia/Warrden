@@ -9,6 +9,7 @@ import { ConfigSchema } from '../src/config/schema.js';
 import { openDb } from '../src/db/db.js';
 import { EventLog } from '../src/events/log.js';
 import { JobQueue } from '../src/jobs/queue.js';
+import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
 
 const createdDirs: string[] = [];
 const openDbs: Database.Database[] = [];
@@ -42,8 +43,38 @@ export function makeCtx(overrides?: Partial<AppContext>): AppContext {
     queue: new JobQueue(db),
     events: new EventLog(db),
     clients: new Map<string, ArrApi>(),
+    llm: new FakeGenerator(),
     ...overrides,
   };
+}
+
+/** A default `Config` (schema defaults only) for tests that build their own `llm.profiles` entries. */
+export function baseConfig(): Config {
+  return ConfigSchema.parse({});
+}
+
+/**
+ * Fake `StructuredGenerator` for pipeline tests: queue up results (or `Error`s to throw) via
+ * the constructor, consumed one per `generate()` call in order. Every call's `opts` is recorded
+ * in `calls` so tests can assert on prompts/schemas/callsites without a real LLM.
+ */
+export class FakeGenerator implements StructuredGenerator {
+  calls: GenerateOpts<unknown>[] = [];
+  private readonly queue: Array<unknown | Error>;
+
+  constructor(queue: Array<unknown | Error> = []) {
+    this.queue = [...queue];
+  }
+
+  async generate<T>(opts: GenerateOpts<T>): Promise<T> {
+    this.calls.push(opts as GenerateOpts<unknown>);
+    if (this.queue.length === 0) {
+      throw new Error('FakeGenerator: no queued result for this call');
+    }
+    const next = this.queue.shift();
+    if (next instanceof Error) throw next;
+    return next as T;
+  }
 }
 
 /** A valid `ArrInstance` config entry, defaulting to a `sonarr` instance named "sonarr". */
