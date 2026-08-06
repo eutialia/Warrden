@@ -5,12 +5,6 @@ import type { EpisodeResource } from '../../arr/types.js';
  * fansub groups shipping multi-audio/multi-sub releases as separate files. */
 export const SIDECAR_EXTS: readonly string[] = ['.mka', '.srt', '.ass'];
 
-/** Case-insensitive `SIDECAR_EXTS` membership test — the one place that contract is
- * enforced, so callers never need to remember to lowercase first. */
-export function isSidecarExt(ext: string): boolean {
-  return SIDECAR_EXTS.includes(ext.toLowerCase());
-}
-
 export type SidecarKind = 'audio' | 'subtitle';
 
 /** `.mka` (case-insensitive) is an external audio track; every other sidecar
@@ -81,24 +75,22 @@ const LANG_TOKENS: Record<string, string> = {
 const LANG_SUBTOKEN_SPLIT = /[\s_&+/]+/;
 
 /**
- * Splits the extension-less name into every dot-separated segment plus the inner
- * content of every `[...]` bracket group (further split into its own sub-tokens — see
- * `LANG_SUBTOKEN_SPLIT`), each tagged with the string offset where its bracket/segment
- * ends. Sorted so the caller can scan from the end of the filename toward the front —
- * the token nearest the extension is the fansub convention's most authoritative one
- * (`Show.sc.ass`). Ties (multiple sub-tokens of one bracket, or a bracket group that
- * happens to touch the extension, e.g. `Title [JPSC].ass`) keep left-to-right
- * insertion order, which is what a stable sort over [dot tokens..., bracket
- * sub-tokens...] gives for free — so e.g. `[CHS_JPN]` resolves to the Chinese variant
- * (the part fansub groups list first), not the language-origin tag.
+ * Splits the extension-less name into candidate groups: every dot-separated segment
+ * (a singleton group) plus every `[...]` bracket group's own sub-tokens (see
+ * `LANG_SUBTOKEN_SPLIT`), each group tagged with the string offset where its
+ * bracket/segment ends. Sorted so the caller can scan from the end of the filename
+ * toward the front — the group nearest the extension is the fansub convention's most
+ * authoritative one (`Show.sc.ass`). Ties (a bracket group that happens to touch the
+ * extension, e.g. `Title [JPSC].ass`) keep left-to-right insertion order, which is
+ * what a stable sort over [dot groups..., bracket groups...] gives for free.
  */
-function langCandidatesFromEnd(name: string): string[] {
-  const tokens: { token: string; end: number }[] = [];
+function langCandidateGroupsFromEnd(name: string): string[][] {
+  const groups: { parts: string[]; end: number }[] = [];
 
   let cursor = 0;
   for (const part of name.split('.')) {
     cursor += part.length;
-    tokens.push({ token: part, end: cursor });
+    groups.push({ parts: [part], end: cursor });
     cursor += 1; // the dot itself
   }
 
@@ -106,25 +98,45 @@ function langCandidatesFromEnd(name: string): string[] {
     const content = m[1] ?? '';
     const end = m.index + m[0].length;
     const parts = content.split(LANG_SUBTOKEN_SPLIT).filter((p) => p.length > 0);
-    for (const part of parts.length > 0 ? parts : [content]) {
-      tokens.push({ token: part, end });
-    }
+    groups.push({ parts: parts.length > 0 ? parts : [content], end });
   }
 
-  return tokens.sort((a, b) => b.end - a.end).map((t) => t.token);
+  return groups.sort((a, b) => b.end - a.end).map((g) => g.parts);
+}
+
+/**
+ * Resolves one candidate group (a bracket's sub-tokens, or a single dot segment) to a
+ * lang tag, in left-to-right order — but a sub-token that maps to a `zh-*` variant
+ * always wins over an earlier non-`zh` match. A bracket pairing a Chinese variant with
+ * a bare language tag (`[JP_SC]`, `[JPN_TC]`) is a dual-sub Chinese release in fansub
+ * convention, matching the intent of the already-merged `jpsc`/`jptc` keys — so it
+ * must resolve the same way regardless of which part happens to be listed first.
+ * Returns `null` when no sub-token matches any `LANG_TOKENS` key.
+ */
+function resolveGroup(parts: string[]): string | null {
+  let firstMatch: string | null = null;
+  for (const part of parts) {
+    const key = part.trim().toLowerCase();
+    if (!Object.prototype.hasOwnProperty.call(LANG_TOKENS, key)) continue;
+    const value = LANG_TOKENS[key]!;
+    if (value.startsWith('zh-')) return value;
+    firstMatch ??= value;
+  }
+  return firstMatch;
 }
 
 /**
  * Finds a fansub language/subtitle tag in a filename and normalizes it via
  * `LANG_TOKENS`. Scans dot-separated trailing tokens and `[...]` bracket contents from
- * the end of the (extension-stripped) name toward the front, returning the first
- * lowercase match. Returns `null` when no known tag is present.
+ * the end of the (extension-stripped) name toward the front, resolving each group (see
+ * `resolveGroup`) and returning the first group that matches. Returns `null` when no
+ * known tag is present anywhere.
  */
 export function parseLangTag(filename: string): string | null {
   const name = filename.replace(/\.[^.]+$/, '');
-  for (const token of langCandidatesFromEnd(name)) {
-    const key = token.trim().toLowerCase();
-    if (Object.prototype.hasOwnProperty.call(LANG_TOKENS, key)) return LANG_TOKENS[key]!;
+  for (const parts of langCandidateGroupsFromEnd(name)) {
+    const resolved = resolveGroup(parts);
+    if (resolved !== null) return resolved;
   }
   return null;
 }

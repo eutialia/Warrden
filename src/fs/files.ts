@@ -18,7 +18,7 @@ const TMP_PREFIX = '.warrden-tmp-';
  * exceptional, state. Returned paths are always absolute (resolved against `dir`) and
  * sorted for deterministic ordering.
  */
-export function walkFiles(dir: string, exts: string[]): string[] {
+export function walkFiles(dir: string, exts: readonly string[]): string[] {
   const root = resolve(dir);
   if (!existsSync(root)) return [];
   const wanted = new Set(exts.map((e) => e.toLowerCase()));

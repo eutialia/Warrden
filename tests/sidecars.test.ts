@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   SIDECAR_EXTS,
-  isSidecarExt,
   sidecarKindForExt,
   parseEpisodeRef,
   parseLangTag,
@@ -24,18 +23,6 @@ describe('SIDECAR_EXTS / sidecarKindForExt', () => {
     ['.MKA', 'audio'],
   ])('sidecarKindForExt(%s) -> %s', (ext, expected) => {
     expect(sidecarKindForExt(ext)).toBe(expected);
-  });
-
-  it.each([
-    ['.mka', true],
-    ['.srt', true],
-    ['.ass', true],
-    ['.MKA', true],
-    ['.Srt', true],
-    ['.mkv', false],
-    ['.txt', false],
-  ])('isSidecarExt(%s) -> %s', (ext, expected) => {
-    expect(isSidecarExt(ext)).toBe(expected);
   });
 });
 
@@ -128,6 +115,12 @@ describe('parseLangTag', () => {
     ['[Group] Title - 05 [GB_JP].ass', 'zh-Hans'],
     ['[Group] Title - 05 [CHS&JPN].ass', 'zh-Hans'],
     ['[Group] Title - 05 [繁中+日語].ass', 'zh-Hant'],
+    // ...and the reverse ordering: a zh-* sub-token still wins even when it's listed
+    // SECOND — a bracket pairing Japanese with a Chinese variant is a dual-sub Chinese
+    // release either way, matching merged jpsc/jptc keys' intent, regardless of which
+    // part fansub groups happened to write first
+    ['[Group] Title - 05 [JP_SC].ass', 'zh-Hans'],
+    ['[Group] Title - 05 [JPN_TC].ass', 'zh-Hant'],
   ])('parseLangTag(%s) -> %s', (name, expected) => {
     expect(parseLangTag(name)).toBe(expected);
   });
