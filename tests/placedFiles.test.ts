@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PlacedFiles, type UpsertPlacedFileInput } from '../src/db/placedFiles.js';
 import { freshDb } from './helpers.js';
 
@@ -28,23 +28,29 @@ describe('PlacedFiles', () => {
   });
 
   it('upsert refreshes video_path, data, and created_at on re-placement', () => {
-    const files = new PlacedFiles(freshDb());
-    const base = baseInput({ data: { lang: 'zh-Hans' } });
-    files.upsert(base);
-    const firstRow = files.findByPlacedPath(base.placedPath)!;
+    vi.useFakeTimers();
+    try {
+      const files = new PlacedFiles(freshDb());
+      const base = baseInput({ data: { lang: 'zh-Hans' } });
+      vi.setSystemTime(1_000);
+      files.upsert(base);
 
-    files.upsert({
-      ...base,
-      videoPath: '/lib/Show/S01/Show - S01E05 (renamed).mkv',
-      data: { lang: 'zh-Hant' },
-    });
-    const rows = files.listByTarget('sonarr', 'series', 7);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      video_path: '/lib/Show/S01/Show - S01E05 (renamed).mkv',
-      data: { lang: 'zh-Hant' },
-    });
-    expect(rows[0]!.created_at).toBeGreaterThanOrEqual(firstRow.created_at);
+      vi.setSystemTime(2_000);
+      files.upsert({
+        ...base,
+        videoPath: '/lib/Show/S01/Show - S01E05 (renamed).mkv',
+        data: { lang: 'zh-Hant' },
+      });
+      const rows = files.listByTarget('sonarr', 'series', 7);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        video_path: '/lib/Show/S01/Show - S01E05 (renamed).mkv',
+        data: { lang: 'zh-Hant' },
+        created_at: 2_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('defaults data to {} and jobId to null when not given', () => {

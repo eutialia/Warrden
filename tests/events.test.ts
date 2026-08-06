@@ -74,5 +74,36 @@ describe('EventLog', () => {
       expect(items).toHaveLength(1);
       expect(items[0]).toMatchObject({ message: 'second' });
     });
+
+    it('mirrors before fanning out to subscribers — a subscriber already sees the attention item', () => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const attention = new AttentionItems(db);
+      let seenDuringFanout = -1;
+
+      log.subscribe(() => {
+        seenDuringFanout = attention.list({ status: 'open' }).length;
+      });
+
+      log.append({ kind: 'ingest.no-match', level: 'attention', message: 'm' });
+
+      expect(seenDuringFanout).toBe(1);
+    });
+
+    it('a mirror write failure does not stop the row from being persisted/returned or reaching subscribers', () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const db = freshDb();
+      const log = new EventLog(db);
+      db.exec('DROP TABLE attention_items');
+      const seen: string[] = [];
+      log.subscribe((e) => seen.push(e.kind));
+
+      const row = log.append({ kind: 'ingest.no-match', level: 'attention', message: 'm' });
+
+      expect(row.kind).toBe('ingest.no-match'); // row is still persisted and returned
+      expect(seen).toEqual(['ingest.no-match']); // subscribers still ran
+      expect(consoleError).toHaveBeenCalledWith('EventLog attention mirror failed', expect.anything());
+      consoleError.mockRestore();
+    });
   });
 });

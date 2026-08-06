@@ -43,6 +43,20 @@ describe('AttentionItems', () => {
     expect(items.list()).toHaveLength(2);
   });
 
+  it('the same jobId with a different kind does not dedupe (kind is part of the key)', () => {
+    const items = new AttentionItems(freshDb());
+    items.open({ kind: 'ingest.no-match', message: 'first', jobId: 1 });
+    items.open({ kind: 'ingest.ambiguous', message: 'second', jobId: 1 });
+    expect(items.list()).toHaveLength(2);
+  });
+
+  it('the same kind with a different jobId does not dedupe (jobId is part of the key)', () => {
+    const items = new AttentionItems(freshDb());
+    items.open({ kind: 'ingest.no-match', message: 'first', jobId: 1 });
+    items.open({ kind: 'ingest.no-match', message: 'second', jobId: 2 });
+    expect(items.list()).toHaveLength(2);
+  });
+
   it('does not dedupe against a row that is no longer open', () => {
     const items = new AttentionItems(freshDb());
     const first = items.open({ kind: 'ingest.no-match', message: 'first', jobId: 1 });

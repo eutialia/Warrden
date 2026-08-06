@@ -58,9 +58,15 @@ export class EventLog {
     const parsed = parseRow(row);
 
     // Attention-level events double as attention items: anything a human needs to see
-    // shows up on the Attention view without every caller having to write both.
+    // shows up on the Attention view without every caller having to write both. Same
+    // containment as the subscriber loop below: the event row above is already
+    // persisted, so a bookkeeping failure here must not fail the caller's pipeline.
     if (parsed.level === 'attention') {
-      new AttentionItems(this.db).open({ kind: parsed.kind, message: parsed.message, jobId: parsed.job_id ?? undefined, data: parsed.data });
+      try {
+        new AttentionItems(this.db).open({ kind: parsed.kind, message: parsed.message, jobId: parsed.job_id ?? undefined, data: parsed.data });
+      } catch (err) {
+        console.error('EventLog attention mirror failed', err);
+      }
     }
 
     for (const fn of this.subscribers) {
