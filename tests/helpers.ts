@@ -5,8 +5,15 @@ import type Database from 'better-sqlite3';
 import { vi } from 'vitest';
 import type {
   ArrApi,
+  EpisodeFileResource,
+  EpisodeResource,
+  HistoryRecord,
+  ManualImportFile,
+  ManualImportItem,
+  MovieFileResource,
   MovieResource,
   NotificationSummary,
+  QueueRecord,
   ReleaseCandidate,
   ReleaseProfileResource,
   SeriesResource,
@@ -274,6 +281,17 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       client.notifications.push(created);
       return created;
     }),
+    deleteNotification: vi.fn(async (): Promise<void> => {}),
+
+    listQueue: async (): Promise<QueueRecord[]> => [],
+    listSeriesHistory: async (): Promise<HistoryRecord[]> => [],
+    listMovieHistory: async (): Promise<HistoryRecord[]> => [],
+    listRecentImports: async (): Promise<HistoryRecord[]> => [],
+    listEpisodes: async (): Promise<EpisodeResource[]> => [],
+    listEpisodeFiles: async (): Promise<EpisodeFileResource[]> => [],
+    listMovieFiles: async (): Promise<MovieFileResource[]> => [],
+    listManualImport: async (): Promise<ManualImportItem[]> => [],
+    executeManualImport: vi.fn(async (): Promise<void> => {}),
 
     pushTag(label: string): TagResource {
       const tag: TagResource = { id: nextTagId++, label };

@@ -56,6 +56,81 @@ export interface ReleaseProfileResource {
 export interface NotificationSummary {
   id: number;
   name: string;
+  onDownload?: boolean;
+  onUpgrade?: boolean;
+}
+
+export interface QueueRecord {
+  id: number;
+  downloadId?: string;
+  seriesId?: number;
+  movieId?: number;
+  status: string; // 'downloading' | 'completed' | ...
+  trackedDownloadStatus?: string; // 'ok' | 'warning' | 'error'
+  trackedDownloadState?: string; // 'downloading' | 'importPending' | 'importing' | 'imported' | ...
+  title: string;
+}
+
+export interface HistoryRecord {
+  id: number;
+  seriesId?: number;
+  movieId?: number;
+  episodeId?: number;
+  eventType: string; // 'downloadFolderImported' is the one Ingest cares about
+  date: string;
+  sourceTitle: string;
+  // droppedPath / importedPath / downloadId live here on import events
+  data: Record<string, string | undefined>;
+}
+
+export interface EpisodeResource {
+  id: number;
+  seriesId: number;
+  seasonNumber: number;
+  episodeNumber: number;
+  absoluteEpisodeNumber?: number;
+  title: string;
+  episodeFileId: number; // 0 = no file on disk
+  hasFile: boolean;
+}
+
+export interface EpisodeFileResource {
+  id: number;
+  seriesId: number;
+  seasonNumber: number;
+  relativePath: string;
+  path: string;
+}
+export interface MovieFileResource {
+  id: number;
+  movieId: number;
+  relativePath: string;
+  path: string;
+}
+
+/** One row from GET /manualimport — quality/languages are opaque blobs we round-trip
+ * verbatim into the ManualImport command, never inspect. */
+export interface ManualImportItem {
+  path: string;
+  folderName: string;
+  size: number;
+  quality: Record<string, unknown>;
+  languages: Record<string, unknown>[];
+  episodes: { id: number }[];
+  movie?: { id: number };
+  releaseGroup?: string;
+  rejections: { reason: string }[];
+}
+
+export interface ManualImportFile {
+  path: string;
+  folderName?: string;
+  seriesId?: number;
+  episodeIds?: number[];
+  movieId?: number;
+  quality: Record<string, unknown>;
+  languages: Record<string, unknown>[];
+  releaseGroup?: string;
 }
 
 /**
@@ -79,4 +154,20 @@ export interface ArrApi {
   deleteReleaseProfile(id: number): Promise<void>;
   listNotifications(): Promise<NotificationSummary[]>;
   createNotification(body: object): Promise<NotificationSummary>;
+  listQueue(): Promise<QueueRecord[]>;
+  listSeriesHistory(seriesId: number): Promise<HistoryRecord[]>; // Sonarr, imports only
+  listMovieHistory(movieId: number): Promise<HistoryRecord[]>; // Radarr, imports only
+  listRecentImports(pageSize: number): Promise<HistoryRecord[]>; // newest-first global import history
+  listEpisodes(seriesId: number): Promise<EpisodeResource[]>;
+  listEpisodeFiles(seriesId: number): Promise<EpisodeFileResource[]>;
+  listMovieFiles(movieId: number): Promise<MovieFileResource[]>;
+  listManualImport(p: {
+    folder?: string;
+    downloadId?: string;
+    seriesId?: number;
+    movieId?: number;
+    filterExistingFiles?: boolean;
+  }): Promise<ManualImportItem[]>;
+  executeManualImport(files: ManualImportFile[], importMode: 'copy' | 'move'): Promise<void>;
+  deleteNotification(id: number): Promise<void>;
 }

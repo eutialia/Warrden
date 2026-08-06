@@ -1,8 +1,15 @@
 import type { ArrInstance } from '../config/schema.js';
 import type {
   ArrApi,
+  EpisodeFileResource,
+  EpisodeResource,
+  HistoryRecord,
+  ManualImportFile,
+  ManualImportItem,
+  MovieFileResource,
   MovieResource,
   NotificationSummary,
+  QueueRecord,
   ReleaseCandidate,
   ReleaseProfileResource,
   SeriesResource,
@@ -111,6 +118,58 @@ export class ArrClient implements ArrApi {
 
   createNotification(body: object): Promise<NotificationSummary> {
     return this.request('POST', '/notification', { body });
+  }
+
+  async listQueue(): Promise<QueueRecord[]> {
+    const res = await this.request<{ records: QueueRecord[] }>('GET', '/queue', {
+      query: { page: 1, pageSize: 1000, includeUnknownSeriesItems: true },
+    });
+    return res.records;
+  }
+
+  listSeriesHistory(seriesId: number): Promise<HistoryRecord[]> {
+    return this.request('GET', '/history/series', { query: { seriesId, eventType: 'downloadFolderImported' } });
+  }
+
+  listMovieHistory(movieId: number): Promise<HistoryRecord[]> {
+    return this.request('GET', '/history/movie', { query: { movieId, eventType: 'downloadFolderImported' } });
+  }
+
+  async listRecentImports(pageSize: number): Promise<HistoryRecord[]> {
+    const res = await this.request<{ records: HistoryRecord[] }>('GET', '/history', {
+      query: { page: 1, pageSize, sortKey: 'date', sortDirection: 'descending', eventType: 'downloadFolderImported' },
+    });
+    return res.records;
+  }
+
+  listEpisodes(seriesId: number): Promise<EpisodeResource[]> {
+    return this.request('GET', '/episode', { query: { seriesId } });
+  }
+
+  listEpisodeFiles(seriesId: number): Promise<EpisodeFileResource[]> {
+    return this.request('GET', '/episodefile', { query: { seriesId } });
+  }
+
+  listMovieFiles(movieId: number): Promise<MovieFileResource[]> {
+    return this.request('GET', '/moviefile', { query: { movieId } });
+  }
+
+  listManualImport(p: {
+    folder?: string;
+    downloadId?: string;
+    seriesId?: number;
+    movieId?: number;
+    filterExistingFiles?: boolean;
+  }): Promise<ManualImportItem[]> {
+    return this.request('GET', '/manualimport', { query: { ...p } });
+  }
+
+  async executeManualImport(files: ManualImportFile[], importMode: 'copy' | 'move'): Promise<void> {
+    await this.request('POST', '/command', { body: { name: 'ManualImport', files, importMode } });
+  }
+
+  async deleteNotification(id: number): Promise<void> {
+    await this.request('DELETE', `/notification/${id}`);
   }
 
   private async request<T>(
