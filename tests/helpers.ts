@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
-import type { ArrApi } from '../src/arr/types.js';
+import type { ArrApi, ReleaseCandidate } from '../src/arr/types.js';
 import type { AppContext } from '../src/context.js';
 import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -95,6 +95,28 @@ export function configWithArrs(...names: Array<'sonarr' | 'radarr'>): Config {
   return ConfigSchema.parse({
     arrs: names.map((name) => arrInstance({ name, kind: name, baseUrl: `http://${name}:0` })),
   });
+}
+
+/**
+ * A `ReleaseCandidate` fixture with sane defaults (a realistic 1080p dual-audio-style
+ * anime release, ~1.4 GB, 25 seeders, not rejected) — override any field for the case
+ * under test. Used by acquire pipeline tests (prefilter, pick) so each test only spells
+ * out the fields it cares about.
+ */
+export function candidate(overrides?: Partial<ReleaseCandidate>): ReleaseCandidate {
+  return {
+    guid: 'release-guid-1',
+    indexerId: 1,
+    indexer: 'Nyaa',
+    title: 'Sousou no Frieren - S01E01 [1080p][Dual Audio][HEVC 10bit]',
+    size: Math.round(1.4 * 1_073_741_824),
+    seeders: 25,
+    leechers: 2,
+    rejected: false,
+    rejections: [],
+    publishDate: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
 }
 
 /**
