@@ -10,8 +10,8 @@ import { JobQueue } from './jobs/queue.js';
 import { startRunner } from './jobs/runner.js';
 import { AiSdkGenerator } from './llm/generator.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
-import { reconcile } from './reconcile/reconcile.js';
 import { createApp } from './server/app.js';
+import { reclaimAbandonedJobs, scheduleReconcile } from './startup.js';
 
 /** Builds the fully-wired `AppContext` for a fresh process: config, db, one `ArrClient`
  * per configured instance, and the shared queue/event-log/LLM singletons everything else
@@ -33,50 +33,24 @@ function buildContext(dataDir: string): AppContext {
   };
 }
 
-/** Resets any job left `running` by a crashed previous process so it's claimable again,
- * reporting how many (if any) via the event log. */
-function reclaimAbandonedJobs(ctx: AppContext): void {
-  const reclaimed = ctx.queue.reclaimAbandoned();
-  if (reclaimed > 0) {
+/** Fires `registerWebhooks` in the background rather than blocking startup on it — a slow
+ * or unreachable arr instance would otherwise delay the HTTP server (and every other arr's
+ * own webhook registration) coming up at all. `registerWebhooks` already isolates
+ * per-instance failures internally; this `catch` is the last-resort net for anything that
+ * still escapes it, reported as a `warn` event (rather than `console.error`, so it's
+ * visible on the dashboard like every other startup/background failure). */
+function registerWebhooksInBackground(ctx: AppContext): void {
+  registerWebhooks(ctx).catch((err: unknown) => {
     ctx.events.append({
-      kind: 'jobs.reclaimed',
+      kind: 'webhook.register-crashed',
       level: 'warn',
-      message: `Reclaimed ${reclaimed} job(s) left "running" by a previous, presumably crashed, run`,
-      data: { count: reclaimed },
+      message: `Webhook registration threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
     });
-  }
-}
-
-/** Runs `reconcile()` once immediately, then on `reconcileIntervalMinutes`. `reconcile`
- * already isolates per-instance failures internally, but this is the last-resort net for
- * anything that still escapes it (e.g. a `managed_objects`/`sync_state` query failing
- * outright) — reconciliation is background maintenance, never worth crashing the process
- * over. Returns a stop function that clears the interval. */
-function scheduleReconcile(ctx: AppContext): () => void {
-  const runOnce = (): void => {
-    reconcile(ctx).catch((err: unknown) => {
-      ctx.events.append({
-        kind: 'reconcile.crashed',
-        level: 'warn',
-        message: `Reconciliation pass threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    });
-  };
-  runOnce();
-  const interval = setInterval(runOnce, ctx.config.reconcileIntervalMinutes * 60_000);
-  return () => clearInterval(interval);
+  });
 }
 
 async function main(): Promise<void> {
   const ctx = buildContext(resolveDataDir());
-
-  try {
-    await registerWebhooks(ctx);
-  } catch (err) {
-    // registerWebhooks already logs and continues per-instance internally; this is a
-    // last-resort net so a bug in that loop can't take the rest of startup down with it.
-    console.error('registerWebhooks failed at startup', err);
-  }
 
   reclaimAbandonedJobs(ctx);
 
@@ -86,6 +60,10 @@ async function main(): Promise<void> {
   const server = serve({ fetch: createApp(ctx).fetch, port: ctx.config.server.port }, () => {
     console.log(`warrden listening on port ${ctx.config.server.port}`);
   });
+
+  // After serve() so a slow/unreachable arr can never delay the server (and dashboard)
+  // coming up — fire-and-forget, not awaited.
+  registerWebhooksInBackground(ctx);
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
