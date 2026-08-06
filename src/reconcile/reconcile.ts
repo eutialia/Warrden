@@ -184,8 +184,10 @@ async function gcInstance(
       if (liveProfile) {
         if (liveProfile.name.startsWith(WARRDEN_PROFILE_PREFIX)) {
           // Order matters: deleting the tag first would leave a warrden-owned profile
-          // pinned to a now-dead tag id in the arr — a silently inert pin.
-          await client.deleteReleaseProfile(liveProfile.id!);
+          // pinned to a now-dead tag id in the arr — a silently inert pin. `profileRow`'s
+          // registered id is the same one `liveProfile` was matched on, so it's used here
+          // directly rather than asserting `liveProfile.id` (typed optional) non-null.
+          await client.deleteReleaseProfile(profileRow.external_id);
         } else {
           // pinReleaseGroup can adopt a *user's* profile by tag membership rather than by
           // name (see its comment on matching by tag). Never delete something we didn't
