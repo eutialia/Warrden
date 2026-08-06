@@ -354,6 +354,26 @@ export function episodeResource(overrides?: Partial<EpisodeResource>): EpisodeRe
 }
 
 /**
+ * A `ManualImportItem` fixture with sane defaults (an unresolved video file with no
+ * episode guess and no rejections) — override `episodes`/`rejections` to exercise the
+ * arr-already-resolved path, or `path`/`size` for filename-matching/prompt-rendering
+ * tests. Used by `planBundleImport` tests (`src/pipelines/ingest/bundle.ts`).
+ */
+export function manualImportItem(overrides?: Partial<ManualImportItem>): ManualImportItem {
+  return {
+    path: '/downloads/Show/Show - S01E01.mkv',
+    folderName: 'Show',
+    size: Math.round(1.4 * BYTES_PER_GB),
+    quality: { quality: { id: 1, name: 'Bluray-1080p' } },
+    languages: [{ id: 1, name: 'Japanese' }],
+    episodes: [],
+    releaseGroup: 'Group',
+    rejections: [],
+    ...overrides,
+  };
+}
+
+/**
  * A `ReleaseCandidate` fixture with sane defaults (a realistic 1080p dual-audio-style
  * anime release, ~1.4 GB, 25 seeders, not rejected) — override any field for the case
  * under test. Used by acquire pipeline tests (prefilter, pick) so each test only spells
