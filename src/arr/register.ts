@@ -45,8 +45,10 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         ],
         onSeriesAdd: true,
         onMovieAdded: true,
-        onDownload: true,
-        onUpgrade: true,
+        // onDownload/onUpgrade deliberately omitted: Phase 1 (Acquire) only handles
+        // series/movie "added" events (see `handleWebhook`'s WebhookSchema) — subscribing
+        // to events nothing consumes just means Sonarr/Radarr fire webhooks Warrden
+        // silently drops. Phase 2 (Ingest) re-registers with these once it lands.
       });
 
       managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: created.id, name: NOTIFICATION_NAME });

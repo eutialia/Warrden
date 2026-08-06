@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { registerWebhooks } from '../src/arr/register.js';
 import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
 import type { ArrApi } from '../src/arr/types.js';
@@ -25,9 +25,12 @@ describe('registerWebhooks', () => {
       ],
       onSeriesAdd: true,
       onMovieAdded: true,
-      onDownload: true,
-      onUpgrade: true,
     });
+    // Phase 1 only handles "added" events — subscribing to events nothing consumes yet
+    // would just mean Sonarr/Radarr fire webhooks Warrden silently drops.
+    const body = (client.createNotification as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Record<string, unknown>;
+    expect(body).not.toHaveProperty('onDownload');
+    expect(body).not.toHaveProperty('onUpgrade');
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 1, name: 'Warrden' }]);
   });
 
