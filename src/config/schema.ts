@@ -49,9 +49,9 @@ export const ConfigSchema = z.object({
         .default(() => ({ dev: {}, prod: {} })),
       keys: z
         .object({
-          openrouter: z.string().optional(),
-          openai: z.string().optional(),
-          anthropic: z.string().optional(),
+          openrouter: z.string().min(1).optional(),
+          openai: z.string().min(1).optional(),
+          anthropic: z.string().min(1).optional(),
         })
         .default(() => ({})),
     })

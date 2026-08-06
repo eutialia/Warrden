@@ -29,37 +29,67 @@ const REDACTED_SECRET = '•••';
 
 type LlmKeys = Config['llm']['keys'];
 
-/** Replaces every *set* `llm.keys` value with a `•••` sentinel for `GET /api/config` —
- * an unset key stays absent rather than becoming a fake sentinel, so the dashboard can
- * tell "never configured" apart from "configured, just not shown". */
+/** Replaces every *set* `llm.keys` value, and every `arrs[].apiKey` (always set — it's
+ * required by `ArrInstanceSchema`), with a `•••` sentinel for `GET /api/config`. An unset
+ * llm key stays absent rather than becoming a fake sentinel, so the dashboard can tell
+ * "never configured" apart from "configured, just not shown". */
 function redactConfig(config: Config): Config {
   const redactedKeys = Object.fromEntries(
     Object.entries(config.llm.keys).map(([key, value]) => [key, value === undefined ? value : REDACTED_SECRET]),
   ) as LlmKeys;
-  return { ...config, llm: { ...config.llm, keys: redactedKeys } };
+  const redactedArrs = config.arrs.map((arr) => ({ ...arr, apiKey: REDACTED_SECRET }));
+  return { ...config, arrs: redactedArrs, llm: { ...config.llm, keys: redactedKeys } };
 }
 
-/** Undoes `redactConfig` on the way in: any `llm.keys` value that's still the `•••`
- * sentinel (the dashboard round-tripped it unchanged) is swapped back for the real
- * stored secret before validating/saving, so a config edit that doesn't touch keys
- * can't accidentally wipe them. A key set to anything else (a new value, or removed
- * entirely) passes through as the caller wrote it. */
+/**
+ * Undoes `redactConfig` on the way in, for both secrets it redacts:
+ *
+ * - `llm.keys`: any value still equal to the `•••` sentinel (the dashboard round-tripped
+ *   it unchanged) is swapped back for the real stored secret. A key set to anything else
+ *   (a new value, or dropped from the object) passes through as the caller wrote it. The
+ *   whole `llm.keys` object being missing — not just individual keys inside it — is
+ *   treated the same as every key being the sentinel: a PUT that doesn't mention keys at
+ *   all (e.g. a client only patching an unrelated field) must not fall through to the
+ *   schema's `{}` default and silently erase every stored secret.
+ * - `arrs[].apiKey`: same sentinel swap, matched by `name` against the stored `arrs`
+ *   list — an arr entry keeps its stored key if its `apiKey` is still `•••`, a brand-new
+ *   or rotated key passes through unchanged. Unlike `llm.keys`, a missing `arrs` array or
+ *   a missing `apiKey` on an entry is *not* given the same treatment: an absent `arrs`
+ *   legitimately means "remove every instance" (the schema default), and `apiKey` is a
+ *   required field, so dropping it is correctly a 400, not a silent no-op.
+ */
 function restoreSecrets(body: unknown, current: Config): unknown {
   if (typeof body !== 'object' || body === null) return body;
   const record = body as Record<string, unknown>;
-  const llm = record.llm;
-  if (typeof llm !== 'object' || llm === null) return body;
-  const llmRecord = llm as Record<string, unknown>;
-  const keys = llmRecord.keys;
-  if (typeof keys !== 'object' || keys === null) return body;
-  const keysRecord = keys as Record<string, unknown>;
-  const restoredKeys = Object.fromEntries(
-    Object.entries(keysRecord).map(([key, value]) => [
-      key,
-      value === REDACTED_SECRET ? current.llm.keys[key as keyof LlmKeys] : value,
-    ]),
-  );
-  return { ...record, llm: { ...llmRecord, keys: restoredKeys } };
+
+  const llmValue = record.llm;
+  const llmRecord: Record<string, unknown> =
+    typeof llmValue === 'object' && llmValue !== null ? { ...(llmValue as Record<string, unknown>) } : {};
+
+  const keysValue = llmRecord.keys;
+  const restoredKeys: Record<string, unknown> =
+    typeof keysValue === 'object' && keysValue !== null
+      ? Object.fromEntries(
+          Object.entries(keysValue as Record<string, unknown>).map(([key, value]) => [
+            key,
+            value === REDACTED_SECRET ? current.llm.keys[key as keyof LlmKeys] : value,
+          ]),
+        )
+      : current.llm.keys; // `llm.keys` omitted entirely -> every stored secret survives as-is
+
+  const arrsValue = record.arrs;
+  const restoredArrs = Array.isArray(arrsValue) ? arrsValue.map((entry) => restoreArrApiKey(entry, current)) : arrsValue;
+
+  return { ...record, arrs: restoredArrs, llm: { ...llmRecord, keys: restoredKeys } };
+}
+
+function restoreArrApiKey(entry: unknown, current: Config): unknown {
+  if (typeof entry !== 'object' || entry === null) return entry;
+  const arrRecord = entry as Record<string, unknown>;
+  if (arrRecord.apiKey !== REDACTED_SECRET) return entry;
+  const name = arrRecord.name;
+  const stored = typeof name === 'string' ? current.arrs.find((a) => a.name === name) : undefined;
+  return { ...arrRecord, apiKey: stored?.apiKey ?? arrRecord.apiKey };
 }
 
 const AcquireBodySchema = z.object({
@@ -68,6 +98,20 @@ const AcquireBodySchema = z.object({
   targetId: z.number().int(),
   title: z.string().optional(),
 });
+
+/**
+ * Reads the *current* config directly off `ctx` rather than a value captured once at
+ * `createApp` time — every route below shares this so a `PUT /api/config` (which
+ * reassigns `ctx.config` in place) is visible to all of them on their very next request,
+ * not just to `/api/config` itself. Only ever called from routes gated on `ctx.config`
+ * at mount time, and the only mutation afterward is a successful PUT's re-validated
+ * `Config`, so `ctx.config` can never actually be unset by the time this runs — the
+ * throw documents that invariant instead of laundering it through an `as Config` cast.
+ */
+function requireConfig(ctx: Partial<AppContext>): Config {
+  if (!ctx.config) throw new Error('config unexpectedly unset after being gated on at startup');
+  return ctx.config;
+}
 
 export function createApp(ctx: Partial<AppContext>): Hono {
   const app = new Hono();
@@ -104,11 +148,15 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   }
 
   if (ctx.queue && ctx.events && ctx.config) {
-    const webhookCtx = { queue: ctx.queue, events: ctx.events, config: ctx.config };
+    const queue = ctx.queue;
+    const events = ctx.events;
 
     app.post('/webhooks/:instance', async (c) => {
       const instance = c.req.param('instance');
       const payload: unknown = await c.req.json().catch(() => undefined);
+      // `requireConfig(ctx)` (not a value snapshotted here at mount time) so a config
+      // reloaded via `PUT /api/config` is picked up starting with the very next webhook.
+      const webhookCtx = { queue, events, config: requireConfig(ctx) };
       // Always 200: the arrs retry non-2xx webhook deliveries, which we don't want.
       return c.json(handleWebhook(webhookCtx, instance, payload));
     });
@@ -133,7 +181,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     });
   }
 
-  if (ctx.queue) {
+  if (ctx.queue && ctx.config) {
     const queue = ctx.queue;
 
     app.post('/api/acquire', async (c) => {
@@ -143,6 +191,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       }
       const { arrInstance, targetKind, targetId, title } = parsed.data;
+      // Same "known instance" check `handleWebhook` does — this is a client mistake
+      // (typo'd/removed instance name), so it's a 400 here rather than the webhook
+      // route's always-200 "unknown instance" (which exists only because arrs retry
+      // non-2xx deliveries; nothing retries a dashboard button click).
+      if (!requireConfig(ctx).arrs.some((a) => a.name === arrInstance)) {
+        return c.json({ error: `unknown arr instance "${arrInstance}"` }, 400);
+      }
       const result = queue.enqueue({
         pipeline: 'acquire',
         arrInstance,
@@ -158,12 +213,12 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     const dataDir = ctx.dataDir;
 
     app.get('/api/config', (c) => {
-      return c.json(redactConfig(ctx.config as Config));
+      return c.json(redactConfig(requireConfig(ctx)));
     });
 
     app.put('/api/config', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
-      const merged = restoreSecrets(body, ctx.config as Config);
+      const merged = restoreSecrets(body, requireConfig(ctx));
       const result = ConfigSchema.safeParse(merged);
       if (!result.success) {
         return c.json({ error: 'invalid config', issues: result.error.issues }, 400);
