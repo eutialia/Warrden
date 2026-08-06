@@ -168,9 +168,7 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     async listSeries(): Promise<SeriesResource[]> {
       return client.series.map((s) => ({ ...s, tags: [...s.tags] }));
     },
-    async listMovies(): Promise<MovieResource[]> {
-      return [...client.movies];
-    },
+    listMovies: vi.fn(async (): Promise<MovieResource[]> => [...client.movies]),
     async getSeries(id: number): Promise<SeriesResource> {
       const s = client.series.find((x) => x.id === id);
       if (!s) throw new Error(`fakeArrClient: no series with id ${id}`);
@@ -182,9 +180,11 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       client.series[idx] = { ...s, tags: [...s.tags] };
       return client.series[idx];
     }),
-    async searchReleases(): Promise<ReleaseCandidate[]> {
-      return [...client.releases];
-    },
+    searchReleases: vi.fn(
+      async (_params: { seriesId?: number; seasonNumber?: number; movieId?: number }): Promise<ReleaseCandidate[]> => [
+        ...client.releases,
+      ],
+    ),
     grabRelease: vi.fn(async (guid: string, indexerId: number): Promise<void> => {
       client.grabbed.push({ guid, indexerId });
     }),

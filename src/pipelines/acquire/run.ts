@@ -1,11 +1,12 @@
 import type { ArrApi, ReleaseCandidate } from '../../arr/types.js';
 import type { AppContext } from '../../context.js';
+import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { pickRelease } from './pick.js';
 import { pinReleaseGroup } from './pin.js';
 import { prefilter, type DroppedCandidate } from './prefilter.js';
 
-type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
+const DEFAULT_SOURCE = 'webhook';
 
 interface RecordOutcomeInput {
   status: AcquireStatus;
@@ -23,8 +24,14 @@ interface RecordOutcomeInput {
  * it. "No candidates" and "none viable" are expected, normal outcomes, not failures: each is
  * recorded in `acquire_records` and raised as an `attention` event so it surfaces on the
  * dashboard, and the job still completes successfully. Only genuinely unexpected failures
- * (unknown arr instance, an arr API error, a picked guid that vanished) throw, which
- * `startRunner` turns into a job failure via `queue.fail`.
+ * before the grab (unknown arr instance, an arr API error, a picked guid that vanished)
+ * throw, which `startRunner` turns into a job failure via `queue.fail`.
+ *
+ * Once `grabRelease` has succeeded, nothing after it is allowed to turn the job into a
+ * failure: the grab is the irreversible, valuable part of the job, and a job failure would
+ * retry the whole search-and-pick from scratch on an arr that's already downloading the
+ * release. A pin failure past that point is caught, reported as a `warn` event, and the
+ * outcome still records as `grabbed`.
  *
  * Phase 1 searches a whole series at once (`{seriesId}`, no per-season search) and a whole
  * movie (`{movieId}`).
@@ -83,10 +90,22 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
   await client.grabRelease(pick.guid, picked.indexerId);
 
   if (job.target_kind === 'series' && pick.releaseGroup) {
-    await pinReleaseGroup(
-      { client, db: ctx.db },
-      { instanceName: job.arr_instance, seriesId: job.target_id, group: pick.releaseGroup },
-    );
+    try {
+      await pinReleaseGroup(
+        { client, db: ctx.db },
+        { instanceName: job.arr_instance, seriesId: job.target_id, group: pick.releaseGroup },
+      );
+    } catch (err) {
+      ctx.events.append({
+        kind: 'acquire.pin-failed',
+        level: 'warn',
+        jobId: job.id,
+        message: `Grabbed "${picked.title}" but failed to pin release group "${pick.releaseGroup}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, releaseGroup: pick.releaseGroup },
+      });
+    }
   }
 
   recordOutcome(ctx, job, {
@@ -125,22 +144,23 @@ async function resolveTitle(client: ArrApi, job: JobRow): Promise<string> {
   return movies.find((m) => m.id === job.target_id)?.title ?? `movie #${job.target_id}`;
 }
 
+/** What enqueued this job — `job.payload.source` when the enqueuer set one (Task 12's
+ * reconciliation pipeline will), otherwise `'webhook'`, the only source Phase 1 has. */
+function resolveSource(job: JobRow): string {
+  const source = job.payload.source;
+  return typeof source === 'string' && source.length > 0 ? source : DEFAULT_SOURCE;
+}
+
 function recordOutcome(ctx: AppContext, job: JobRow, input: RecordOutcomeInput): void {
-  ctx.db
-    .prepare(
-      `INSERT INTO acquire_records
-         (arr_instance, target_kind, target_id, status, picked_guid, release_group, reasoning, candidates_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      job.arr_instance,
-      job.target_kind,
-      job.target_id,
-      input.status,
-      input.pickedGuid ?? null,
-      input.releaseGroup ?? null,
-      input.reasoning ?? null,
-      JSON.stringify({ kept: input.kept, dropped: input.dropped }),
-      Date.now(),
-    );
+  new AcquireRecords(ctx.db).insert({
+    arrInstance: job.arr_instance,
+    targetKind: job.target_kind,
+    targetId: job.target_id,
+    source: resolveSource(job),
+    status: input.status,
+    pickedGuid: input.pickedGuid,
+    releaseGroup: input.releaseGroup,
+    reasoning: input.reasoning,
+    candidates: { kept: input.kept, dropped: input.dropped },
+  });
 }

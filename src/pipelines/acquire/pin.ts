@@ -50,8 +50,13 @@ export async function pinReleaseGroup(
   });
 
   const existingProfiles = await client.listReleaseProfiles();
+  // Matching on name alone misses a profile that's already pinned to this exact tag but
+  // under a differently-formatted group string that happens to slugify to the same tag
+  // (e.g. "SubsPlease" vs "subsplease") — name comparison and tag comparison would each
+  // pick a different "existing" profile, so neither alone is reliable. Matching on
+  // *either* means whichever one already carries the tag wins, and nothing new is created.
   const profile =
-    existingProfiles.find((pr) => pr.name === profileName) ??
+    existingProfiles.find((pr) => pr.name === profileName || pr.tags.includes(tag.id)) ??
     (await client.createReleaseProfile({
       name: profileName,
       enabled: true,
@@ -67,7 +72,7 @@ export async function pinReleaseGroup(
     arrInstance: p.instanceName,
     kind: 'release_profile',
     externalId: profile.id,
-    name: profileName,
+    name: profile.name,
     data: { group: p.group },
   });
 
