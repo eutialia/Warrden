@@ -24,6 +24,7 @@ export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): Poli
     "Pick exactly ONE release from the numbered candidate list the user provides, honoring the user's freeform preferences verbatim.",
     'If no candidate is viable given those preferences, declare none viable instead of forcing a pick.',
     'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
+    "Answer with the candidate's number (the # prefix on its line in the list, e.g. 2 for \"#2 [...]\") — not its title or any other identifier.",
     'Respond with JSON matching the schema provided — no prose outside the JSON.',
   ].join(' ');
 

@@ -4,6 +4,28 @@ import { LlmError, type StructuredGenerator } from '../../llm/generator.js';
 import { BYTES_PER_GB } from '../../util/bytes.js';
 import { synthesizePolicyPrompt } from './policy.js';
 
+/**
+ * Shape the LLM itself answers with. The prompt only ever shows the LLM a numbered
+ * candidate list (`renderCandidateLine` below) — it never sees a guid — so it answers
+ * with the candidate's number (1-based, matching the `#N` prefix on each rendered line)
+ * rather than an identifier it was never shown. `pickRelease` maps that number back to
+ * the real candidate (and its guid) internally; see `PickResultSchema` below for the
+ * shape callers of `pickRelease` actually get back.
+ */
+const LlmPickResponseSchema = z.discriminatedUnion('decision', [
+  z.object({
+    decision: z.literal('pick'),
+    candidate: z.number().int(),
+    releaseGroup: z.string().nullable(),
+    confidence: z.enum(['high', 'medium', 'low']),
+    reasoning: z.string(),
+  }),
+  z.object({ decision: z.literal('none'), reasoning: z.string() }),
+]);
+
+/** External shape `pickRelease` resolves to — a `guid`, not the candidate number the LLM
+ * actually answered with, so every other caller (`run.ts`, tests) keeps working against a
+ * real candidate identifier rather than an index into a list only `pick.ts` ever builds. */
 export const PickResultSchema = z.discriminatedUnion('decision', [
   z.object({
     decision: z.literal('pick'),
@@ -28,11 +50,13 @@ function renderCandidateLine(index: number, c: ReleaseCandidate): string {
 /**
  * Asks the LLM to pick one release (or declare none viable) from the prefiltered
  * candidate list. Builds the policy prompt via `synthesizePolicyPrompt`, appends a
- * numbered rendering of every candidate, and calls the LLM with `PickResultSchema`.
- * A `pick` decision's guid is checked against the candidate list after the schema
- * validates the shape — the schema can't know which guids exist, only the pipeline
- * can — so a hallucinated guid throws `LlmError` rather than propagating a pick that
- * doesn't correspond to any real candidate.
+ * numbered rendering of every candidate, and calls the LLM with `LlmPickResponseSchema`
+ * — the LLM answers with the candidate's 1-based number, since it's never shown a guid
+ * to answer with in the first place. A `pick` decision's number is mapped back to the
+ * real candidate (and its guid) after the schema validates the shape — the schema can
+ * only check "is this an int", not "is this a number that exists in the list", so an
+ * out-of-range number throws `LlmError` rather than propagating a pick that doesn't
+ * correspond to any real candidate.
  */
 export async function pickRelease(input: {
   llm: StructuredGenerator;
@@ -58,14 +82,26 @@ export async function pickRelease(input: {
 
   const result = await llm.generate({
     callsite: CALLSITE,
-    schema: PickResultSchema,
+    schema: LlmPickResponseSchema,
     system,
     prompt,
   });
 
-  if (result.decision === 'pick' && !candidates.some((c) => c.guid === result.guid)) {
-    throw new LlmError(`LLM picked guid "${result.guid}" which is not among the candidates`, CALLSITE);
+  if (result.decision === 'none') return result;
+
+  const picked = candidates[result.candidate - 1];
+  if (!picked) {
+    throw new LlmError(
+      `LLM picked candidate number ${result.candidate}, which is out of range (candidates are numbered 1-${candidates.length})`,
+      CALLSITE,
+    );
   }
 
-  return result;
+  return {
+    decision: 'pick',
+    guid: picked.guid,
+    releaseGroup: result.releaseGroup,
+    confidence: result.confidence,
+    reasoning: result.reasoning,
+  };
 }
