@@ -18,7 +18,19 @@ const TestSchema = z.object({
   eventType: z.literal('Test'),
 });
 
-const WebhookSchema = z.discriminatedUnion('eventType', [SeriesAddSchema, MovieAddedSchema, TestSchema]);
+// Both Sonarr and Radarr fire `Download` for import events — a fresh grab as well as an
+// upgrade of an existing file, distinguished only by `isUpgrade`. `series`/`movie` are
+// optional here (rather than a second discriminated union) because the schema can't tell
+// which one a given arr sends before parsing; the handler picks whichever is present.
+const DownloadSchema = z.object({
+  eventType: z.literal('Download'),
+  series: z.object({ id: z.number(), title: z.string() }).optional(),
+  movie: z.object({ id: z.number(), title: z.string() }).optional(),
+  isUpgrade: z.boolean().optional(),
+  downloadId: z.string().optional(),
+});
+
+const WebhookSchema = z.discriminatedUnion('eventType', [SeriesAddSchema, MovieAddedSchema, DownloadSchema, TestSchema]);
 
 export interface HandleWebhookResult {
   handled: boolean;
@@ -54,6 +66,30 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
 
   const event = parsed.data;
   if (event.eventType === 'Test') {
+    return { handled: true };
+  }
+
+  if (event.eventType === 'Download') {
+    const target = event.series ?? event.movie;
+    if (!target) {
+      return { handled: false, reason: 'ignored' };
+    }
+    const targetKind = event.series ? 'series' : 'movie';
+
+    const result = ctx.queue.enqueue({
+      pipeline: 'ingest',
+      targetKind,
+      targetId: target.id,
+      arrInstance: instanceName,
+      payload: { title: target.title, downloadId: event.downloadId },
+    });
+    ctx.events.append({
+      kind: 'webhook.received',
+      jobId: result.id ?? undefined,
+      message: `${event.eventType} for "${target.title}" (${instanceName})`,
+      data: { instance: instanceName, eventType: event.eventType, targetId: target.id, outcome: result.outcome, isUpgrade: event.isUpgrade },
+    });
+
     return { handled: true };
   }
 

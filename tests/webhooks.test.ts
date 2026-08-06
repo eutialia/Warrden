@@ -5,6 +5,8 @@ import type { ArrApi } from '../src/arr/types.js';
 
 const seriesAdd = { eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren', year: 2023, tvdbId: 424536 } };
 const movieAdded = { eventType: 'MovieAdded', movie: { id: 7, title: 'Perfect Blue', year: 1997, tmdbId: 573 } };
+const seriesDownload = { eventType: 'Download', series: { id: 42, title: 'Frieren' }, isUpgrade: false, downloadId: 'abc' };
+const movieDownload = { eventType: 'Download', movie: { id: 7, title: 'Perfect Blue' }, isUpgrade: true, downloadId: 'def' };
 
 function knownArrsCtx() {
   return makeCtx({
@@ -25,6 +27,36 @@ describe('handleWebhook', () => {
     expect(handleWebhook(ctx, instance, payload).handled).toBe(true);
     const job = ctx.queue.claim()!;
     expect(job).toMatchObject({ pipeline: 'acquire', target_kind: targetKind, target_id: targetId, arr_instance: instance });
+  });
+
+  it.each([
+    { name: 'sonarr Download (new)', instance: 'sonarr', payload: seriesDownload, targetKind: 'series', targetId: 42, isUpgrade: false, downloadId: 'abc' },
+    { name: 'radarr Download (upgrade)', instance: 'radarr', payload: movieDownload, targetKind: 'movie', targetId: 7, isUpgrade: true, downloadId: 'def' },
+  ])('$name enqueues ingest', ({ instance, payload, targetKind, targetId, isUpgrade, downloadId }) => {
+    const ctx = knownArrsCtx();
+    const target = 'series' in payload ? payload.series : payload.movie;
+    expect(handleWebhook(ctx, instance, payload).handled).toBe(true);
+    const job = ctx.queue.claim()!;
+    expect(job).toMatchObject({ pipeline: 'ingest', target_kind: targetKind, target_id: targetId, arr_instance: instance });
+    expect(job.payload).toEqual({ title: target.title, downloadId });
+    const events = ctx.events.list();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'webhook.received', job_id: job.id });
+    expect(events[0]!.data).toMatchObject({ isUpgrade });
+  });
+
+  it('ignores a Download event with neither series nor movie', () => {
+    const ctx = knownArrsCtx();
+    expect(handleWebhook(ctx, 'sonarr', { eventType: 'Download', isUpgrade: false })).toEqual({ handled: false, reason: 'ignored' });
+    expect(ctx.queue.claim()).toBeNull();
+  });
+
+  it('still enqueues a Download event with downloadId absent', () => {
+    const ctx = knownArrsCtx();
+    const { downloadId: _drop, ...withoutDownloadId } = seriesDownload;
+    expect(handleWebhook(ctx, 'sonarr', withoutDownloadId).handled).toBe(true);
+    const job = ctx.queue.claim()!;
+    expect(job.payload).toEqual({ title: 'Frieren', downloadId: undefined });
   });
 
   it('acknowledges Test events without enqueueing', () => {

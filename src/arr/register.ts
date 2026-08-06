@@ -29,10 +29,18 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
       const existing = await client.listNotifications();
       const found = existing.find((n) => n.name === NOTIFICATION_NAME);
       if (found) {
-        // Already present in the arr, but the local registry may have been reset
-        // (fresh db, restore) — re-record it so GC (Task 12) can still find it.
-        managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
-        continue;
+        if (found.onDownload === true && found.onUpgrade === true) {
+          // Already present in the arr and subscribed to everything we need, but the
+          // local registry may have been reset (fresh db, restore) — re-record it so
+          // GC (Task 12) can still find it.
+          managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
+          continue;
+        }
+        // Registered by Phase 1 without import events — recreate rather than PUT: a full
+        // notification update requires round-tripping every field, and delete+create with
+        // our own known-good body is simpler and idempotent under the name check above.
+        await client.deleteNotification(found.id);
+        managedObjects.delete(arr.name, 'notification', found.id);
       }
 
       const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
@@ -46,10 +54,8 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         ],
         onSeriesAdd: true,
         onMovieAdded: true,
-        // onDownload/onUpgrade deliberately omitted: Phase 1 (Acquire) only handles
-        // series/movie "added" events (see `handleWebhook`'s WebhookSchema) — subscribing
-        // to events nothing consumes just means Sonarr/Radarr fire webhooks Warrden
-        // silently drops. Phase 2 (Ingest) re-registers with these once it lands.
+        onDownload: true,
+        onUpgrade: true,
       });
 
       managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: created.id, name: NOTIFICATION_NAME });
