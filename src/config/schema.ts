@@ -5,7 +5,10 @@ import { z } from 'zod';
  * restores it back to the stored secret on `PUT`, and rejects it outright when there's
  * nothing stored to restore from — a renamed or brand-new arr instance) and this schema
  * (which refuses to ever accept it as a literal saved value, as a second line of defense)
- * share the one definition instead of duplicating the character. */
+ * share the one definition on the server side. There is no shared package between the
+ * server and `web/` in Phase 1, though — `web/src/api.ts` hand-copies this exact same
+ * character as its own `SECRET_PLACEHOLDER` constant, and the two must be kept in sync by
+ * hand if this value ever changes. */
 export const SECRET_PLACEHOLDER = '•••';
 
 export const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic', 'claude-code']);
