@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
@@ -10,6 +14,11 @@ import { AcquireRecords } from '../db/acquireRecords.js';
 const DEFAULT_EVENTS_LIMIT = 100;
 const DEFAULT_JOBS_LIMIT = 50;
 const MAX_LIMIT = 1000;
+
+// Resolved relative to this module's own location (not process.cwd()), same convention as
+// `src/db/db.ts`'s MIGRATIONS_DIR — works the same whether running from `src/` (tsx) or
+// `dist/` (compiled), since both sit one level under the repo root at `server/`.
+const WEB_DIST_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 
 // `?limit=` (empty) and `?limit=abc` (non-numeric) both fall back to `fallback` rather
 // than reaching better-sqlite3, which rejects NaN/negative bind params outright.
@@ -255,6 +264,27 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // without a restart.
       ctx.config = result.data;
       return c.json({ saved: true, restartRequired: true });
+    });
+  }
+
+  // Only mounted when `web/dist` actually exists — the dashboard is built separately
+  // (`npm run build:web`), and this server's own test suite (which asserts 404s for
+  // routes that a given ctx doesn't mount) runs whether or not that build has happened,
+  // so this can't turn into a hard dependency for `createApp` to work either way.
+  //
+  // `serveStatic` calls `next()`, not a 404, when a requested asset doesn't exist, so an
+  // unmatched request falls through to Hono's own `notFound` handler below — that's where
+  // the client-side-routing fallback to `index.html` lives, *except* for `/api/*` and
+  // `/webhooks/*`: those must keep 404ing as plain JSON (matching the no-`web/dist` case
+  // exactly) rather than serving the SPA shell for a mistyped or unmounted API route.
+  if (existsSync(WEB_DIST_DIR)) {
+    app.use('*', serveStatic({ root: WEB_DIST_DIR }));
+    app.notFound(async (c) => {
+      if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/webhooks/')) {
+        return c.json({ error: 'not found' }, 404);
+      }
+      await serveStatic({ path: join(WEB_DIST_DIR, 'index.html') })(c, async () => {});
+      return c.res;
     });
   }
 

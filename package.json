@@ -10,7 +10,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p . && node scripts/copy-migrations.mjs"
+    "build": "tsc -p . && node scripts/copy-migrations.mjs",
+    "build:web": "cd web && npm run build"
   },
   "keywords": [],
   "author": "",
