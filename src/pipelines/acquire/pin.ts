@@ -6,6 +6,10 @@ import { ManagedObjects } from '../../db/managedObjects.js';
 // didn't name" safety net to tags that it already applies to release profiles.
 export const WARRDEN_TAG_PREFIX = 'warrden-';
 
+// Exported so reconcile.ts's GC checks the exact same prefix pinReleaseGroup itself names
+// its profiles with, rather than a second hardcoded copy of the string drifting out of sync.
+export const WARRDEN_PROFILE_PREFIX = 'warrden: ';
+
 /** Lowercases and collapses every run of non-alphanumeric characters into a single
  * dash, trimming leading/trailing dashes — e.g. "SubsPlease" -> "subsplease". */
 function slugify(group: string): string {
@@ -26,10 +30,15 @@ export interface PinReleaseGroupInput {
  * `warrden: [<group>]` release profile requiring that group, attaches the tag to the
  * series (swapping out any previously-pinned warrden tag — a series is pinned to at most
  * one group at a time), and records both resources in `managed_objects` so GC (Task 12)
- * can find them later. Idempotent: re-pinning the same group leaves everything as-is,
- * including skipping the `updateSeries` call. Release profiles are shared across series
- * and are never deleted here, even when swapping groups — GC alone decides when a
- * profile is orphaned.
+ * can find them later. Idempotent on the arr side: re-pinning the same group leaves
+ * everything there as-is, including skipping the `updateSeries` call. It is NOT a pure
+ * no-op on the registry, though — every call, including a same-group re-pin, re-registers
+ * the tag and profile via `ManagedObjects.insert`'s upsert, which by design refreshes
+ * `managed_objects.created_at`. That's the clock GC's grace period (`reconcile.ts`) reads,
+ * and it has to restart on every re-pin, or a pin that's still actively in use could age
+ * into GC-eligible just because nothing *new* happened to it recently. Release profiles
+ * are shared across series and are never deleted here, even when swapping groups — GC
+ * alone decides when a profile is orphaned.
  */
 export async function pinReleaseGroup(
   deps: { client: ArrApi; db: Database.Database },
@@ -39,7 +48,7 @@ export async function pinReleaseGroup(
   const managedObjects = new ManagedObjects(db);
 
   const tagLabel = `${WARRDEN_TAG_PREFIX}${slugify(p.group)}`;
-  const profileName = `warrden: [${p.group}]`;
+  const profileName = `${WARRDEN_PROFILE_PREFIX}[${p.group}]`;
 
   const existingTags = await client.listTags();
   const tag = existingTags.find((t) => t.label === tagLabel) ?? (await client.createTag(tagLabel));
@@ -57,13 +66,32 @@ export async function pinReleaseGroup(
   // (e.g. "SubsPlease" vs "subsplease") — name comparison and tag comparison would each
   // pick a different "existing" profile, so neither alone is reliable. Matching on
   // *either* means whichever one already carries the tag wins, and nothing new is created.
-  let profile = existingProfiles.find((pr) => pr.name === profileName || pr.tags.includes(tag.id));
-  if (profile && !profile.tags.includes(tag.id)) {
-    // Matched by name only, and its tag list doesn't include the current tag id — e.g. GC
-    // (Task 12) deleted the old tag and this profile got recreated/re-registered under a
-    // new one. Leaving the mismatch in place would pin a real profile to a dead tag id, a
-    // silently inert pin, so fold the current tag in rather than leaving it stale.
-    profile = await client.updateReleaseProfile({ ...profile, tags: [...profile.tags, tag.id] });
+  // Both branches are gated on the profile already being warrden-named, though: a tag can
+  // end up on a profile we don't own (a user manually tagged their own profile with it),
+  // and adopting that profile would leave it enforcing nothing — nothing here would ever
+  // touch a `required` list on a profile it doesn't already recognize as its own. A
+  // not-warrden-named match is simply skipped; a fresh warrden-named profile is created
+  // for it below instead, same as if nothing had matched at all.
+  let profile = existingProfiles.find(
+    (pr) => pr.name.startsWith(WARRDEN_PROFILE_PREFIX) && (pr.name === profileName || pr.tags.includes(tag.id)),
+  );
+  if (profile) {
+    // A matched profile can still be stale in two independent ways: its tag list may be
+    // missing the current tag id (e.g. GC deleted the old tag and this profile got
+    // recreated/re-registered under a new one), and/or its `required` list may be missing
+    // the group entirely (e.g. it was matched by tag membership rather than by name, or a
+    // previous version of this function created/adopted it without setting `required`).
+    // Leaving either stale would mean the profile silently enforces nothing for this
+    // group, so both are folded in together, in a single update, whenever either is stale.
+    const needsTag = !profile.tags.includes(tag.id);
+    const needsRequired = !profile.required.includes(p.group);
+    if (needsTag || needsRequired) {
+      profile = await client.updateReleaseProfile({
+        ...profile,
+        tags: needsTag ? [...profile.tags, tag.id] : profile.tags,
+        required: needsRequired ? [...profile.required, p.group] : profile.required,
+      });
+    }
   }
   profile ??= await client.createReleaseProfile({
     name: profileName,

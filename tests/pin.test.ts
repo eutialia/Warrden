@@ -46,6 +46,38 @@ describe('pinReleaseGroup', () => {
     expect(client.profiles[0].tags).toEqual([999, newTag.id]);
   });
 
+  it('never adopts a USER-owned profile by tag membership — a matching but non-warrden-named profile is left alone and a fresh warrden-named profile is created instead', async () => {
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const tag = client.pushTag('warrden-subsplease');
+    const userProfile = client.pushProfile({ name: 'My Custom Profile', enabled: true, required: [], ignored: [], tags: [tag.id], indexerId: 0 });
+    const db = freshDb();
+
+    await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
+
+    // The user's profile is untouched — never adopted, never enforced anything for us.
+    expect(client.updateReleaseProfile).not.toHaveBeenCalled();
+    const stillThere = client.profiles.find((p) => p.id === userProfile.id)!;
+    expect(stillThere).toMatchObject({ name: 'My Custom Profile', required: [] });
+    // A brand-new, warrden-named profile was created instead, actually requiring the group.
+    expect(client.profiles).toHaveLength(2);
+    const ours = client.profiles.find((p) => p.id !== userProfile.id)!;
+    expect(ours).toMatchObject({ name: 'warrden: [SubsPlease]', required: ['SubsPlease'] });
+  });
+
+  it('refreshes a warrden-named profile\'s stale `required` list to include the group, whether matched by name or by tag', async () => {
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const tag = client.pushTag('warrden-subsplease');
+    // Matched by name, but `required` never got the group (stale/legacy row).
+    client.pushProfile({ name: 'warrden: [SubsPlease]', enabled: true, required: [], ignored: [], tags: [tag.id], indexerId: 0 });
+    const db = freshDb();
+
+    await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
+
+    expect(client.updateReleaseProfile).toHaveBeenCalledWith(expect.objectContaining({ required: ['SubsPlease'] }));
+    expect(client.profiles).toHaveLength(1);
+    expect(client.profiles[0].required).toEqual(['SubsPlease']);
+  });
+
   it('re-pinning a different group swaps the series tag', async () => {
     const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
     const db = freshDb();
