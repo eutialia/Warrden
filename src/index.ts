@@ -36,6 +36,16 @@ async function main(): Promise<void> {
     console.error('registerWebhooks failed at startup', err);
   }
 
+  const reclaimed = ctx.queue.reclaimAbandoned();
+  if (reclaimed > 0) {
+    ctx.events.append({
+      kind: 'jobs.reclaimed',
+      level: 'warn',
+      message: `Reclaimed ${reclaimed} job(s) left "running" by a previous, presumably crashed, run`,
+      data: { count: reclaimed },
+    });
+  }
+
   const stopRunner = startRunner(ctx, { acquire: runAcquireJob });
 
   const server = serve({ fetch: createApp(ctx).fetch, port: ctx.config.server.port }, () => {
@@ -48,6 +58,10 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`${signal} received, shutting down`);
     stopRunner();
+    // Belt-and-suspenders: closeAllConnections() below should make close()'s callback
+    // fire promptly, but if something still hangs (e.g. a slow db.close()), don't let a
+    // supervisor's SIGKILL be the only way out — exit on our own after a grace period.
+    setTimeout(() => process.exit(1), 5000).unref();
     server.close(() => {
       db.close();
       process.exit(0);

@@ -178,6 +178,21 @@ export class JobQueue {
     return tx();
   }
 
+  /**
+   * Resets every `running` job back to `pending` (clearing `not_before`, preserving
+   * `attempts`) and returns how many were reset. Meant to run once at startup, before the
+   * runner starts polling: a process crash/restart while a job was in flight otherwise
+   * leaves it wedged as `running` forever — the singleton index (`jobs_singleton`) blocks
+   * any future enqueue for that same target, and only `complete()`/`fail()` would clear
+   * it, but nothing will ever call those for a run that no longer exists.
+   */
+  reclaimAbandoned(): number {
+    const info = this.db
+      .prepare(`UPDATE jobs SET status = 'pending', not_before = 0, updated_at = ? WHERE status = 'running'`)
+      .run(Date.now());
+    return info.changes;
+  }
+
   get(id: number): JobRow | null {
     const row = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id) as JobRowRaw | undefined;
     return row ? parseRow(row) : null;

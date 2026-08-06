@@ -116,4 +116,42 @@ describe('JobQueue', () => {
     const { id } = q.enqueue(target);
     expect(() => q.fail(id!, 'boom')).toThrow(/not running/);
   });
+
+  describe('reclaimAbandoned()', () => {
+    it('resets a running job back to pending (claimable again); a still-pending job elsewhere is untouched', () => {
+      const abandoned = q.enqueue(target).id!; // will be claimed (-> running) then abandoned
+      const stillPending = q.enqueue({ ...target, targetId: 43 }).id!;
+      const job = q.claim()!; // claims `abandoned` (created first)
+      expect(job.id).toBe(abandoned);
+
+      const count = q.reclaimAbandoned();
+      expect(count).toBe(1);
+
+      expect(q.get(abandoned)!.status).toBe('pending');
+      expect(q.get(abandoned)!.not_before).toBe(0);
+      expect(q.get(stillPending)!.status).toBe('pending'); // was never running, untouched either way
+
+      // The reclaimed job is claimable again — this is the actual point of reclaiming.
+      // (It's created before `stillPending`, so claim() picks it up first.)
+      const reclaimed = q.claim()!;
+      expect(reclaimed.id).toBe(abandoned);
+    });
+
+    it('preserves attempts on the reclaimed job', () => {
+      q.enqueue(target);
+      const first = q.claim()!;
+      q.fail(first.id, 'boom'); // attempts=1, back to pending
+      const second = q.claim(Number.MAX_SAFE_INTEGER)!; // running again, attempts=1
+
+      q.reclaimAbandoned();
+
+      expect(q.get(second.id)!.attempts).toBe(1);
+      expect(q.get(second.id)!.status).toBe('pending');
+    });
+
+    it('is a no-op (returns 0) when nothing is running', () => {
+      q.enqueue(target);
+      expect(q.reclaimAbandoned()).toBe(0);
+    });
+  });
 });
