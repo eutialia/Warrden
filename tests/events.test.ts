@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { AttentionItems } from '../src/db/attention.js';
 import { EventLog } from '../src/events/log.js';
 import { freshDb } from './helpers.js';
 
@@ -36,5 +37,42 @@ describe('EventLog', () => {
     expect(row.kind).toBe('job.started'); // row is still persisted and returned
     expect(seen).toEqual(['job.started']); // the healthy subscriber still ran
     consoleError.mockRestore();
+  });
+
+  describe('attention mirror', () => {
+    it('an attention-level append creates an open attention item with the same kind/message/jobId/data', () => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const attention = new AttentionItems(db);
+
+      log.append({ kind: 'ingest.no-match', level: 'attention', message: 'No sidecar match', jobId: 3, data: { file: 'a.ass' } });
+
+      const items = attention.list({ status: 'open' });
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ kind: 'ingest.no-match', message: 'No sidecar match', job_id: 3, data: { file: 'a.ass' } });
+    });
+
+    it.each(['info', 'warn'] as const)('a %s-level append does not create an attention item', (level) => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const attention = new AttentionItems(db);
+
+      log.append({ kind: 'k', level, message: 'm' });
+
+      expect(attention.list()).toHaveLength(0);
+    });
+
+    it('two attention appends with the same kind+jobId leave exactly one open row', () => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const attention = new AttentionItems(db);
+
+      log.append({ kind: 'ingest.no-match', level: 'attention', message: 'first', jobId: 3 });
+      log.append({ kind: 'ingest.no-match', level: 'attention', message: 'second', jobId: 3 });
+
+      const items = attention.list({ status: 'open' });
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ message: 'second' });
+    });
   });
 });

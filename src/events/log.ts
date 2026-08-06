@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { AttentionItems } from '../db/attention.js';
 
 export type EventLevel = 'info' | 'warn' | 'attention';
 
@@ -55,6 +56,13 @@ export class EventLog {
       .get(Date.now(), e.kind, e.level ?? 'info', e.jobId ?? null, e.message, JSON.stringify(e.data ?? {})) as EventRowRaw;
 
     const parsed = parseRow(row);
+
+    // Attention-level events double as attention items: anything a human needs to see
+    // shows up on the Attention view without every caller having to write both.
+    if (parsed.level === 'attention') {
+      new AttentionItems(this.db).open({ kind: parsed.kind, message: parsed.message, jobId: parsed.job_id ?? undefined, data: parsed.data });
+    }
+
     for (const fn of this.subscribers) {
       try {
         fn(parsed);
