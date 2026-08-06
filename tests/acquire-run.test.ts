@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
 import { makeCtx, candidate, FakeGenerator, fakeArrClient } from './helpers.js';
 
@@ -67,6 +68,30 @@ describe('runAcquireJob', () => {
     const warnEvents = ctx.events.list({ level: 'warn' });
     expect(warnEvents).toHaveLength(1);
     expect(warnEvents[0]!.message).toContain('arr is down');
+  });
+
+  it('a failure recording the outcome after a successful grab does not fail the job — it warns instead', async () => {
+    const { ctx, client, job } = setup({
+      decision: 'pick',
+      guid: 'g1',
+      releaseGroup: 'SubsPlease',
+      confidence: 'high',
+      reasoning: 'matches CHS policy',
+    });
+    const insertSpy = vi.spyOn(AcquireRecords.prototype, 'insert').mockImplementation(() => {
+      throw new Error('db is down');
+    });
+
+    await expect(runAcquireJob(ctx, job)).resolves.toBeUndefined();
+
+    // The grab already happened — that's the part that must never be lost.
+    expect(client.grabbed).toEqual([{ guid: 'g1', indexerId: candidate({}).indexerId }]);
+    const warnEvents = ctx.events.list({ level: 'warn' });
+    expect(warnEvents).toHaveLength(1);
+    expect(warnEvents[0]).toMatchObject({ kind: 'acquire.record-failed' });
+    expect(warnEvents[0]!.message).toContain('db is down');
+
+    insertSpy.mockRestore();
   });
 });
 

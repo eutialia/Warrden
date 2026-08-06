@@ -30,8 +30,10 @@ interface RecordOutcomeInput {
  * Once `grabRelease` has succeeded, nothing after it is allowed to turn the job into a
  * failure: the grab is the irreversible, valuable part of the job, and a job failure would
  * retry the whole search-and-pick from scratch on an arr that's already downloading the
- * release. A pin failure past that point is caught, reported as a `warn` event, and the
- * outcome still records as `grabbed`.
+ * release. A pin failure past that point is caught and reported as a `warn` event, and so
+ * is a failure recording the outcome itself (`acquire_records` insert, the final event) —
+ * both are caught independently, so neither can turn an already-successful grab into a
+ * retried job.
  *
  * Phase 1 searches a whole series at once (`{seriesId}`, no per-season search) and a whole
  * movie (`{movieId}`).
@@ -108,26 +110,40 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
     }
   }
 
-  recordOutcome(ctx, job, {
-    status: 'grabbed',
-    pickedGuid: pick.guid,
-    releaseGroup: pick.releaseGroup,
-    reasoning: pick.reasoning,
-    kept,
-    dropped,
-  });
-  ctx.events.append({
-    kind: 'acquire.grabbed',
-    jobId: job.id,
-    message: `Grabbed "${picked.title}" for "${title}"`,
-    data: {
-      instance: job.arr_instance,
-      targetKind: job.target_kind,
-      targetId: job.target_id,
-      guid: pick.guid,
+  try {
+    recordOutcome(ctx, job, {
+      status: 'grabbed',
+      pickedGuid: pick.guid,
       releaseGroup: pick.releaseGroup,
-    },
-  });
+      reasoning: pick.reasoning,
+      kept,
+      dropped,
+    });
+    ctx.events.append({
+      kind: 'acquire.grabbed',
+      jobId: job.id,
+      message: `Grabbed "${picked.title}" for "${title}"`,
+      data: {
+        instance: job.arr_instance,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        guid: pick.guid,
+        releaseGroup: pick.releaseGroup,
+      },
+    });
+  } catch (err) {
+    // Same rationale as the pin-failure catch above: the grab already happened, so a
+    // failure to record it (e.g. a DB error) must not fail — and thus retry — the job.
+    ctx.events.append({
+      kind: 'acquire.record-failed',
+      level: 'warn',
+      jobId: job.id,
+      message: `Grabbed "${picked.title}" for "${title}" but failed to record the outcome: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
+    });
+  }
 }
 
 /** Prefers the webhook-supplied title (`job.payload.title`); falls back to a fresh arr
