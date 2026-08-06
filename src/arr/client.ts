@@ -113,10 +113,6 @@ export class ArrClient implements ArrApi {
     return this.request('POST', '/notification', { body });
   }
 
-  async deleteNotification(id: number): Promise<void> {
-    await this.request('DELETE', `/notification/${id}`);
-  }
-
   private async request<T>(
     method: string,
     path: string,

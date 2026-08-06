@@ -17,7 +17,7 @@ import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { openDb } from '../src/db/db.js';
 import { EventLog } from '../src/events/log.js';
-import { JobQueue } from '../src/jobs/queue.js';
+import { JobQueue, type EnqueueInput, type JobRow } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
 import { BYTES_PER_GB } from '../src/util/bytes.js';
 
@@ -58,6 +58,20 @@ export function makeCtx(overrides?: Partial<AppContext>): AppContext {
     llm: new FakeGenerator(),
     ...overrides,
   };
+}
+
+/**
+ * Enqueues `input` on `ctx.queue` and immediately claims it — the `enqueue()` → `claim()`
+ * pair nearly every acquire pipeline test repeats to get a claimed `JobRow` to hand
+ * `runAcquireJob`. Never returns `null`: nothing else could have claimed it first in a
+ * single-threaded test, so a `null` here means the test's own setup is broken, not a race
+ * to paper over.
+ */
+export function enqueueAndClaim(ctx: AppContext, input: EnqueueInput): JobRow {
+  ctx.queue.enqueue(input);
+  const job = ctx.queue.claim();
+  if (!job) throw new Error('enqueueAndClaim: claim() unexpectedly returned null right after enqueue()');
+  return job;
 }
 
 /** A default `Config` (schema defaults only) for tests that build their own `llm.profiles` entries. */
@@ -259,9 +273,6 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       const created: NotificationSummary = { id: nextNotificationId++, name: (body as { name: string }).name };
       client.notifications.push(created);
       return created;
-    }),
-    deleteNotification: vi.fn(async (id: number): Promise<void> => {
-      client.notifications = client.notifications.filter((n) => n.id !== id);
     }),
 
     pushTag(label: string): TagResource {

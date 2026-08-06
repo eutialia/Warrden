@@ -79,5 +79,4 @@ export interface ArrApi {
   deleteReleaseProfile(id: number): Promise<void>;
   listNotifications(): Promise<NotificationSummary[]>;
   createNotification(body: object): Promise<NotificationSummary>;
-  deleteNotification(id: number): Promise<void>;
 }
