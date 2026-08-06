@@ -2,7 +2,9 @@ import type Database from 'better-sqlite3';
 import type { ArrApi, TagResource } from '../../arr/types.js';
 import { ManagedObjects } from '../../db/managedObjects.js';
 
-const WARRDEN_TAG_PREFIX = 'warrden-';
+// Exported so GC (Task 12, reconcile.ts) can apply the same "never delete something we
+// didn't name" safety net to tags that it already applies to release profiles.
+export const WARRDEN_TAG_PREFIX = 'warrden-';
 
 /** Lowercases and collapses every run of non-alphanumeric characters into a single
  * dash, trimming leading/trailing dashes — e.g. "SubsPlease" -> "subsplease". */
