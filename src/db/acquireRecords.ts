@@ -84,14 +84,27 @@ export class AcquireRecords {
       );
   }
 
-  listByTarget(arrInstance: string, targetKind: TargetKind, targetId: number): AcquireRecordRow[] {
+  /**
+   * Every record for this target, newest first. `bounds.since`/`bounds.until` (both
+   * inclusive, both optional) scope the result to one job's own run window — same
+   * rationale as `outcomeForJob`'s bounds below: without them, a caller showing "this
+   * job's own record" could show a *different* job's (a later re-pick's) record instead,
+   * since every job for a target shares the same `acquire_records` rows.
+   */
+  listByTarget(arrInstance: string, targetKind: TargetKind, targetId: number, bounds?: { since?: number; until?: number }): AcquireRecordRow[] {
+    const clauses = ['arr_instance = ?', 'target_kind = ?', 'target_id = ?'];
+    const params: unknown[] = [arrInstance, targetKind, targetId];
+    if (bounds?.since !== undefined) {
+      clauses.push('created_at >= ?');
+      params.push(bounds.since);
+    }
+    if (bounds?.until !== undefined) {
+      clauses.push('created_at <= ?');
+      params.push(bounds.until);
+    }
     const rows = this.db
-      .prepare(
-        `SELECT * FROM acquire_records
-         WHERE arr_instance = ? AND target_kind = ? AND target_id = ?
-         ORDER BY created_at DESC, id DESC`,
-      )
-      .all(arrInstance, targetKind, targetId) as AcquireRecordRowRaw[];
+      .prepare(`SELECT * FROM acquire_records WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`)
+      .all(...params) as AcquireRecordRowRaw[];
     return rows.map(parseRow);
   }
 

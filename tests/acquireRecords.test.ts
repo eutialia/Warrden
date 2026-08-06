@@ -35,6 +35,28 @@ describe('AcquireRecords', () => {
     expect(records.listByTarget('sonarr', 'series', 99)).toHaveLength(0);
   });
 
+  it('listByTarget bounds (since/until) scope results to a window, same as outcomeForJob', () => {
+    vi.useFakeTimers();
+    try {
+      const records = new AcquireRecords(freshDb());
+      vi.setSystemTime(1_000);
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'none-viable' });
+      vi.setSystemTime(5_000);
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed' });
+
+      // Unbounded: both records.
+      expect(records.listByTarget('sonarr', 'series', 42)).toHaveLength(2);
+      // A terminal job's own window (500..2000): only its own record, not the later re-pick's.
+      expect(records.listByTarget('sonarr', 'series', 42, { since: 500, until: 2_000 })).toMatchObject([{ status: 'none-viable' }]);
+      // A live job (since only, no until): sees everything from its own creation onward.
+      expect(records.listByTarget('sonarr', 'series', 42, { since: 4_000 })).toMatchObject([{ status: 'grabbed' }]);
+      // A window with no records in it at all.
+      expect(records.listByTarget('sonarr', 'series', 42, { since: 100, until: 200 })).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('defaults source to null when not given', () => {
     const records = new AcquireRecords(freshDb());
     records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'none-viable' });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -45,6 +45,39 @@ describe('dashboard api', () => {
       const list: any[] = await (await app.request('/api/jobs')).json();
       const detail: any = await (await app.request(`/api/jobs/${list[0].id}`)).json();
       expect(detail.acquireRecord).toBeNull();
+    });
+
+    it("bounds a terminal job's detail record to its own run window — an older job's detail does not pick up a later re-pick's record, and returns null when its own run produced none", async () => {
+      vi.useFakeTimers();
+      try {
+        const ctx = makeCtx();
+        const records = new AcquireRecords(ctx.db);
+        const app = createApp(ctx);
+
+        // Job A: enqueued, runs, produces no record of its own (crashed before recording,
+        // say), then completes — a terminal job with nothing in its own window.
+        vi.setSystemTime(1_000);
+        const jobAId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+        vi.setSystemTime(2_000);
+        ctx.queue.complete(ctx.queue.claim()!.id);
+
+        // A manual re-pick creates job B, strictly after job A finished, which DOES grab
+        // and record something.
+        vi.setSystemTime(3_000);
+        const jobBId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+        vi.setSystemTime(4_000);
+        records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed', pickedGuid: 'g1' });
+
+        const detailA: any = await (await app.request(`/api/jobs/${jobAId}`)).json();
+        expect(detailA.acquireRecord).toBeNull(); // job B's later record must not leak into job A's detail
+
+        vi.setSystemTime(5_000);
+        ctx.queue.complete(ctx.queue.claim()!.id);
+        const detailB: any = await (await app.request(`/api/jobs/${jobBId}`)).json();
+        expect(detailB.acquireRecord).toMatchObject({ status: 'grabbed', picked_guid: 'g1' });
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
