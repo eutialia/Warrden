@@ -157,14 +157,18 @@ export function buildSidecarName(videoFileName: string, s: { lang: string | null
  * episodes, with no LLM involved — only unambiguous cases resolve here; everything else
  * (including a `parseEpisodeRef` miss) returns `null` for the LLM call-site to attempt
  * instead. This function trusts whatever `episodes` list it's given and matches purely
- * by season/episode/absolute number — callers must pre-filter `episodes` to whichever
- * subset is a legitimate mapping target for their use case: a sidecar needs a video
- * that's already on disk, so `matchSidecarsWithLlm`'s caller filters to `hasFile: true`;
- * bundle rescue (`planBundleImport` in `bundle.ts`) is filling in *missing* episodes, so
- * it filters to `hasFile: false` instead, so a bare-number leftover file can never
- * displace an episode that already has a file.
+ * by season/episode/absolute number, so callers must pass whichever list keeps that
+ * matching correct for their use case:
+ * - `matchSidecarsWithLlm`'s caller pre-filters `episodes` to `hasFile: true` — a
+ *   sidecar needs a video that's already on disk.
+ * - Bundle rescue (`planBundleImport` in `bundle.ts`) passes the FULL episode list
+ *   instead of pre-filtering: its single-regular-season heuristic below needs to see
+ *   every season to tell whether a bare number is genuinely unambiguous, and filtering
+ *   out a complete season first can leave exactly one incomplete season behind, making
+ *   an actually-ambiguous number look falsely unique. `planBundleImport` rejects the hit
+ *   itself when it lands on an episode that already has a file, so a bare-number
+ *   leftover file can never displace one.
  *
-
  * - An `SxxEyy` ref matches by exact `(seasonNumber, episodeNumber)`.
  * - A bare ref, when the series has exactly one regular (non-special, `seasonNumber >
  *   0`) season, matches by `episodeNumber` within that season.

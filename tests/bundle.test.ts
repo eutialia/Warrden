@@ -119,6 +119,39 @@ describe('planBundleImport', () => {
     expect(plan).toBeNull(); // LLM judged it not importable (empty episodeIds)
   });
 
+  it('CRITICAL: a missing season must not collapse the single-regular-season heuristic into a false-confident wrong match', async () => {
+    // S01 is complete (hasFile:true, abs 1-5); S02 is entirely missing (hasFile:false,
+    // abs 6-10). Filtering `episodes` to hasFile:false BEFORE calling
+    // matchSidecarDeterministic would make S02 look like "the series' only regular
+    // season", wrongly resolving a bare "05" onto S02E05 (unoccupied, so the
+    // occupied-episode cap can't catch it either) at 'high' confidence instead of
+    // falling through to the LLM. Matching against the FULL list first correctly finds
+    // the unique absolute-number hit is S01E05 — which already has a file — and rejects it.
+    const episodes = [
+      episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, absoluteEpisodeNumber: 1, hasFile: true }),
+      episodeResource({ id: 2, seasonNumber: 1, episodeNumber: 2, absoluteEpisodeNumber: 2, hasFile: true }),
+      episodeResource({ id: 3, seasonNumber: 1, episodeNumber: 3, absoluteEpisodeNumber: 3, hasFile: true }),
+      episodeResource({ id: 4, seasonNumber: 1, episodeNumber: 4, absoluteEpisodeNumber: 4, hasFile: true }),
+      episodeResource({ id: 5, seasonNumber: 1, episodeNumber: 5, absoluteEpisodeNumber: 5, hasFile: true }),
+      episodeResource({ id: 6, seasonNumber: 2, episodeNumber: 1, absoluteEpisodeNumber: 6, hasFile: false }),
+      episodeResource({ id: 7, seasonNumber: 2, episodeNumber: 2, absoluteEpisodeNumber: 7, hasFile: false }),
+      episodeResource({ id: 8, seasonNumber: 2, episodeNumber: 3, absoluteEpisodeNumber: 8, hasFile: false }),
+      episodeResource({ id: 9, seasonNumber: 2, episodeNumber: 4, absoluteEpisodeNumber: 9, hasFile: false }),
+      episodeResource({ id: 10, seasonNumber: 2, episodeNumber: 5, absoluteEpisodeNumber: 10, hasFile: false }),
+    ];
+    const item = manualImportItem({ path: '/downloads/Bundle/Show - 05.mkv', episodes: [] });
+    const llm = new FakeGenerator([
+      { mappings: [{ file: 1, episodeIds: [] }], confidence: 'medium', reasoning: 'genuinely ambiguous between seasons' },
+    ]);
+
+    const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
+
+    // Falls through to the LLM tier — NOT resolved deterministically onto S02E05 (id 10).
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].prompt).toContain('Show - 05.mkv');
+    expect(plan).toBeNull(); // the LLM's own (ambiguous) answer leaves nothing importable
+  });
+
   it('sends everything deterministic mapping could not place to ONE LLM call and applies its per-file episodeIds', async () => {
     const episodes = [
       episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false }),
@@ -391,5 +424,49 @@ describe('planBundleImport', () => {
     expect(plan!.confidence).toBe('medium');
     expect(llm.calls).toHaveLength(1);
     expect(llm.calls[0].prompt).toContain('Cryptic Name.mkv');
+  });
+
+  describe('per-file episodeIds dedup', () => {
+    it('deduplicates a repeated id the LLM answered with ([1, 1]) so the file imports once and the duplicate-target guard does not falsely fire', async () => {
+      const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
+      const item = manualImportItem({ path: '/downloads/Bundle/Ep One.mkv' });
+      const llm = new FakeGenerator([
+        { mappings: [{ file: 1, episodeIds: [1, 1] }], confidence: 'high', reasoning: 'dup id from the LLM' },
+      ]);
+
+      const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
+
+      expect(plan!.files).toEqual([expect.objectContaining({ episodeIds: [1] })]);
+      expect(plan!.skipped).toEqual([]); // must not be flagged as a cross-file duplicate
+    });
+
+    it('deduplicates repeated ids in a tier-1 item.episodes list too', async () => {
+      const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
+      const item = manualImportItem({
+        path: '/downloads/Show/Show.mkv',
+        episodes: [{ id: 1 }, { id: 1 }],
+        rejections: [],
+      });
+      const llm = new FakeGenerator([]);
+
+      const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
+
+      expect(plan!.files).toEqual([expect.objectContaining({ episodeIds: [1] })]);
+    });
+
+    it('a genuine double-episode file ([1, 2], two distinct ids) is unaffected by the dedup', async () => {
+      const episodes = [
+        episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false }),
+        episodeResource({ id: 2, seasonNumber: 1, episodeNumber: 2, hasFile: false }),
+      ];
+      const item = manualImportItem({ path: '/downloads/Bundle/Double Episode.mkv' });
+      const llm = new FakeGenerator([
+        { mappings: [{ file: 1, episodeIds: [1, 2] }], confidence: 'high', reasoning: 'double episode' },
+      ]);
+
+      const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
+
+      expect(plan!.files).toEqual([expect.objectContaining({ episodeIds: [1, 2] })]);
+    });
   });
 });

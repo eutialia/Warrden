@@ -52,13 +52,16 @@ function renderFileLine(index: number, item: ManualImportItem): string {
 /** Builds the `ManualImportFile` row `executeManualImport` (Task 10) expects, stamping
  * `seriesId` and round-tripping `quality`/`languages`/`releaseGroup`/`folderName`
  * verbatim from the arr-reported `item` — Warrden never inspects or rewrites those
- * opaque blobs, only decides which episode(s) the file maps to. */
+ * opaque blobs, only decides which episode(s) the file maps to. `episodeIds` is deduped
+ * here (the one place every tier's ids flow through) so a repeated id — a duplicated
+ * tier-1 `item.episodes` entry, or an LLM `[1, 1]` — never gets miscounted as two
+ * different files claiming the same episode by the duplicate-target guard below. */
 function toManualImportFile(item: ManualImportItem, episodeIds: number[], seriesId: number): ManualImportFile {
   return {
     path: item.path,
     folderName: item.folderName,
     seriesId,
-    episodeIds,
+    episodeIds: [...new Set(episodeIds)],
     quality: item.quality,
     languages: item.languages,
     releaseGroup: item.releaseGroup,
@@ -153,12 +156,15 @@ export interface BundlePlan {
  *    dropped); an item with no surviving id is NOT tier-1 material and falls through to
  *    tiers 2/3 instead of importing with an empty `episodeIds`.
  * 2. Everything else gets one shot at `matchSidecarDeterministic` (from `sidecars.ts`;
- *    it works on any filename, not just sidecars) — matched **only** against episodes
- *    with `hasFile === false`. Bundle rescue exists to fill in missing episodes; a bare
- *    trailing number that happens to parse as, say, "05" (an NCOP or sample that isn't
- *    actually episode 5) must never displace a real file already sitting on disk. A file
- *    that only matches an occupied episode falls through to the LLM tier instead, which
- *    can see `hasFile` in the episode table and answer an empty `episodeIds` for it.
+ *    it works on any filename, not just sidecars), matched against the FULL episode
+ *    list — its single-regular-season heuristic needs to see every season to decide
+ *    whether a bare number is unambiguous, so pre-filtering to `hasFile === false` would
+ *    corrupt that decision (see the inline comment at the call site). The hit is then
+ *    only accepted when `!hit.hasFile`: bundle rescue exists to fill in missing
+ *    episodes, and a bare trailing number that happens to parse as, say, "05" must never
+ *    displace a real file already sitting on disk. A hit on an occupied episode (or no
+ *    hit at all) falls through to the LLM tier instead, which can see `hasFile` in the
+ *    episode table and answer an empty `episodeIds` for it.
  * 3. Whatever's left after both goes to a single LLM call (`mapBundleWithLlm`) — skipped
  *    entirely (no call at all) when the episode table is empty, mirroring
  *    `matchSidecarsWithLlm`'s own short-circuit, since no episode table means nothing
@@ -191,11 +197,6 @@ export async function planBundleImport(input: {
   const { llm, seriesTitle, seriesId, items, episodes } = input;
 
   const validEpisodeIds = new Set(episodes.map((e) => e.id));
-  // Tier 2's mapping target set: only episodes still missing a file. A bare-number
-  // filename (an NCOP, a sample, a "05" that's really not episode 5) must never resolve
-  // onto an episode that already has a file on disk — see the occupied-episode cap for
-  // why that matters even for tiers that DO have a legitimate reason to touch one.
-  const missingFileEpisodes = episodes.filter((e) => !e.hasFile);
 
   let files: ManualImportFile[] = [];
   const skipped: string[] = [];
@@ -210,8 +211,17 @@ export async function planBundleImport(input: {
       }
     }
 
-    const deterministic = matchSidecarDeterministic(basename(item.path), missingFileEpisodes);
-    if (deterministic) {
+    // Tier 2 must call matchSidecarDeterministic with the FULL episode list, not one
+    // pre-filtered to hasFile:false: its bare-number heuristic ("exactly one regular
+    // season -> match by episodeNumber alone") only works when it can see every season.
+    // Filtering out a complete season first can leave exactly one INCOMPLETE season
+    // behind, which the heuristic then wrongly treats as "the only season" — e.g. S01
+    // complete + S02 missing turns a genuinely ambiguous "05" into a false-confident
+    // S02E05. So: match against everything, then reject the hit if it's occupied. A hit
+    // on an occupied episode (or no hit at all) falls through to the LLM tier, which can
+    // see hasFile in the episode table and reason about it properly.
+    const deterministic = matchSidecarDeterministic(basename(item.path), episodes);
+    if (deterministic && !deterministic.hasFile) {
       files.push(toManualImportFile(item, [deterministic.id], seriesId));
       continue;
     }
