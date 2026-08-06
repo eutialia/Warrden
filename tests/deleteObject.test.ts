@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { deleteManagedObject } from '../src/managed/deleteObject.js';
 import { ManagedObjects, type ManagedObjectKind } from '../src/db/managedObjects.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { makeCtx, fakeArrClient } from './helpers.js';
+import { makeCtx, fakeArrClient, configWithArrs } from './helpers.js';
 
 /** Seeds a `managed_objects` row via the real `ManagedObjects.insert` (so it round-trips
  * through the same upsert path production code uses) and reads it straight back — the
@@ -106,6 +106,25 @@ describe('deleteManagedObject', () => {
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
     });
 
+    it('a non-404 arr failure appends a managed.delete-failed warn event, rethrows, and leaves the registry row in place (it is the retry pointer for a future attempt)', async () => {
+      const client = fakeArrClient();
+      client.listReleaseProfiles = vi.fn(async () => {
+        throw new Error('arr 500');
+      });
+      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const managedObjects = new ManagedObjects(ctx.db);
+      const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]` });
+
+      await expect(deleteManagedObject(ctx, row)).rejects.toThrow('arr 500');
+
+      expect(managedObjects.list()).toHaveLength(1); // NOT dropped — this is the retry pointer
+      const warnEvent = ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-failed');
+      expect(warnEvent).toBeDefined();
+      expect(warnEvent!.data).toMatchObject({ instance: 'sonarr', kind: 'release_profile', externalId: 9 });
+      expect(warnEvent!.message).toContain('arr 500');
+      expect(ctx.events.list().some((e) => e.kind === 'managed.deleted')).toBe(false); // never reached
+    });
+
     it('an already-absent live profile is dropped from the registry with no arr call and no warn', async () => {
       const client = fakeArrClient({ profiles: [] });
       const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
@@ -192,5 +211,47 @@ describe('deleteManagedObject', () => {
     expect(warnEvent).toBeDefined();
     const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
     expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
+  });
+
+  describe('radarr-kind instance guard (mirrors reconcile GC\'s radarr skip)', () => {
+    it.each(['tag', 'release_profile'] as const)(
+      'skips the listTags/listReleaseProfiles-dependent checks entirely for a %s row on a radarr instance — registry-only, no live-object query, no warn',
+      async (kind) => {
+        const client = fakeArrClient({
+          tags: [{ id: 3, label: `${WARRDEN_TAG_PREFIX}group` }],
+          profiles: [{ id: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]`, enabled: true, required: ['Group'], ignored: [], tags: [3], indexerId: 0 }],
+        });
+        client.listTags = vi.fn(client.listTags);
+        client.listReleaseProfiles = vi.fn(client.listReleaseProfiles);
+        const ctx = makeCtx({ config: configWithArrs('radarr'), clients: new Map([['radarr', client]]) });
+        const managedObjects = new ManagedObjects(ctx.db);
+        const externalId = kind === 'tag' ? 3 : 9;
+        const row = seedRow(managedObjects, { arrInstance: 'radarr', kind, externalId, name: 'whatever' });
+
+        await deleteManagedObject(ctx, row);
+
+        expect(client.listTags).not.toHaveBeenCalled();
+        expect(client.listReleaseProfiles).not.toHaveBeenCalled();
+        expect(client.deleteTag).not.toHaveBeenCalled();
+        expect(client.deleteReleaseProfile).not.toHaveBeenCalled();
+        expect(managedObjects.list()).toHaveLength(0); // registry entry still dropped
+        expect(ctx.events.list({ level: 'warn' })).toHaveLength(0); // silent skip, same as reconcile's GC guard
+        const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+        expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
+      },
+    );
+
+    it('does not guard a notification row on a radarr instance — notifications are not release-group-tagging specific', async () => {
+      const client = fakeArrClient({ notifications: [{ id: 5, name: 'warrden-webhook' }] });
+      const ctx = makeCtx({ config: configWithArrs('radarr'), clients: new Map([['radarr', client]]) });
+      const managedObjects = new ManagedObjects(ctx.db);
+      const row = seedRow(managedObjects, { arrInstance: 'radarr', kind: 'notification', externalId: 5, name: 'warrden-webhook' });
+
+      await deleteManagedObject(ctx, row);
+
+      expect(client.deleteNotification).toHaveBeenCalledWith(5);
+      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      expect(deletedEvent!.data).toMatchObject({ deletedInArr: true });
+    });
   });
 });

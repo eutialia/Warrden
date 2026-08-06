@@ -40,6 +40,15 @@ describe('ManagedObjects', () => {
     }
   });
 
+  it('gets a row by its internal id, or null for an unknown one', () => {
+    const objs = new ManagedObjects(freshDb());
+    objs.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 2, name: 'warrden-group', data: { group: 'Group' } });
+    const row = objs.list()[0]!;
+
+    expect(objs.get(row.id)).toMatchObject({ id: row.id, arr_instance: 'sonarr', kind: 'tag', external_id: 2 });
+    expect(objs.get(999999)).toBeNull();
+  });
+
   it('deletes a row by (arrInstance, kind, externalId)', () => {
     const objs = new ManagedObjects(freshDb());
     objs.insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 1, name: 'Warrden' });

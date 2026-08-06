@@ -7,7 +7,7 @@ import { AttentionItems } from '../src/db/attention.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { EventLog } from '../src/events/log.js';
-import { WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
+import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
 import { freshDb, makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
@@ -245,6 +245,7 @@ describe('app', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
       expect(attentionItems.get(item.id)!.status).toBe('dismissed');
+      expect(ctx.events.list().find((e) => e.kind === 'attention.dismissed')).toMatchObject({ data: { id: item.id, kind: 'ingest.unmatched' } });
 
       const again = await app.request(`/api/attention/${item.id}/dismiss`, { method: 'POST', headers: jsonHeaders });
       expect(again.status).toBe(409);
@@ -283,6 +284,74 @@ describe('app', () => {
       const job = ctx.queue.get(enqueueResult.id!)!;
       expect(job.pipeline).toBe('ingest');
       expect(job.payload).toEqual({ downloadId: 'dl-1', source: 'retry' });
+
+      const retriedEvent = ctx.events.list().find((e) => e.kind === 'attention.retried');
+      expect(retriedEvent).toMatchObject({ data: { id: item.id, jobId: enqueueResult.id, pipeline: 'ingest' } });
+    });
+
+    it('POST /api/attention/:id/retry: 400 when the linked job\'s arr instance has no registered client (parity with /api/acquire)', async () => {
+      const ctx = makeCtx(); // no clients registered at all
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const enqueueResult = ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+      const item = attentionItems.open({ kind: 'ingest.unmatched', message: 'x', jobId: enqueueResult.id! });
+
+      const res = await app.request(`/api/attention/${item.id}/retry`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(400);
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it('POST /api/attention/:id/repick: enqueues pipeline "acquire" even when the linked job\'s own pipeline was "ingest" (repick is always a re-pick, never the original pipeline)', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const enqueueResult = ctx.queue.enqueue({
+        pipeline: 'ingest',
+        targetKind: 'series',
+        targetId: 42,
+        arrInstance: 'sonarr',
+        payload: { downloadId: 'dl-1' },
+      });
+      ctx.queue.claim();
+      ctx.queue.complete(enqueueResult.id!);
+      const item = attentionItems.open({ kind: 'ingest.rescue-proposed', message: 'x', jobId: enqueueResult.id! });
+
+      const res = await app.request(`/api/attention/${item.id}/repick`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) });
+      expect(res.status).toBe(200);
+
+      const repicked = ctx.queue.claim()!;
+      expect(repicked.pipeline).toBe('acquire'); // NOT 'ingest' — mutating this to job.pipeline must fail
+    });
+
+    it('POST /api/attention/:id/repick: 400 when the linked job\'s arr instance has no registered client', async () => {
+      const ctx = makeCtx(); // no clients registered at all
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const enqueueResult = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+      ctx.queue.claim();
+      ctx.queue.complete(enqueueResult.id!);
+      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', jobId: enqueueResult.id! });
+
+      const res = await app.request(`/api/attention/${item.id}/repick`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) });
+      expect(res.status).toBe(400);
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it('POST /api/attention/:id/repick: rejects a hint over 2000 characters with 400', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const enqueueResult = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+      ctx.queue.claim();
+      ctx.queue.complete(enqueueResult.id!);
+      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', jobId: enqueueResult.id! });
+
+      const res = await app.request(`/api/attention/${item.id}/repick`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ hint: 'x'.repeat(2001) }),
+      });
+      expect(res.status).toBe(400);
     });
 
     it('POST /api/attention/:id/repick: always pipeline acquire, carries the hint, marks resolved', async () => {
@@ -313,6 +382,9 @@ describe('app', () => {
       const repicked = ctx.queue.claim()!;
       expect(repicked.pipeline).toBe('acquire');
       expect(repicked.payload).toEqual({ title: 'Frieren', source: 'repick', hint: 'prefer the 10bit encode' });
+
+      const repickedEvent = ctx.events.list().find((e) => e.kind === 'attention.repicked');
+      expect(repickedEvent).toMatchObject({ data: { id: item.id, jobId: enqueueResult.id, hasHint: true } });
     });
 
     it('POST /api/attention/:id/repick works with no hint given', async () => {
@@ -355,6 +427,9 @@ describe('app', () => {
       expect(await res.json()).toEqual({ ok: true });
       expect(client.executeManualImport).toHaveBeenCalledWith(files, 'copy');
       expect(attentionItems.get(item.id)!.status).toBe('resolved');
+      expect(ctx.events.list().find((e) => e.kind === 'attention.accepted')).toMatchObject({
+        data: { id: item.id, kind: 'ingest.rescue-proposed', fileCount: 1 },
+      });
     });
 
     it('POST /api/attention/:id/accept: 400 on malformed data (not a bundle-import action)', async () => {
@@ -368,6 +443,47 @@ describe('app', () => {
       expect(attentionItems.get(item.id)!.status).toBe('open');
     });
 
+    it.each([
+      { name: 'an empty files array', files: [] },
+      { name: 'a file missing path', files: [{ movieId: 7 }] },
+      { name: 'a file with an empty-string path', files: [{ path: '' }] },
+    ])('POST /api/attention/:id/accept: 400 on $name', async ({ files }) => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({
+        kind: 'ingest.rescue-proposed',
+        message: 'x',
+        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files, reasoning: 'x' },
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(400);
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it('POST /api/attention/:id/accept: two concurrent requests for the SAME item only execute the import once — one 200, one 409', async () => {
+      const client = fakeArrClient();
+      client.executeManualImport = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 10)));
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({
+        kind: 'ingest.rescue-proposed',
+        message: 'x',
+        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files: [{ path: '/x.mkv' }], reasoning: 'x' },
+      });
+
+      const [res1, res2] = await Promise.all([
+        app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders }),
+        app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders }),
+      ]);
+
+      expect([res1.status, res2.status].sort()).toEqual([200, 409]);
+      expect(client.executeManualImport).toHaveBeenCalledTimes(1);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+    });
+
     it('POST /api/attention/:id/accept: 400 on an unknown client instance', async () => {
       const ctx = makeCtx();
       const attentionItems = new AttentionItems(ctx.db);
@@ -375,7 +491,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'x',
-        data: { action: 'bundle-import', instance: 'no-such-instance', targetKind: 'movie', targetId: 7, files: [], reasoning: 'x' },
+        data: { action: 'bundle-import', instance: 'no-such-instance', targetKind: 'movie', targetId: 7, files: [{ path: '/x.mkv' }], reasoning: 'x' },
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
@@ -394,7 +510,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'x',
-        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files: [], reasoning: 'x' },
+        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files: [{ path: '/x.mkv' }], reasoning: 'x' },
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
@@ -430,6 +546,28 @@ describe('app', () => {
       expect(await res.json()).toEqual({ ok: true });
       expect(client.deleteTag).toHaveBeenCalledWith(3);
       expect(managedObjects.list()).toHaveLength(0);
+    });
+
+    it('DELETE /api/managed-objects/:id: a non-404 arr failure surfaces as 500, appends a managed.delete-failed warn event, and leaves the registry row in place', async () => {
+      const client = fakeArrClient({
+        profiles: [{ id: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]`, enabled: true, required: ['Group'], ignored: [], tags: [], indexerId: 0 }],
+      });
+      client.deleteReleaseProfile = vi.fn(async () => {
+        throw new Error('arr is down');
+      });
+      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const managedObjects = new ManagedObjects(ctx.db);
+      managedObjects.insert({ arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]` });
+      const rowId = managedObjects.list()[0]!.id;
+      const app = createApp(ctx);
+
+      const res = await app.request(`/api/managed-objects/${rowId}`, { method: 'DELETE', headers: jsonHeaders });
+
+      expect(res.status).toBe(500);
+      expect(managedObjects.list()).toHaveLength(1); // NOT dropped — still the retry pointer
+      expect(ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-failed')).toMatchObject({
+        data: { instance: 'sonarr', kind: 'release_profile', externalId: 9 },
+      });
     });
   });
 
@@ -472,6 +610,18 @@ describe('app', () => {
       expect(res.status).toBe(200);
       const job = ctx.queue.claim()!;
       expect(job.payload).toMatchObject({ hint: 'prefer 10bit' });
+    });
+
+    it('rejects a hint over 2000 characters with 400', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/acquire', {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ arrInstance: 'sonarr', targetKind: 'series', targetId: 7, hint: 'x'.repeat(2001) }),
+      });
+      expect(res.status).toBe(400);
     });
   });
 });

@@ -126,24 +126,53 @@ function restoreArrApiKey(entry: unknown, current: Config): unknown {
   return { ...arrRecord, apiKey: stored.apiKey };
 }
 
+// 2000 is a generous ceiling for a freeform operator note, not a real limit anyone should
+// hit — it exists so a runaway/pasted-in-error hint can't inflate the LLM prompt (and its
+// token cost) unboundedly.
+const HINT_MAX_LENGTH = 2000;
+
 const AcquireBodySchema = z.object({
   arrInstance: z.string().min(1),
   targetKind: z.enum(['series', 'movie']),
   targetId: z.number().int(),
   title: z.string().optional(),
-  hint: z.string().optional(),
+  hint: z.string().max(HINT_MAX_LENGTH).optional(),
 });
 
-const RepickBodySchema = z.object({ hint: z.string().optional() });
+const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).optional() });
 
 // What `runIngestJob`'s rescue stage (`src/pipelines/ingest/run.ts`) actually puts in an
 // `ingest.rescue-proposed` attention item's `data` — the accept endpoint below only ever
 // re-executes exactly that shape, never an arbitrary command a client could construct.
+// Each file needs a non-empty `path` to be a meaningful `ManualImportFile`; `quality`/
+// `languages` are typed (but left optional and unvalidated in shape) purely so the parsed
+// type overlaps `ManualImportFile` enough for a single narrowing cast below, without this
+// route re-deriving/re-validating the whole contract — `runIngestJob` already built these
+// values. `.loose()` keeps every other key (`folderName`, `releaseGroup`, ...) round-tripped
+// verbatim.
+const AcceptFileSchema = z
+  .object({
+    path: z.string().min(1),
+    quality: z.record(z.string(), z.unknown()).optional(),
+    languages: z.array(z.record(z.string(), z.unknown())).optional(),
+  })
+  .loose();
 const AcceptDataSchema = z.object({
   action: z.literal('bundle-import'),
   instance: z.string(),
-  files: z.array(z.record(z.string(), z.unknown())),
+  files: z.array(AcceptFileSchema).min(1),
 });
+
+// Guards `POST /api/attention/:id/accept` against two overlapping requests for the SAME
+// item both passing the open-status check before either has resolved it — without this,
+// both would go on to call `executeManualImport`, importing the same files twice. Keyed by
+// attention item id (not request/connection identity) and module-level rather than
+// per-`createApp()` instance: the dashboard only ever runs one server process against one
+// `AttentionItems` table, so a single shared guard is simpler than threading one through
+// every `createApp()` caller, and an id is always removed in the handler's `finally` the
+// moment its own request finishes (success OR failure), so it never outlives the request
+// that added it.
+const inFlightAccepts = new Set<number>();
 
 /**
  * Reads the *current* config directly off `ctx` rather than a value captured once at
@@ -314,14 +343,17 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     });
   }
 
-  if (ctx.db && ctx.queue && ctx.clients) {
+  if (ctx.db && ctx.queue && ctx.clients && ctx.events) {
     const db = ctx.db;
     const queue = ctx.queue;
     const clients = ctx.clients;
+    const events = ctx.events;
     const attentionItems = new AttentionItems(db);
 
     app.get('/api/attention', (c) => {
       const raw = c.req.query('status');
+      // Anything other than 'dismissed'/'resolved' (including an unrecognized/garbage
+      // value, or the param being absent entirely) falls back to 'open', the default view.
       const status: AttentionStatus = raw === 'dismissed' || raw === 'resolved' ? raw : 'open';
       return c.json({ items: attentionItems.list({ status }) });
     });
@@ -332,6 +364,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!item) return c.json({ error: 'attention item not found' }, 404);
       if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
       attentionItems.setStatus(id, 'dismissed');
+      events.append({ kind: 'attention.dismissed', message: `Dismissed attention item #${id} (${item.kind})`, data: { id, kind: item.kind } });
       return c.json({ ok: true });
     });
 
@@ -343,6 +376,10 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (item.job_id === null) return c.json({ error: 'attention item has no linked job' }, 400);
       const job = queue.get(item.job_id);
       if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
+      // Same "known client" check `/api/acquire` makes — checked against `ctx.clients`
+      // (the runner's actual resolution source), not `config.arrs`; see that route's
+      // matching comment for why the two can drift.
+      if (!clients.has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
 
       // Re-enqueues the JOB'S OWN pipeline (ingest or acquire, whichever it actually
       // was) — unlike repick below, a retry isn't necessarily an acquire re-pick, so it
@@ -356,6 +393,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       });
       // Marked resolved only once the re-enqueue above actually happened.
       attentionItems.setStatus(id, 'resolved');
+      events.append({
+        kind: 'attention.retried',
+        message: `Retried attention item #${id} (${item.kind}) — re-enqueued job #${job.id}'s "${job.pipeline}" pipeline`,
+        data: { id, kind: item.kind, jobId: job.id, pipeline: job.pipeline },
+      });
       return c.json({ ok: true });
     });
 
@@ -367,6 +409,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (item.job_id === null) return c.json({ error: 'attention item has no linked job' }, 400);
       const job = queue.get(item.job_id);
       if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
+      if (!clients.has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
 
       const body: unknown = await c.req.json().catch(() => ({}));
       const parsed = RepickBodySchema.safeParse(body);
@@ -383,6 +426,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         payload: { ...job.payload, source: 'repick', hint: parsed.data.hint },
       });
       attentionItems.setStatus(id, 'resolved');
+      events.append({
+        kind: 'attention.repicked',
+        message: `Repicked attention item #${id} (${item.kind})${parsed.data.hint ? ' with an operator hint' : ''}`,
+        data: { id, kind: item.kind, jobId: job.id, hasHint: parsed.data.hint !== undefined },
+      });
       return c.json({ ok: true });
     });
 
@@ -391,24 +439,37 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const item = Number.isInteger(id) ? attentionItems.get(id) : null;
       if (!item) return c.json({ error: 'attention item not found' }, 404);
       if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
+      // Guards against two overlapping accepts for the SAME item both passing the open
+      // check above before either resolves it — see `inFlightAccepts`'s own doc.
+      if (inFlightAccepts.has(id)) return c.json({ error: 'attention item accept already in progress' }, 409);
+      inFlightAccepts.add(id);
 
-      // Only ever re-executes exactly the `bundle-import` shape `runIngestJob`'s rescue
-      // stage itself proposed — validated before the client is even looked up, so a
-      // malformed payload never gets as far as touching the arr.
-      const parsed = AcceptDataSchema.safeParse(item.data);
-      if (!parsed.success) return c.json({ error: 'malformed accept data', issues: parsed.error.issues }, 400);
-      const client = clients.get(parsed.data.instance);
-      if (!client) return c.json({ error: `unknown arr instance "${parsed.data.instance}"` }, 400);
+      try {
+        // Only ever re-executes exactly the `bundle-import` shape `runIngestJob`'s rescue
+        // stage itself proposed — validated before the client is even looked up, so a
+        // malformed payload never gets as far as touching the arr.
+        const parsed = AcceptDataSchema.safeParse(item.data);
+        if (!parsed.success) return c.json({ error: 'malformed accept data', issues: parsed.error.issues }, 400);
+        const client = clients.get(parsed.data.instance);
+        if (!client) return c.json({ error: `unknown arr instance "${parsed.data.instance}"` }, 400);
 
-      await client.executeManualImport(parsed.data.files as unknown as ManualImportFile[], 'copy');
-      // Marked resolved only once the import actually succeeded — a rejected/thrown
-      // import leaves the item open so it can be retried or dismissed instead.
-      attentionItems.setStatus(id, 'resolved');
-      return c.json({ ok: true });
+        await client.executeManualImport(parsed.data.files as ManualImportFile[], 'copy');
+        // Marked resolved only once the import actually succeeded — a rejected/thrown
+        // import leaves the item open so it can be retried or dismissed instead.
+        attentionItems.setStatus(id, 'resolved');
+        events.append({
+          kind: 'attention.accepted',
+          message: `Accepted bundle-import for attention item #${id} (${item.kind}) — ${parsed.data.files.length} file(s)`,
+          data: { id, kind: item.kind, fileCount: parsed.data.files.length },
+        });
+        return c.json({ ok: true });
+      } finally {
+        inFlightAccepts.delete(id);
+      }
     });
   }
 
-  if (ctx.db && ctx.clients && ctx.events) {
+  if (ctx.db && ctx.clients && ctx.events && ctx.config) {
     const db = ctx.db;
     const events = ctx.events;
     const clients = ctx.clients;
@@ -420,9 +481,12 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
     app.delete('/api/managed-objects/:id', async (c) => {
       const id = Number(c.req.param('id'));
-      const row = Number.isInteger(id) ? managedObjects.list().find((o) => o.id === id) : undefined;
+      const row = Number.isInteger(id) ? managedObjects.get(id) : null;
       if (!row) return c.json({ error: 'managed object not found' }, 404);
-      await deleteManagedObject({ db, clients, events }, row);
+      // `requireConfig(ctx)` (not a value captured at mount time) so a config reloaded via
+      // `PUT /api/config` — e.g. an arr instance's `kind` correcting a typo — is honored on
+      // the very next delete, same as every other config-reading route in this file.
+      await deleteManagedObject({ db, clients, events, config: requireConfig(ctx) }, row);
       return c.json({ ok: true });
     });
   }
