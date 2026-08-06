@@ -99,7 +99,7 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
   }
 
   const raw = await client.searchReleases({ movieId: job.target_id });
-  const result = await attempt(ctx, client, raw, { title, kind: 'movie', jobId: job.id });
+  const result = await attempt(ctx, client, raw, { title, kind: 'movie', jobId: job.id, hint: resolveHint(job) });
 
   if (result.status !== 'grabbed') {
     recordOutcome(ctx, job, {
@@ -177,6 +177,7 @@ async function runSeriesAcquire(
       kind: 'series',
       seasonNumber: season.seasonNumber,
       jobId: job.id,
+      hint: resolveHint(job),
     });
     const seasonLabel = `${title} Season ${season.seasonNumber}`;
 
@@ -245,7 +246,7 @@ async function attempt(
   ctx: AppContext,
   client: ArrApi,
   raw: ReleaseCandidate[],
-  input: { title: string; kind: 'series' | 'movie'; seasonNumber?: number; jobId: number },
+  input: { title: string; kind: 'series' | 'movie'; seasonNumber?: number; jobId: number; hint?: string },
 ): Promise<AttemptResult> {
   const { kept: prefiltered, dropped: prefilterDropped } = prefilter(raw, ctx.config.picking);
   const { kept, dropped: capDropped } = capCandidates(prefiltered);
@@ -273,6 +274,7 @@ async function attempt(
     title: input.title,
     kind: input.kind,
     seasonNumber: input.seasonNumber,
+    hint: input.hint,
   });
 
   if (pick.decision === 'none') {
@@ -377,6 +379,15 @@ function alreadyGrabbedSeasons(ctx: AppContext, job: JobRow): Set<number> {
 function resolveSource(job: JobRow): string {
   const source = job.payload.source;
   return typeof source === 'string' && source.length > 0 ? source : DEFAULT_SOURCE;
+}
+
+/** A human operator's guidance on a re-pick, set by `POST /api/attention/:id/repick`'s
+ * `payload.hint` — forwarded into the pick prompt only when it's a genuinely non-empty
+ * string, so a job with no hint at all (every ordinary job) still gets `undefined`
+ * (byte-identical prompt) rather than an empty/garbage hint section. */
+function resolveHint(job: JobRow): string | undefined {
+  const hint = job.payload.hint;
+  return typeof hint === 'string' && hint.length > 0 ? hint : undefined;
 }
 
 function recordOutcome(ctx: AppContext, job: JobRow, input: RecordOutcomeInput): void {

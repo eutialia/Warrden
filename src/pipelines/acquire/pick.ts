@@ -84,6 +84,7 @@ export async function pickRelease(input: {
   title: string;
   kind: 'series' | 'movie';
   seasonNumber?: number;
+  hint?: string;
 }): Promise<PickResult> {
   const { llm, candidates, ...promptInput } = input;
 

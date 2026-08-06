@@ -30,4 +30,32 @@ describe('synthesizePolicyPrompt', () => {
     expect(user).toContain('- prefer CHS subs over dubs');
     expect(user.split('\n').filter((line) => line.startsWith('-'))).toHaveLength(1);
   });
+
+  it('appends an operator-hint section, weighing it heavily, when a hint is given', () => {
+    const { user } = synthesizePolicyPrompt({ tags: [], title: 'X', kind: 'movie', hint: 'prefer the 10bit encode this time' });
+    expect(user).toContain('Operator hint (from a human reviewing a previous attempt — weigh it heavily):\nprefer the 10bit encode this time');
+  });
+
+  it('normalizes an internal newline in the hint to a single space, same as a tag', () => {
+    const { user } = synthesizePolicyPrompt({ tags: [], title: 'X', kind: 'movie', hint: 'avoid CAMRip\nprefer BD' });
+    expect(user).toContain('Operator hint (from a human reviewing a previous attempt — weigh it heavily):\navoid CAMRip prefer BD');
+  });
+
+  it('produces a byte-identical prompt to before when no hint is given (regression)', () => {
+    const input = { tags: ['prefer CHS subs'], title: 'Sousou no Frieren', kind: 'series' as const, seasonNumber: 1 };
+    const { system, user } = synthesizePolicyPrompt(input);
+    expect(system).toBe(
+      [
+        'You are selecting a single release to download for a media library.',
+        "Pick exactly ONE release from the numbered candidate list the user provides, honoring the user's freeform preferences verbatim.",
+        'If no candidate is viable given those preferences, declare none viable instead of forcing a pick.',
+        'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
+        "Answer with the candidate's number (the # prefix on its line in the list, e.g. 2 for \"#2 [...]\") — not its title or any other identifier.",
+        'When you pick, also extract the release group — the fansub/release group name in the picked title, usually bracketed at the start or end — into releaseGroup; use null only if no group is identifiable.',
+        'Respond with JSON matching the schema provided — no prose outside the JSON.',
+      ].join(' '),
+    );
+    expect(user).toBe('Target: Sousou no Frieren, Season 1\n\nPreferences:\n- prefer CHS subs');
+    expect(user).not.toContain('Operator hint');
+  });
 });

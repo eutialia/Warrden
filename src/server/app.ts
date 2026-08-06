@@ -6,12 +6,17 @@ import { Hono } from 'hono';
 import { csrf } from 'hono/csrf';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
+import type { ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
 import { ConfigSchema, SECRET_PLACEHOLDER, type Config } from '../config/schema.js';
 import { saveConfig } from '../config/store.js';
 import type { AppContext } from '../context.js';
 import { AcquireRecords } from '../db/acquireRecords.js';
+import { AttentionItems, type AttentionStatus } from '../db/attention.js';
+import { ManagedObjects } from '../db/managedObjects.js';
+import { PlacedFiles } from '../db/placedFiles.js';
 import type { TargetKind } from '../jobs/queue.js';
+import { deleteManagedObject } from '../managed/deleteObject.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
 const DEFAULT_JOBS_LIMIT = 50;
@@ -126,6 +131,18 @@ const AcquireBodySchema = z.object({
   targetKind: z.enum(['series', 'movie']),
   targetId: z.number().int(),
   title: z.string().optional(),
+  hint: z.string().optional(),
+});
+
+const RepickBodySchema = z.object({ hint: z.string().optional() });
+
+// What `runIngestJob`'s rescue stage (`src/pipelines/ingest/run.ts`) actually puts in an
+// `ingest.rescue-proposed` attention item's `data` — the accept endpoint below only ever
+// re-executes exactly that shape, never an arbitrary command a client could construct.
+const AcceptDataSchema = z.object({
+  action: z.literal('bundle-import'),
+  instance: z.string(),
+  files: z.array(z.record(z.string(), z.unknown())),
 });
 
 /**
@@ -208,6 +225,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   if (ctx.queue && ctx.db) {
     const queue = ctx.queue;
     const acquireRecords = new AcquireRecords(ctx.db);
+    const placedFiles = new PlacedFiles(ctx.db);
 
     // The dashboard-facing "did this job actually grab anything" status: `null` for a
     // non-acquire pipeline, or an acquire job with no record yet (still pending/running,
@@ -261,7 +279,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
           since: job.created_at,
           until: isTerminal(job) ? job.updated_at : undefined,
         })[0] ?? null;
-      return c.json({ job, acquireRecord, acquireOutcome: acquireOutcome(job) });
+      return c.json({ job, acquireRecord, acquireOutcome: acquireOutcome(job), placedFiles: placedFiles.listByJob(job.id) });
     });
   }
 
@@ -275,7 +293,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!parsed.success) {
         return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       }
-      const { arrInstance, targetKind, targetId, title } = parsed.data;
+      const { arrInstance, targetKind, targetId, title, hint } = parsed.data;
       // Checked against `ctx.clients` (the runner's actual resolution source), not
       // `config.arrs` — see `handleWebhook`'s matching comment for why the two can drift.
       // This is still a client mistake (typo'd/removed/not-yet-restarted instance name),
@@ -290,9 +308,122 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         arrInstance,
         targetKind,
         targetId,
-        payload: { title, source: 'manual' },
+        payload: { title, source: 'manual', hint },
       });
       return c.json({ outcome: result.outcome });
+    });
+  }
+
+  if (ctx.db && ctx.queue && ctx.clients) {
+    const db = ctx.db;
+    const queue = ctx.queue;
+    const clients = ctx.clients;
+    const attentionItems = new AttentionItems(db);
+
+    app.get('/api/attention', (c) => {
+      const raw = c.req.query('status');
+      const status: AttentionStatus = raw === 'dismissed' || raw === 'resolved' ? raw : 'open';
+      return c.json({ items: attentionItems.list({ status }) });
+    });
+
+    app.post('/api/attention/:id/dismiss', (c) => {
+      const id = Number(c.req.param('id'));
+      const item = Number.isInteger(id) ? attentionItems.get(id) : null;
+      if (!item) return c.json({ error: 'attention item not found' }, 404);
+      if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
+      attentionItems.setStatus(id, 'dismissed');
+      return c.json({ ok: true });
+    });
+
+    app.post('/api/attention/:id/retry', (c) => {
+      const id = Number(c.req.param('id'));
+      const item = Number.isInteger(id) ? attentionItems.get(id) : null;
+      if (!item) return c.json({ error: 'attention item not found' }, 404);
+      if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
+      if (item.job_id === null) return c.json({ error: 'attention item has no linked job' }, 400);
+      const job = queue.get(item.job_id);
+      if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
+
+      // Re-enqueues the JOB'S OWN pipeline (ingest or acquire, whichever it actually
+      // was) — unlike repick below, a retry isn't necessarily an acquire re-pick, so it
+      // must not hardcode one.
+      queue.enqueue({
+        pipeline: job.pipeline,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        arrInstance: job.arr_instance,
+        payload: { ...job.payload, source: 'retry' },
+      });
+      // Marked resolved only once the re-enqueue above actually happened.
+      attentionItems.setStatus(id, 'resolved');
+      return c.json({ ok: true });
+    });
+
+    app.post('/api/attention/:id/repick', async (c) => {
+      const id = Number(c.req.param('id'));
+      const item = Number.isInteger(id) ? attentionItems.get(id) : null;
+      if (!item) return c.json({ error: 'attention item not found' }, 404);
+      if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
+      if (item.job_id === null) return c.json({ error: 'attention item has no linked job' }, 400);
+      const job = queue.get(item.job_id);
+      if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
+
+      const body: unknown = await c.req.json().catch(() => ({}));
+      const parsed = RepickBodySchema.safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
+
+      // Always pipeline 'acquire' (unlike retry above) — a repick is specifically "try the
+      // pick again, with a human's hint this time," regardless of which pipeline the
+      // linked job itself ran.
+      queue.enqueue({
+        pipeline: 'acquire',
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        arrInstance: job.arr_instance,
+        payload: { ...job.payload, source: 'repick', hint: parsed.data.hint },
+      });
+      attentionItems.setStatus(id, 'resolved');
+      return c.json({ ok: true });
+    });
+
+    app.post('/api/attention/:id/accept', async (c) => {
+      const id = Number(c.req.param('id'));
+      const item = Number.isInteger(id) ? attentionItems.get(id) : null;
+      if (!item) return c.json({ error: 'attention item not found' }, 404);
+      if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
+
+      // Only ever re-executes exactly the `bundle-import` shape `runIngestJob`'s rescue
+      // stage itself proposed — validated before the client is even looked up, so a
+      // malformed payload never gets as far as touching the arr.
+      const parsed = AcceptDataSchema.safeParse(item.data);
+      if (!parsed.success) return c.json({ error: 'malformed accept data', issues: parsed.error.issues }, 400);
+      const client = clients.get(parsed.data.instance);
+      if (!client) return c.json({ error: `unknown arr instance "${parsed.data.instance}"` }, 400);
+
+      await client.executeManualImport(parsed.data.files as unknown as ManualImportFile[], 'copy');
+      // Marked resolved only once the import actually succeeded — a rejected/thrown
+      // import leaves the item open so it can be retried or dismissed instead.
+      attentionItems.setStatus(id, 'resolved');
+      return c.json({ ok: true });
+    });
+  }
+
+  if (ctx.db && ctx.clients && ctx.events) {
+    const db = ctx.db;
+    const events = ctx.events;
+    const clients = ctx.clients;
+    const managedObjects = new ManagedObjects(db);
+
+    app.get('/api/managed-objects', (c) => {
+      return c.json({ objects: managedObjects.list() });
+    });
+
+    app.delete('/api/managed-objects/:id', async (c) => {
+      const id = Number(c.req.param('id'));
+      const row = Number.isInteger(id) ? managedObjects.list().find((o) => o.id === id) : undefined;
+      if (!row) return c.json({ error: 'managed object not found' }, 404);
+      await deleteManagedObject({ db, clients, events }, row);
+      return c.json({ ok: true });
     });
   }
 

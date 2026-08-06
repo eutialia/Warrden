@@ -26,6 +26,12 @@ describe('pickRelease', () => {
     expect(llm.calls[0].system).toContain('number');
     expect(llm.calls[0].prompt).toContain('CHS');
   });
+  it('forwards a hint through to the policy prompt', async () => {
+    const llm = new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: null, confidence: 'high', reasoning: 'ok' }]);
+    await pickRelease({ llm, candidates: [candidate({ guid: 'g1' })], ...base, hint: 'prefer the 10bit encode' });
+    expect(llm.calls[0]!.prompt).toContain('prefer the 10bit encode');
+  });
+
   it('passes through a none decision', async () => {
     const llm = new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches CHS requirement' }]);
     const res = await pickRelease({ llm, candidates: [candidate({})], ...base });

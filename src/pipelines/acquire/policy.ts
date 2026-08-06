@@ -3,6 +3,10 @@ export interface SynthesizePolicyPromptInput {
   title: string;
   kind: 'series' | 'movie';
   seasonNumber?: number;
+  // A human's guidance on a re-pick after a previous attempt (e.g. a rejected pick, or a
+  // low-confidence rescue) — see `run.ts`'s `resolveHint` for how this is sourced from
+  // `job.payload.hint`. Absent for every ordinary (non-repick) attempt.
+  hint?: string;
 }
 
 export interface PolicyPrompt {
@@ -40,7 +44,14 @@ export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): Poli
     ? `Preferences:\n${input.tags.map((t) => `- ${t.replace(/\s*\n\s*/g, ' ')}`).join('\n')}`
     : 'Preferences: none specified.';
 
-  const user = [`Target: ${target}`, preferences].join('\n\n');
+  const sections = [`Target: ${target}`, preferences];
+  if (input.hint) {
+    // Same internal-newline normalization as a preference tag above, for the same reason:
+    // an operator hint pasted from elsewhere shouldn't fracture into multiple lines.
+    const normalizedHint = input.hint.replace(/\s*\n\s*/g, ' ');
+    sections.push(`Operator hint (from a human reviewing a previous attempt — weigh it heavily):\n${normalizedHint}`);
+  }
+  const user = sections.join('\n\n');
 
   return { system, user };
 }

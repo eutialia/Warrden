@@ -30,6 +30,24 @@ describe('runAcquireJob — single-season series (the common case)', () => {
     const rec: any = ctx.db.prepare('SELECT * FROM acquire_records').get();
     expect(rec.source).toBe('reconcile');
   });
+  it('forwards job.payload.hint into the pick prompt when it is a non-empty string', async () => {
+    const { ctx, job } = setup({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' });
+    job.payload.hint = 'prefer the 10bit encode this time';
+    await runAcquireJob(ctx, job);
+    const llm = ctx.llm as FakeGenerator;
+    expect(llm.calls[0]!.prompt).toContain('prefer the 10bit encode this time');
+  });
+  it.each([
+    { name: 'absent', hint: undefined },
+    { name: 'empty string', hint: '' },
+    { name: 'non-string', hint: 42 },
+  ])('does not forward job.payload.hint when it is $name', async ({ hint }) => {
+    const { ctx, job } = setup({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' });
+    job.payload.hint = hint;
+    await runAcquireJob(ctx, job);
+    const llm = ctx.llm as FakeGenerator;
+    expect(llm.calls[0]!.prompt).not.toContain('Operator hint');
+  });
   it('none-viable: no grab, attention event, record kept', async () => {
     const { ctx, client, job } = setup({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'no CHS release yet' });
     await runAcquireJob(ctx, job);
