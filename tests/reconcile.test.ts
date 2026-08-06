@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { HistoryRecord } from '../src/arr/types.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { SyncState } from '../src/db/syncState.js';
@@ -7,6 +8,16 @@ import { reconcile } from '../src/reconcile/reconcile.js';
 import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource } from './helpers.js';
 
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
+
+/** A `downloadFolderImported` history record fixture for `ingestBackstop` tests — `data.downloadId`
+ * defaults to a value derived from `id` so tests that don't care about it don't have to spell it out. */
+const historyRecord = (overrides: Partial<HistoryRecord> & { id: number }): HistoryRecord => ({
+  eventType: 'downloadFolderImported',
+  date: new Date().toISOString(),
+  sourceTitle: 'Test Release',
+  data: { downloadId: `dl-${overrides.id}` },
+  ...overrides,
+});
 
 describe('reconcile', () => {
   it('a sonarr-kind instance only fetches series, never movies (Sonarr has no /movie endpoint)', async () => {
@@ -322,5 +333,94 @@ describe('reconcile', () => {
     expect(client.tags).toHaveLength(1);
     expect(client.profiles).toHaveLength(1);
     expect(ctx.db.prepare('SELECT COUNT(*) n FROM managed_objects').get()).toMatchObject({ n: 2 });
+  });
+
+  describe('ingestBackstop (missed import webhooks)', () => {
+    it('bootstrap: records the history cursor at the current max id without enqueueing', async () => {
+      const client = fakeArrClient({ series: [series(1)] });
+      client.listRecentImports = async () => [historyRecord({ id: 5, seriesId: 1 }), historyRecord({ id: 9, seriesId: 1 })];
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+
+      await reconcile(ctx);
+
+      expect(ctx.queue.claim()).toBeNull(); // bootstrap enqueues nothing, on either axis
+      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(9);
+      const event = ctx.events.list().find((e) => e.kind === 'reconcile.history-bootstrapped');
+      expect(event).toBeDefined();
+      expect(event!.data).toMatchObject({ instance: 'sonarr', cursor: 9 });
+    });
+
+    it('a later pass enqueues one ingest job per record above the cursor and advances it to the new max, ignoring records at or below the old cursor', async () => {
+      const client = fakeArrClient({ series: [series(1), series(2)] });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      client.listRecentImports = async () => [historyRecord({ id: 3, seriesId: 1 })];
+      await reconcile(ctx); // bootstrap: cursor -> 3
+
+      client.listRecentImports = async () => [
+        historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }), // at old cursor — ignored
+        historyRecord({ id: 4, seriesId: 1, data: { downloadId: 'dl-4' } }),
+        historyRecord({ id: 6, seriesId: 2, data: { downloadId: 'dl-6' } }),
+      ];
+      await reconcile(ctx);
+
+      const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
+      expect(jobs).toHaveLength(2);
+      expect(jobs.map((j) => j.target_id).sort()).toEqual([1, 2]);
+      const series1Job = jobs.find((j) => j.target_id === 1)!;
+      expect(series1Job).toMatchObject({
+        arr_instance: 'sonarr',
+        target_kind: 'series',
+        payload: { source: 'reconcile', downloadId: 'dl-4' },
+      });
+
+      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(6);
+      const event = ctx.events.list().find((e) => e.kind === 'reconcile.missed-imports');
+      expect(event!.data).toMatchObject({ instance: 'sonarr', targets: ['series:1', 'series:2'] });
+      expect(event!.message).toContain('2');
+    });
+
+    it('multiple new records for the same target collapse into a single enqueue', async () => {
+      const client = fakeArrClient({ series: [series(1)] });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
+      await reconcile(ctx); // bootstrap: cursor -> 1
+
+      client.listRecentImports = async () => [
+        historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } }),
+        historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }),
+      ];
+      await reconcile(ctx);
+
+      const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ target_kind: 'series', target_id: 1, payload: { downloadId: 'dl-2' } });
+    });
+
+    it('a record with neither seriesId nor movieId is skipped', async () => {
+      const client = fakeArrClient({ series: [series(1)] });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
+      await reconcile(ctx); // bootstrap: cursor -> 1
+
+      client.listRecentImports = async () => [historyRecord({ id: 2 })]; // no seriesId/movieId
+      await reconcile(ctx);
+
+      expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
+      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(2); // cursor still advances past the skipped record
+      expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
+    });
+
+    it('no records above the cursor leaves it unchanged and appends no missed-imports event', async () => {
+      const client = fakeArrClient({ series: [series(1)] });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      client.listRecentImports = async () => [historyRecord({ id: 3, seriesId: 1 })];
+      await reconcile(ctx); // bootstrap: cursor -> 3
+
+      await reconcile(ctx); // same records again — nothing new
+
+      expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
+      expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
+      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(3);
+    });
   });
 });

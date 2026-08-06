@@ -8,6 +8,7 @@ import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../pipelines/acquire
 import { errorMessage } from '../util/errors.js';
 
 const RECONCILE_SOURCE = 'reconcile';
+const HISTORY_PAGE_SIZE = 100;
 
 interface Resource {
   id: number;
@@ -57,6 +58,7 @@ export async function reconcile(ctx: AppContext): Promise<void> {
       const { series, movies } = await fetchInstanceResources(ctx, name, client);
       seriesByInstance.set(name, series);
       reconcileInstance(ctx, syncState, name, toResources(series, movies));
+      await ingestBackstop(ctx, syncState, name, client);
     } catch (err) {
       ctx.events.append({
         kind: 'reconcile.failed',
@@ -172,6 +174,69 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
     seenKey,
     [...seenIds].filter((id) => currentIds.has(id)),
   );
+}
+
+/**
+ * Backstop for the ingest webhook path: an arr's own `/history` (newest-first,
+ * `downloadFolderImported` only) is the ground truth for what got imported, so a
+ * per-instance cursor over its `id` catches anything a dropped/never-registered webhook
+ * missed. Same bootstrap shape as `reconcileInstance`'s `seen:<name>` above, and for the
+ * same reason: the very first pass has no prior cursor, so treating every existing history
+ * record as "missed" would mass-enqueue an instance's whole import history. Instead it just
+ * records the current max id and enqueues nothing; only ids above that cursor on later
+ * passes are ever new.
+ *
+ * A record the webhook path already handled will still show up here once — the cursor
+ * only suppresses ids at or below where it last stopped, not "already handled" — but
+ * re-enqueuing costs nothing: ingest's provenance short-circuit makes a duplicate run a
+ * no-op before it ever reaches the LLM. If more than `HISTORY_PAGE_SIZE` imports land
+ * between passes the oldest overflow is missed; acceptable for a backstop whose primary
+ * path is the webhook.
+ */
+async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: string, client: ArrApi): Promise<void> {
+  const cursorKey = `history:${name}`;
+  const records = await client.listRecentImports(HISTORY_PAGE_SIZE);
+  const maxId = records.reduce((m, r) => Math.max(m, r.id), 0);
+
+  const cursor = syncState.read<number>(cursorKey);
+  if (cursor === undefined || cursor === null) {
+    syncState.write(cursorKey, maxId);
+    ctx.events.append({
+      kind: 'reconcile.history-bootstrapped',
+      message: `Bootstrapped import-history cursor for "${name}" at ${maxId}; nothing enqueued`,
+      data: { instance: name, cursor: maxId },
+    });
+    return;
+  }
+
+  const fresh = records.filter((r) => r.id > cursor);
+  const enqueuedTargets: string[] = [];
+  const seen = new Set<string>();
+  for (const r of fresh) {
+    const targetKind: TargetKind | null = r.seriesId !== undefined ? 'series' : r.movieId !== undefined ? 'movie' : null;
+    if (targetKind === null) continue;
+    const targetId = (targetKind === 'series' ? r.seriesId : r.movieId)!;
+    const key = `${targetKind}:${targetId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ctx.queue.enqueue({
+      pipeline: 'ingest',
+      targetKind,
+      targetId,
+      arrInstance: name,
+      payload: { source: RECONCILE_SOURCE, downloadId: r.data.downloadId },
+    });
+    enqueuedTargets.push(key);
+  }
+
+  if (maxId > cursor) syncState.write(cursorKey, maxId);
+  if (enqueuedTargets.length > 0) {
+    ctx.events.append({
+      kind: 'reconcile.missed-imports',
+      message: `Enqueued ${enqueuedTargets.length} ingest job(s) on "${name}" for imports missed by webhooks`,
+      data: { instance: name, targets: enqueuedTargets },
+    });
+  }
 }
 
 /**
