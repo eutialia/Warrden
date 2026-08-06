@@ -1,5 +1,6 @@
 import type { AppContext } from '../context.js';
 import { errorMessage } from '../util/errors.js';
+import { RescheduleError } from './errors.js';
 import type { JobRow } from './queue.js';
 
 export type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
@@ -10,11 +11,13 @@ const DEFAULT_INTERVAL_MS = 1000;
  * Polls the job queue on an interval, claiming one pending job per tick and dispatching it
  * to the handler registered for its `pipeline`. A handler that resolves completes the job
  * via `queue.complete` — if that requeues a dirty twin, the queue already handled it, there's
- * nothing more for the runner to do. A handler that throws (or an unregistered pipeline) is
- * reported via `queue.fail`, which itself decides retry vs terminal failure: every failure
- * appends a `warn` event, and a terminal (non-retried) one additionally raises an `attention`
- * event so it surfaces on the dashboard instead of silently parking. Returns a stop function
- * that clears the interval.
+ * nothing more for the runner to do. A handler that throws `RescheduleError` isn't failing —
+ * it's saying "not done yet, try me again later" (e.g. the ingest pipeline's settle-wait) —
+ * so it goes through `queue.reschedule` instead, with only an info-level `job.rescheduled`
+ * event. Any other throw (or an unregistered pipeline) is reported via `queue.fail`, which
+ * itself decides retry vs terminal failure: every failure appends a `warn` event, and a
+ * terminal (non-retried) one additionally raises an `attention` event so it surfaces on the
+ * dashboard instead of silently parking. Returns a stop function that clears the interval.
  */
 export function startRunner(ctx: AppContext, handlers: Record<string, JobHandler>, opts?: { intervalMs?: number }): () => void {
   let ticking = false;
@@ -36,6 +39,16 @@ export function startRunner(ctx: AppContext, handlers: Record<string, JobHandler
         await handler(ctx, job);
         ctx.queue.complete(job.id);
       } catch (err) {
+        if (err instanceof RescheduleError) {
+          ctx.queue.reschedule(job.id, err.delayMs);
+          ctx.events.append({
+            kind: 'job.rescheduled',
+            jobId: job.id,
+            message: `Job #${job.id} (${job.pipeline}) rescheduled in ${Math.round(err.delayMs / 1000)}s: ${err.message}`,
+            data: { pipeline: job.pipeline, delayMs: err.delayMs },
+          });
+          return;
+        }
         failJob(ctx, job, errorMessage(err));
       }
     } finally {

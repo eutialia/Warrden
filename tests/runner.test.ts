@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { RescheduleError } from '../src/jobs/errors.js';
 import { startRunner } from '../src/jobs/runner.js';
 import { makeCtx } from './helpers.js';
 
@@ -63,6 +64,44 @@ describe('startRunner', () => {
     const warnEvents = ctx.events.list({ level: 'warn' });
     expect(warnEvents).toHaveLength(1);
     expect(warnEvents[0]!.message).toContain('mystery');
+  });
+
+  it('reschedules a job that throws RescheduleError: back to pending with a future not_before, attempts untouched, only a job.rescheduled info event', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    const handler = vi.fn().mockRejectedValue(new RescheduleError('waiting for settle', 5_000));
+    const start = Date.now();
+    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    const job = ctx.queue.get(id!)!;
+    expect(job.status).toBe('pending');
+    expect(job.attempts).toBe(0);
+    expect(job.not_before).toBeGreaterThanOrEqual(start + 5_000);
+
+    expect(ctx.events.list({ level: 'warn' })).toHaveLength(0);
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
+    const infoEvents = ctx.events.list().filter((e) => e.kind === 'job.rescheduled');
+    expect(infoEvents).toHaveLength(1);
+    expect(infoEvents[0]!.level).toBe('info');
+    expect(infoEvents[0]!.message).toContain('waiting for settle');
+    expect(infoEvents[0]!.message).toContain('5s');
+  });
+
+  it('a handler throwing a plain Error still takes the existing fail path, not reschedule', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
+    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(ctx.queue.get(id!)!.attempts).toBe(1);
+    expect(ctx.events.list().some((e) => e.kind === 'job.rescheduled')).toBe(false);
+    expect(ctx.events.list({ level: 'warn' })).toHaveLength(1);
   });
 
   it('stop() halts further polling', async () => {

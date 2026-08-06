@@ -229,6 +229,24 @@ export class JobQueue {
   }
 
   /**
+   * Puts a `running` job back to `pending` with a future `not_before`, for a handler that
+   * isn't failing but needs to run again later (e.g. the ingest pipeline's settle-wait).
+   * `attempts` is untouched — this isn't a retry. `dirty` is cleared same as `complete()`
+   * and `fail()`'s retry path: the future run this reschedule sets up already covers any
+   * trigger that arrived mid-run, so there's nothing left for that flag to earn a requeue
+   * for. Throws if the job isn't `running`, mirroring `complete()`/`fail()`'s own guards.
+   */
+  reschedule(id: number, delayMs: number): void {
+    const now = Date.now();
+    const info = this.db
+      .prepare(`UPDATE jobs SET status = 'pending', dirty = 0, not_before = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
+      .run(now + delayMs, now, id);
+    if (info.changes === 0) {
+      throw new Error(`reschedule: job ${id} is not running`);
+    }
+  }
+
+  /**
    * Resets every `running` job back to `pending` (clearing `not_before` and `dirty`,
    * preserving `attempts`) and returns how many were reset. Meant to run once at startup,
    * before the runner starts polling: a process crash/restart while a job was in flight

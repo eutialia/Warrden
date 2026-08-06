@@ -173,6 +173,51 @@ describe('JobQueue', () => {
     expect(() => q.fail(id!, 'boom')).toThrow(/not running/);
   });
 
+  describe('reschedule()', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('puts a running job back to pending with not_before = now + delayMs, attempts unchanged', () => {
+      vi.setSystemTime(1_000);
+      q.enqueue(target);
+      const job = q.claim()!;
+
+      q.reschedule(job.id, 5_000);
+
+      const row = q.get(job.id)!;
+      expect(row.status).toBe('pending');
+      expect(row.not_before).toBe(1_000 + 5_000);
+      expect(row.attempts).toBe(0);
+    });
+
+    it('is not claimable before not_before but is claimable after', () => {
+      vi.setSystemTime(1_000);
+      q.enqueue(target);
+      const job = q.claim()!;
+      q.reschedule(job.id, 5_000);
+
+      expect(q.claim(5_999)).toBeNull();
+      expect(q.claim(6_000)!.id).toBe(job.id);
+    });
+
+    it('clears a dirty flag set during the run without inserting a twin row — the future run covers whatever trigger arrived mid-run', () => {
+      q.enqueue(target);
+      const job = q.claim()!;
+      expect(q.enqueue(target).outcome).toBe('marked-dirty');
+      expect(q.get(job.id)!.dirty).toBe(1);
+
+      q.reschedule(job.id, 5_000);
+
+      expect(q.get(job.id)!.dirty).toBe(0);
+      expect(q.list()).toHaveLength(1); // no extra pending row was inserted
+    });
+
+    it('throws when the job is not running', () => {
+      const { id } = q.enqueue(target);
+      expect(() => q.reschedule(id!, 5_000)).toThrow(/not running/);
+    });
+  });
+
   describe('reclaimAbandoned()', () => {
     it('resets a running job back to pending (claimable again); a still-pending job elsewhere is untouched', () => {
       const abandoned = q.enqueue(target).id!; // will be claimed (-> running) then abandoned
