@@ -133,11 +133,11 @@ export interface FakeArrClient extends ArrApi {
   notifications: NotificationSummary[];
   /** Every `grabRelease` call, recorded in order — the pipeline test's grab assertion. */
   grabbed: Array<{ guid: string; indexerId: number }>;
-  /** Seeds a tag directly into the store, bypassing `createTag`'s auto id — for tests
-   * that need a pre-existing tag with a specific id/label already in place. */
-  pushTag(tag: TagResource): TagResource;
-  /** Same as `pushTag`, for release profiles. */
-  pushProfile(profile: ReleaseProfileResource): ReleaseProfileResource;
+  /** Seeds a tag directly into the store, auto-assigning an id the same way `createTag`
+   * would — for tests that need a pre-existing tag without going through `pinReleaseGroup`. */
+  pushTag(label: string): TagResource;
+  /** Same as `pushTag`, for release profiles: auto-assigns an id like `createReleaseProfile` would. */
+  pushProfile(profile: Omit<ReleaseProfileResource, 'id'>): ReleaseProfileResource;
 }
 
 /**
@@ -222,13 +222,15 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       client.notifications = client.notifications.filter((n) => n.id !== id);
     }),
 
-    pushTag(tag: TagResource): TagResource {
+    pushTag(label: string): TagResource {
+      const tag: TagResource = { id: nextTagId++, label };
       client.tags.push(tag);
       return tag;
     },
-    pushProfile(profile: ReleaseProfileResource): ReleaseProfileResource {
-      client.profiles.push(profile);
-      return profile;
+    pushProfile(profile: Omit<ReleaseProfileResource, 'id'>): ReleaseProfileResource {
+      const created: ReleaseProfileResource = { ...profile, id: nextProfileId++ };
+      client.profiles.push(created);
+      return created;
     },
   };
 
