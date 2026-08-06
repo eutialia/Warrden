@@ -1,6 +1,5 @@
 import type { ReleaseCandidate } from '../../arr/types.js';
-
-const BYTES_PER_MB = 1_048_576;
+import { BYTES_PER_MB } from '../../util/bytes.js';
 
 export interface PrefilterOpts {
   seederFloor: number;

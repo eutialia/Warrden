@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ReleaseCandidate } from '../../arr/types.js';
 import { LlmError, type StructuredGenerator } from '../../llm/generator.js';
+import { BYTES_PER_GB } from '../../util/bytes.js';
 import { synthesizePolicyPrompt } from './policy.js';
 
 export const PickResultSchema = z.discriminatedUnion('decision', [
@@ -15,7 +16,6 @@ export const PickResultSchema = z.discriminatedUnion('decision', [
 ]);
 export type PickResult = z.infer<typeof PickResultSchema>;
 
-const BYTES_PER_GB = 1_073_741_824;
 const CALLSITE = 'release-pick';
 
 /** Renders one numbered candidate line, e.g. `#1 [title] | 1.4 GB | 25 seeders | indexer`. */
@@ -43,6 +43,14 @@ export async function pickRelease(input: {
   seasonNumber?: number;
 }): Promise<PickResult> {
   const { llm, candidates, ...promptInput } = input;
+
+  // Nothing to choose from — an empty candidate list isn't a policy question, so it's
+  // not worth an LLM round-trip (cost, latency, and a queued fixture the caller would
+  // have to supply for a foregone conclusion).
+  if (candidates.length === 0) {
+    return { decision: 'none', reasoning: 'no candidates' };
+  }
+
   const { system, user } = synthesizePolicyPrompt(promptInput);
 
   const candidateLines = candidates.map((c, i) => renderCandidateLine(i, c)).join('\n');

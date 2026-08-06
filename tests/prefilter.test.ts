@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { prefilter } from '../src/pipelines/acquire/prefilter.js';
+import { BYTES_PER_MB } from '../src/util/bytes.js';
 import { candidate } from './helpers.js';
 
 const opts = { seederFloor: 3, minSizeMB: 50, maxSizeMB: 60000 };
@@ -8,8 +9,8 @@ describe('prefilter', () => {
   it.each([
     { name: 'arr-rejected', c: candidate({ rejected: true, rejections: ['Unknown quality'] }), reason: 'rejected' },
     { name: 'low seeders', c: candidate({ seeders: 1 }), reason: 'seeders' },
-    { name: 'too small', c: candidate({ size: 10 * 1_048_576 }), reason: 'size' },
-    { name: 'too big', c: candidate({ size: 90000 * 1_048_576 }), reason: 'size' },
+    { name: 'too small', c: candidate({ size: 10 * BYTES_PER_MB }), reason: 'size' },
+    { name: 'too big', c: candidate({ size: 90000 * BYTES_PER_MB }), reason: 'size' },
   ])('drops $name', ({ c, reason }) => {
     const res = prefilter([c], opts);
     expect(res.kept).toHaveLength(0);
@@ -24,8 +25,8 @@ describe('prefilter', () => {
     // treated exactly like null (kept), not coerced into a falsy "0 seeders" drop.
     { name: 'undefined seeders (usenet release)', c: candidate({ seeders: undefined as unknown as null }) },
     { name: 'seeders exactly at the floor', c: candidate({ seeders: opts.seederFloor }) },
-    { name: 'size exactly at the minimum', c: candidate({ size: opts.minSizeMB * 1_048_576 }) },
-    { name: 'size exactly at the maximum', c: candidate({ size: opts.maxSizeMB * 1_048_576 }) },
+    { name: 'size exactly at the minimum', c: candidate({ size: opts.minSizeMB * BYTES_PER_MB }) },
+    { name: 'size exactly at the maximum', c: candidate({ size: opts.maxSizeMB * BYTES_PER_MB }) },
   ])('keeps $name', ({ c }) => {
     expect(prefilter([c], opts).kept).toHaveLength(1);
   });
