@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
+import { csrf } from 'hono/csrf';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { handleWebhook } from '../arr/webhooks.js';
@@ -10,6 +11,7 @@ import { ConfigSchema, SECRET_PLACEHOLDER, type Config } from '../config/schema.
 import { saveConfig } from '../config/store.js';
 import type { AppContext } from '../context.js';
 import { AcquireRecords } from '../db/acquireRecords.js';
+import type { TargetKind } from '../jobs/queue.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
 const DEFAULT_JOBS_LIMIT = 50;
@@ -142,6 +144,16 @@ function requireConfig(ctx: Partial<AppContext>): Config {
 
 export function createApp(ctx: Partial<AppContext>): Hono {
   const app = new Hono();
+
+  // Blocks a cross-origin browser POST/PUT/etc. that dodges CORS preflight by using a
+  // "simple" content type (`text/plain`, form-urlencoded, multipart) — the classic CSRF
+  // vector against a JSON API that parses the body regardless of its declared type (see
+  // `c.req.json()` below, used everywhere). A request with no Origin header at all —
+  // Sonarr/Radarr's own webhook POSTs, or any other server-to-server call — is allowed
+  // through unaffected; only a browser sends Origin in the first place.
+  app.use('/api/*', csrf());
+  app.use('/webhooks/*', csrf());
+
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
 
   if (ctx.events) {
@@ -174,16 +186,17 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     });
   }
 
-  if (ctx.queue && ctx.events && ctx.config) {
+  if (ctx.queue && ctx.events && ctx.config && ctx.clients) {
     const queue = ctx.queue;
     const events = ctx.events;
+    const clients = ctx.clients;
 
     app.post('/webhooks/:instance', async (c) => {
       const instance = c.req.param('instance');
       const payload: unknown = await c.req.json().catch(() => undefined);
       // `requireConfig(ctx)` (not a value snapshotted here at mount time) so a config
       // reloaded via `PUT /api/config` is picked up starting with the very next webhook.
-      const webhookCtx = { queue, events, config: requireConfig(ctx) };
+      const webhookCtx = { queue, events, config: requireConfig(ctx), clients };
       // Always 200: the arrs retry non-2xx webhook deliveries, which we don't want.
       return c.json(handleWebhook(webhookCtx, instance, payload));
     });
@@ -193,23 +206,36 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     const queue = ctx.queue;
     const acquireRecords = new AcquireRecords(ctx.db);
 
+    // The dashboard-facing "did this job actually grab anything" status: `null` for a
+    // non-acquire pipeline, or an acquire job with no record yet (still pending/running,
+    // or it crashed before recording). See `AcquireRecords.outcomeForJob` for why this is
+    // an aggregate over every record the job's own run produced, not just the latest one.
+    function acquireOutcome(job: { pipeline: string; arr_instance: string; target_kind: TargetKind; target_id: number; created_at: number }) {
+      if (job.pipeline !== 'acquire') return null;
+      return acquireRecords.outcomeForJob(job.arr_instance, job.target_kind, job.target_id, job.created_at);
+    }
+
     app.get('/api/jobs', (c) => {
       const limit = parseLimit(c.req.query('limit'), DEFAULT_JOBS_LIMIT);
-      return c.json(queue.list({ limit }));
+      const jobs = queue.list({ limit });
+      return c.json(jobs.map((job) => ({ ...job, acquireOutcome: acquireOutcome(job) })));
     });
 
     app.get('/api/jobs/:id', (c) => {
       const id = Number(c.req.param('id'));
       const job = Number.isInteger(id) ? queue.get(id) : null;
       if (!job) return c.json({ error: 'job not found' }, 404);
-      // `listByTarget` orders newest first, so [0] is the latest outcome for this target.
+      // `listByTarget` orders newest first, so [0] is the latest outcome for this target —
+      // shown for its detail (reasoning, candidates); `acquireOutcome` above is the
+      // aggregate used for the status badge.
       const acquireRecord = acquireRecords.listByTarget(job.arr_instance, job.target_kind, job.target_id)[0] ?? null;
-      return c.json({ job, acquireRecord });
+      return c.json({ job, acquireRecord, acquireOutcome: acquireOutcome(job) });
     });
   }
 
-  if (ctx.queue && ctx.config) {
+  if (ctx.queue && ctx.config && ctx.clients) {
     const queue = ctx.queue;
+    const clients = ctx.clients;
 
     app.post('/api/acquire', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
@@ -218,11 +244,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       }
       const { arrInstance, targetKind, targetId, title } = parsed.data;
-      // Same "known instance" check `handleWebhook` does — this is a client mistake
-      // (typo'd/removed instance name), so it's a 400 here rather than the webhook
-      // route's always-200 "unknown instance" (which exists only because arrs retry
-      // non-2xx deliveries; nothing retries a dashboard button click).
-      if (!requireConfig(ctx).arrs.some((a) => a.name === arrInstance)) {
+      // Checked against `ctx.clients` (the runner's actual resolution source), not
+      // `config.arrs` — see `handleWebhook`'s matching comment for why the two can drift.
+      // This is still a client mistake (typo'd/removed/not-yet-restarted instance name),
+      // so it's a 400 here rather than the webhook route's always-200 "unknown instance"
+      // (which exists only because arrs retry non-2xx deliveries; nothing retries a
+      // dashboard button click).
+      if (!clients.has(arrInstance)) {
         return c.json({ error: `unknown arr instance "${arrInstance}"` }, 400);
       }
       const result = queue.enqueue({

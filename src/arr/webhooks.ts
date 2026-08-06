@@ -27,7 +27,7 @@ export interface HandleWebhookResult {
 
 /** Only the parts of AppContext handleWebhook actually reads — lets the route pass a
  * partial ctx without an `as AppContext` cast. */
-export type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config'>;
+export type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config' | 'clients'>;
 
 /**
  * Validates an inbound Sonarr/Radarr webhook body and, for a series/movie "added"
@@ -37,7 +37,13 @@ export type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config'>;
  * non-2xx, which we don't want).
  */
 export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, payload: unknown): HandleWebhookResult {
-  if (!ctx.config.arrs.some((a) => a.name === instanceName)) {
+  // `ctx.clients` (not `ctx.config.arrs`) is checked here because it's what the runner
+  // actually resolves against (`ctx.clients.get(job.arr_instance)` in
+  // `src/pipelines/acquire/run.ts`) — the two can drift: a brand-new instance can be in
+  // `config.arrs` before a restart has wired up its `ArrClient` (arr connections are
+  // startup-only, per the README), and enqueueing against it here would only fail later,
+  // uncaught, when the runner actually tries to process the job.
+  if (!ctx.clients.has(instanceName)) {
     return { handled: false, reason: 'unknown instance' };
   }
 

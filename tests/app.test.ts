@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { EventLog } from '../src/events/log.js';
-import { freshDb, makeCtx, configWithArrs } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
 
 describe('app', () => {
   it('serves healthz', async () => {
@@ -18,14 +18,21 @@ describe('app', () => {
     expect(res.status).toBe(404);
   });
 
-  it('does not mount the webhooks route when ctx.queue/events are absent', async () => {
-    const res = await createApp({}).request('/webhooks/sonarr', { method: 'POST' });
+  it('does not mount the webhooks route when ctx.queue/events/clients are absent', async () => {
+    // content-type: application/json so the CSRF middleware (which runs ahead of route
+    // mounting on every /webhooks/* request) doesn't itself 403 a request with no
+    // content-type header at all (its own "simple content type" default) before this test
+    // ever gets to observe the 404 it's actually checking for.
+    const res = await createApp({}).request('/webhooks/sonarr', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    });
     expect(res.status).toBe(404);
   });
 
   describe('webhooks route', () => {
     it('responds 200 with handleWebhook\'s result, even for an unhandled event', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr') });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -38,8 +45,8 @@ describe('app', () => {
       expect(await res.json()).toEqual({ handled: false, reason: 'ignored' });
     });
 
-    it('responds 200 with "unknown instance" for an arr not in config', async () => {
-      const ctx = makeCtx(); // default config: arrs: []
+    it('responds 200 with "unknown instance" for an arr with no registered client', async () => {
+      const ctx = makeCtx(); // default config: arrs: [], clients: {}
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -54,7 +61,7 @@ describe('app', () => {
     });
 
     it('enqueues an acquire job and answers 200 for a SeriesAdd event', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr') });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -66,6 +73,48 @@ describe('app', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ handled: true });
       expect(ctx.queue.claim()).toMatchObject({ pipeline: 'acquire', target_kind: 'series', target_id: 42 });
+    });
+  });
+
+  describe('CSRF protection (hono/csrf on /api/* and /webhooks/*)', () => {
+    it('blocks a cross-origin request against /webhooks/* using a "simple" content type that dodges CORS preflight', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const app = createApp(ctx);
+
+      const res = await app.request('/webhooks/sonarr', {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', origin: 'https://evil.example' },
+        body: JSON.stringify({ eventType: 'Test' }),
+      });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('blocks the same cross-origin attempt against /api/*', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/acquire', {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', origin: 'https://evil.example' },
+        body: JSON.stringify({ arrInstance: 'sonarr', targetKind: 'series', targetId: 1 }),
+      });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('allows a request with no Origin header at all, like the arr\'s own webhook POST', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const app = createApp(ctx);
+
+      const res = await app.request('/webhooks/sonarr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ eventType: 'Test' }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ handled: true });
     });
   });
 
@@ -98,6 +147,19 @@ describe('app', () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as { kind: string }[];
       expect(body.map((e) => e.kind)).toEqual(expectedKinds);
+    });
+
+    it('GET /api/events clamps an outsized ?limit= to MAX_LIMIT (1000) rather than passing it straight to SQL', async () => {
+      const db = freshDb();
+      const events = new EventLog(db);
+      const insert = db.prepare(`INSERT INTO events (ts, kind, level, message, data) VALUES (?, 'job.done', 'info', 'done', '{}')`);
+      for (let i = 0; i < 1001; i++) insert.run(i);
+      const app = createApp({ events });
+
+      const res = await app.request('/api/events?limit=999999');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as unknown[];
+      expect(body).toHaveLength(1000);
     });
 
     it('GET /api/events/stream responds with text/event-stream and streams an appended event', async () => {

@@ -2,8 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { ConfigSchema } from '../src/config/schema.js';
+import { loadConfig } from '../src/config/store.js';
 import type { AppContext } from '../src/context.js';
-import { makeCtx, configWithArrs, arrInstance } from './helpers.js';
+import { makeCtx, configWithArrs, arrInstance, fakeArrClient } from './helpers.js';
 
 describe('dashboard api', () => {
   describe('GET /api/jobs, /api/jobs/:id', () => {
@@ -67,6 +68,24 @@ describe('dashboard api', () => {
       expect(ctx.config.arrs[0].apiKey).toBe('test-api-key'); // sentinel preserved the arr's key too
     });
 
+    it('a PUT actually persists to disk — a fresh loadConfig() off the same dataDir sees it, not just ctx.config in memory', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr') });
+      const app = createApp(ctx);
+      const got: any = await (await app.request('/api/config')).json();
+      got.reconcileIntervalMinutes = 42;
+
+      const res = await app.request('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify(got),
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.status).toBe(200);
+
+      const onDisk = loadConfig(ctx.dataDir);
+      expect(onDisk.reconcileIntervalMinutes).toBe(42);
+      expect(onDisk.arrs[0]?.apiKey).toBe('test-api-key'); // the sentinel-restored secret was persisted too, not just held in memory
+    });
+
     it('rejects invalid config with issues', async () => {
       const ctx = makeCtx();
       const app = createApp(ctx);
@@ -79,8 +98,8 @@ describe('dashboard api', () => {
       expect(res.status).toBe(400);
     });
 
-    it('a PUT immediately updates ctx.config so a later GET (and the webhook route) see it', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr') });
+    it('a PUT immediately updates ctx.config so a later GET sees it, without a restart', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
       const app = createApp(ctx);
       const got: any = await (await app.request('/api/config')).json();
       got.reconcileIntervalMinutes = 30;
@@ -92,22 +111,47 @@ describe('dashboard api', () => {
 
       const after: any = await (await app.request('/api/config')).json();
       expect(after.reconcileIntervalMinutes).toBe(30);
+    });
 
-      // The webhook route builds its `HandleWebhookCtx.config` fresh per request rather
-      // than snapshotting it once at `createApp` time — an arr removed by that same PUT
-      // is unknown to the very next webhook delivery, not just to future app instances.
-      const removed = { ...got, arrs: [] };
-      await app.request('/api/config', {
-        method: 'PUT',
-        body: JSON.stringify(removed),
-        headers: { 'content-type': 'application/json' },
-      });
+    it('webhook/acquire "known instance" is driven by ctx.clients, not config.arrs — an instance already in config but not yet wired up (pre-restart) is still unknown', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr') }); // in config.arrs, but no ArrClient registered yet
+      const app = createApp(ctx);
+
       const webhookRes = await app.request('/webhooks/sonarr', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ eventType: 'Test' }),
       });
       expect(await webhookRes.json()).toEqual({ handled: false, reason: 'unknown instance' });
+
+      const acquireRes = await app.request('/api/acquire', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ arrInstance: 'sonarr', targetKind: 'series', targetId: 1 }),
+      });
+      expect(acquireRes.status).toBe(400);
+    });
+
+    it('removing an arr from config does not retroactively revoke webhook access — ctx.clients (built once at startup) is untouched by a config PUT', async () => {
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const app = createApp(ctx);
+      const got: any = await (await app.request('/api/config')).json();
+
+      const removed = { ...got, arrs: [] };
+      await app.request('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify(removed),
+        headers: { 'content-type': 'application/json' },
+      });
+
+      const webhookRes = await app.request('/webhooks/sonarr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ eventType: 'Test' }),
+      });
+      // Still known: the client persists until a restart rebuilds ctx.clients from the new
+      // config (arr connections are startup-only — see the README's config docs).
+      expect(await webhookRes.json()).toEqual({ handled: true });
     });
 
     describe('secret redact/restore round trip', () => {
@@ -235,7 +279,7 @@ describe('dashboard api', () => {
 
   describe('POST /api/acquire', () => {
     it('enqueues a manual acquire job for a known arr instance', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr') });
+      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
       const app = createApp(ctx);
       const res = await app.request('/api/acquire', {
         method: 'POST',

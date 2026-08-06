@@ -1,12 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { handleWebhook } from '../src/arr/webhooks.js';
-import { makeCtx, configWithArrs } from './helpers.js';
+import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
+import type { ArrApi } from '../src/arr/types.js';
 
 const seriesAdd = { eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren', year: 2023, tvdbId: 424536 } };
 const movieAdded = { eventType: 'MovieAdded', movie: { id: 7, title: 'Perfect Blue', year: 1997, tmdbId: 573 } };
 
 function knownArrsCtx() {
-  return makeCtx({ config: configWithArrs('sonarr', 'radarr') });
+  return makeCtx({
+    config: configWithArrs('sonarr', 'radarr'),
+    clients: new Map<string, ArrApi>([
+      ['sonarr', fakeArrClient()],
+      ['radarr', fakeArrClient()],
+    ]),
+  });
 }
 
 describe('handleWebhook', () => {
@@ -33,8 +40,14 @@ describe('handleWebhook', () => {
     expect(ctx.queue.claim()).toBeNull();
   });
 
-  it('rejects an instance that is not in ctx.config.arrs', () => {
-    const ctx = makeCtx(); // default config: arrs: []
+  it('rejects an instance with no registered client, even by default (no config, no clients)', () => {
+    const ctx = makeCtx(); // default config: arrs: [], clients: {}
+    expect(handleWebhook(ctx, 'sonarr', seriesAdd)).toEqual({ handled: false, reason: 'unknown instance' });
+    expect(ctx.queue.claim()).toBeNull();
+  });
+
+  it('rejects an instance that is in config.arrs but has no ctx.clients entry yet — clients, not config, is authoritative (a brand-new instance before a restart wires it up)', () => {
+    const ctx = makeCtx({ config: configWithArrs('sonarr') }); // configured, but no client registered
     expect(handleWebhook(ctx, 'sonarr', seriesAdd)).toEqual({ handled: false, reason: 'unknown instance' });
     expect(ctx.queue.claim()).toBeNull();
   });
