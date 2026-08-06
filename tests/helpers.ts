@@ -335,6 +335,25 @@ export function seriesResource(overrides?: Partial<SeriesResource>): SeriesResou
 }
 
 /**
+ * An `EpisodeResource` fixture with sane defaults (series #42, S01E01, has a file on
+ * disk) — override any field, most commonly `seasonNumber`/`episodeNumber`/
+ * `absoluteEpisodeNumber`, for a test exercising sidecar matching (see
+ * `matchSidecarDeterministic` in `src/pipelines/ingest/sidecars.ts`).
+ */
+export function episodeResource(overrides?: Partial<EpisodeResource>): EpisodeResource {
+  return {
+    id: 1,
+    seriesId: 42,
+    seasonNumber: 1,
+    episodeNumber: 1,
+    title: '',
+    episodeFileId: 1,
+    hasFile: true,
+    ...overrides,
+  };
+}
+
+/**
  * A `ReleaseCandidate` fixture with sane defaults (a realistic 1080p dual-audio-style
  * anime release, ~1.4 GB, 25 seeders, not rejected) — override any field for the case
  * under test. Used by acquire pipeline tests (prefilter, pick) so each test only spells
