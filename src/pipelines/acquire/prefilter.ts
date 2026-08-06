@@ -8,9 +8,14 @@ export interface PrefilterOpts {
   maxSizeMB: number;
 }
 
+export interface DroppedCandidate {
+  candidate: ReleaseCandidate;
+  reason: string;
+}
+
 export interface PrefilterResult {
   kept: ReleaseCandidate[];
-  dropped: { candidate: ReleaseCandidate; reason: string }[];
+  dropped: DroppedCandidate[];
 }
 
 /**
@@ -24,7 +29,7 @@ export interface PrefilterResult {
  */
 export function prefilter(candidates: ReleaseCandidate[], opts: PrefilterOpts): PrefilterResult {
   const kept: ReleaseCandidate[] = [];
-  const dropped: { candidate: ReleaseCandidate; reason: string }[] = [];
+  const dropped: DroppedCandidate[] = [];
 
   for (const c of candidates) {
     if (c.rejected) {

@@ -23,6 +23,9 @@ describe('prefilter', () => {
     // `undefined` at runtime despite the type saying `number | null`. Missing must be
     // treated exactly like null (kept), not coerced into a falsy "0 seeders" drop.
     { name: 'undefined seeders (usenet release)', c: candidate({ seeders: undefined as unknown as null }) },
+    { name: 'seeders exactly at the floor', c: candidate({ seeders: opts.seederFloor }) },
+    { name: 'size exactly at the minimum', c: candidate({ size: opts.minSizeMB * 1_048_576 }) },
+    { name: 'size exactly at the maximum', c: candidate({ size: opts.maxSizeMB * 1_048_576 }) },
   ])('keeps $name', ({ c }) => {
     expect(prefilter([c], opts).kept).toHaveLength(1);
   });
