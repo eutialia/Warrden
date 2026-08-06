@@ -179,16 +179,20 @@ export class JobQueue {
   }
 
   /**
-   * Resets every `running` job back to `pending` (clearing `not_before`, preserving
-   * `attempts`) and returns how many were reset. Meant to run once at startup, before the
-   * runner starts polling: a process crash/restart while a job was in flight otherwise
-   * leaves it wedged as `running` forever — the singleton index (`jobs_singleton`) blocks
-   * any future enqueue for that same target, and only `complete()`/`fail()` would clear
-   * it, but nothing will ever call those for a run that no longer exists.
+   * Resets every `running` job back to `pending` (clearing `not_before` and `dirty`,
+   * preserving `attempts`) and returns how many were reset. Meant to run once at startup,
+   * before the runner starts polling: a process crash/restart while a job was in flight
+   * otherwise leaves it wedged as `running` forever — the singleton index
+   * (`jobs_singleton`) blocks any future enqueue for that same target, and only
+   * `complete()`/`fail()` would clear it, but nothing will ever call those for a run that
+   * no longer exists. Clearing `dirty` here too matters for the same reason: a duplicate
+   * enqueue that raced the crash would otherwise leave it set, and the first `complete()`
+   * after reclaiming would requeue a second, redundant run of a job that never actually
+   * needed one.
    */
   reclaimAbandoned(): number {
     const info = this.db
-      .prepare(`UPDATE jobs SET status = 'pending', not_before = 0, updated_at = ? WHERE status = 'running'`)
+      .prepare(`UPDATE jobs SET status = 'pending', dirty = 0, not_before = 0, updated_at = ? WHERE status = 'running'`)
       .run(Date.now());
     return info.changes;
   }

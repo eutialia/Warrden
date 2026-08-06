@@ -153,5 +153,19 @@ describe('JobQueue', () => {
       q.enqueue(target);
       expect(q.reclaimAbandoned()).toBe(0);
     });
+
+    it('clears a dirty flag on the reclaimed job, so completing it later does not spawn a redundant duplicate run', () => {
+      q.enqueue(target);
+      const job = q.claim()!;
+      expect(q.enqueue(target).outcome).toBe('marked-dirty'); // a duplicate raced the crash, setting dirty=1
+
+      q.reclaimAbandoned();
+      expect(q.get(job.id)!.dirty).toBe(0);
+
+      const reclaimed = q.claim()!;
+      expect(reclaimed.id).toBe(job.id);
+      expect(q.complete(reclaimed.id).requeued).toBe(false); // no stale dirty flag triggering a spurious requeue
+      expect(q.claim()).toBeNull(); // and no extra pending row was created
+    });
   });
 });
