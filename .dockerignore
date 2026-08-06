@@ -1,7 +1,7 @@
 # Never let build context reach the image: this is real config, potentially real
 # API keys if the service has been run against this checkout.
 data
-.env
+.env*
 
 # Rebuilt inside the image by the builder stage; copying the host's own (possibly
 # different-OS) build output in would either be dead weight or silently mask a build

@@ -64,6 +64,8 @@ export function saveConfig(dataDir: string, cfg: Config): void {
   mkdirSync(dataDir, { recursive: true });
   const path = configPath(dataDir);
   const tmpPath = `${path}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(validated, null, 2));
+  // config.json holds plaintext secrets (arr apiKeys, llm.keys) — 0o600 keeps it
+  // readable/writable by the owner only, not world-readable like the default 0o644.
+  writeFileSync(tmpPath, JSON.stringify(validated, null, 2), { mode: 0o600 });
   renameSync(tmpPath, path);
 }
