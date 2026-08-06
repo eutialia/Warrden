@@ -10,6 +10,7 @@ import { JobQueue } from './jobs/queue.js';
 import { startRunner } from './jobs/runner.js';
 import { AiSdkGenerator } from './llm/generator.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
+import { runIngestJob } from './pipelines/ingest/run.js';
 import { createApp } from './server/app.js';
 import { reclaimAbandonedJobs, scheduleReconcile } from './startup.js';
 import { errorMessage } from './util/errors.js';
@@ -55,7 +56,7 @@ async function main(): Promise<void> {
 
   reclaimAbandonedJobs(ctx);
 
-  const stopRunner = startRunner(ctx, { acquire: runAcquireJob });
+  const stopRunner = startRunner(ctx, { acquire: runAcquireJob, ingest: runIngestJob });
   const stopReconcile = scheduleReconcile(ctx);
 
   const server = serve({ fetch: createApp(ctx).fetch, port: ctx.config.server.port }, () => {

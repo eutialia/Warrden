@@ -2,6 +2,7 @@ import type { ArrApi, ReleaseCandidate } from '../../arr/types.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
 import type { JobRow } from '../../jobs/queue.js';
+import { resolvePayloadTitle, resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { pickRelease } from './pick.js';
 import { pinReleaseGroup } from './pin.js';
@@ -76,7 +77,7 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
   }
 
   if (job.target_kind === 'movie') {
-    const title = await resolveMovieTitle(client, job);
+    const title = await resolveTargetTitle(client, job);
     await runMovieAcquire(ctx, job, client, title);
     return;
   }
@@ -369,23 +370,6 @@ function alreadyGrabbedSeasons(ctx: AppContext, job: JobRow): Set<number> {
     if (hasSeasonNumber(r.candidates_json)) grabbed.add(r.candidates_json.seasonNumber);
   }
   return grabbed;
-}
-
-/** The webhook-supplied title (`job.payload.title`), if the enqueuer set a non-empty one. */
-function resolvePayloadTitle(job: JobRow): string | undefined {
-  const payloadTitle = job.payload.title;
-  return typeof payloadTitle === 'string' && payloadTitle.length > 0 ? payloadTitle : undefined;
-}
-
-/** Prefers the webhook-supplied title; falls back to a fresh `listMovies()` lookup when a
- * job was enqueued without one (e.g. a future reconciliation job). Series titles never need
- * this fallback path — `runAcquireJob` already calls `getSeries` unconditionally to read
- * `seasons`, so `series.title` is always on hand as the fallback there. */
-async function resolveMovieTitle(client: ArrApi, job: JobRow): Promise<string> {
-  const payloadTitle = resolvePayloadTitle(job);
-  if (payloadTitle) return payloadTitle;
-  const movies = await client.listMovies();
-  return movies.find((m) => m.id === job.target_id)?.title ?? `movie #${job.target_id}`;
 }
 
 /** What enqueued this job — `job.payload.source` when the enqueuer set one (Task 12's

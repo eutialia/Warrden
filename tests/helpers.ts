@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
@@ -24,7 +24,7 @@ import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { openDb } from '../src/db/db.js';
 import { EventLog } from '../src/events/log.js';
-import { JobQueue, type EnqueueInput, type JobRow } from '../src/jobs/queue.js';
+import { JobQueue, type EnqueueInput, type JobRow, type TargetKind } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
 import { BYTES_PER_GB } from '../src/util/bytes.js';
 
@@ -171,6 +171,12 @@ export interface FakeArrClientSeed {
   profiles?: ReleaseProfileResource[];
   releases?: ReleaseCandidate[];
   notifications?: NotificationSummary[];
+  queue?: QueueRecord[];
+  seriesHistory?: HistoryRecord[];
+  movieHistory?: HistoryRecord[];
+  episodes?: EpisodeResource[];
+  episodeFiles?: EpisodeFileResource[];
+  movieFiles?: MovieFileResource[];
 }
 
 export interface FakeArrClient extends ArrApi {
@@ -180,6 +186,14 @@ export interface FakeArrClient extends ArrApi {
   profiles: ReleaseProfileResource[];
   releases: ReleaseCandidate[];
   notifications: NotificationSummary[];
+  // Ingest pipeline reads — plain mutable arrays (not vi.fn-wrapped) since ingest tests
+  // seed and re-read them directly rather than asserting on call args.
+  queue: QueueRecord[];
+  seriesHistory: HistoryRecord[];
+  movieHistory: HistoryRecord[];
+  episodes: EpisodeResource[];
+  episodeFiles: EpisodeFileResource[];
+  movieFiles: MovieFileResource[];
   /** Every `grabRelease` call, recorded in order — the pipeline test's grab assertion. */
   grabbed: Array<{ guid: string; indexerId: number }>;
   /** Seeds a tag directly into the store, auto-assigning an id the same way `createTag`
@@ -210,6 +224,12 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     profiles: seed?.profiles ? [...seed.profiles] : [],
     releases: seed?.releases ? [...seed.releases] : [],
     notifications: seed?.notifications ? [...seed.notifications] : [],
+    queue: seed?.queue ? [...seed.queue] : [],
+    seriesHistory: seed?.seriesHistory ? [...seed.seriesHistory] : [],
+    movieHistory: seed?.movieHistory ? [...seed.movieHistory] : [],
+    episodes: seed?.episodes ? [...seed.episodes] : [],
+    episodeFiles: seed?.episodeFiles ? [...seed.episodeFiles] : [],
+    movieFiles: seed?.movieFiles ? [...seed.movieFiles] : [],
     grabbed: [],
 
     async listSeries(): Promise<SeriesResource[]> {
@@ -288,13 +308,13 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       return created;
     }),
 
-    listQueue: async (): Promise<QueueRecord[]> => [],
-    listSeriesHistory: async (): Promise<HistoryRecord[]> => [],
-    listMovieHistory: async (): Promise<HistoryRecord[]> => [],
+    listQueue: async (): Promise<QueueRecord[]> => [...client.queue],
+    listSeriesHistory: async (): Promise<HistoryRecord[]> => [...client.seriesHistory],
+    listMovieHistory: async (): Promise<HistoryRecord[]> => [...client.movieHistory],
     listRecentImports: async (): Promise<HistoryRecord[]> => [],
-    listEpisodes: async (): Promise<EpisodeResource[]> => [],
-    listEpisodeFiles: async (): Promise<EpisodeFileResource[]> => [],
-    listMovieFiles: async (): Promise<MovieFileResource[]> => [],
+    listEpisodes: async (): Promise<EpisodeResource[]> => [...client.episodes],
+    listEpisodeFiles: async (): Promise<EpisodeFileResource[]> => [...client.episodeFiles],
+    listMovieFiles: async (): Promise<MovieFileResource[]> => [...client.movieFiles],
     listManualImport: async (): Promise<ManualImportItem[]> => [],
     executeManualImport: vi.fn(async (): Promise<void> => {}),
     deleteNotification: vi.fn(async (id: number): Promise<void> => {
@@ -351,6 +371,104 @@ export function episodeResource(overrides?: Partial<EpisodeResource>): EpisodeRe
     hasFile: true,
     ...overrides,
   };
+}
+
+export interface IngestFixture {
+  ctx: AppContext;
+  client: FakeArrClient;
+  arrInstance: string;
+  targetKind: TargetKind;
+  targetId: number;
+  downloadsDir: string;
+  torrentDir: string;
+  libraryDir: string;
+  /** The already-imported video sitting in `libraryDir`, matching `episodeFiles[0]`/`movieFiles[0]`. */
+  videoPath: string;
+  /** The `downloadFolderImported` history record's `droppedPath`, pointing into `torrentDir`. */
+  droppedPath: string;
+}
+
+/**
+ * Builds the filesystem + arr-client fixture every `runIngestJob` test needs: a temp
+ * "downloads" dir containing one torrent folder, a temp "library" dir holding the
+ * already-imported video, and a `fakeArrClient` wired so `listEpisodes`/`listEpisodeFiles`/
+ * `listSeriesHistory` (or the movie equivalents) agree with that layout — one
+ * `downloadFolderImported` history record whose `droppedPath` points into the torrent
+ * folder, which is what `resolveSourceDirs` needs to find it. `pathMappings` are identity
+ * (`from === to`) so a test exercises ingest's own logic without also exercising
+ * `mapArrPath`'s translation. Doesn't enqueue or claim a job itself — call
+ * `enqueueAndClaim(ctx, { pipeline: 'ingest', targetKind, targetId, arrInstance, ... })`
+ * for that, same as the acquire pipeline's tests do.
+ */
+export function ingestFixture(opts?: {
+  targetKind?: TargetKind;
+  targetId?: number;
+  seriesTitle?: string;
+  torrentName?: string;
+  videoFileName?: string;
+  episodes?: EpisodeResource[];
+  episodeFiles?: EpisodeFileResource[];
+  movieFiles?: MovieFileResource[];
+  mountMarkers?: string[];
+}): IngestFixture {
+  const targetKind = opts?.targetKind ?? 'series';
+  const targetId = opts?.targetId ?? 42;
+  const seriesTitle = opts?.seriesTitle ?? 'Frieren';
+  const torrentName = opts?.torrentName ?? 'Show Torrent';
+  const videoFileName = opts?.videoFileName ?? 'Show - S01E05.mkv';
+  const arrInstanceName = targetKind === 'movie' ? 'radarr' : 'sonarr';
+
+  const downloadsDir = tmpDir();
+  const libraryDir = tmpDir();
+  const torrentDir = join(downloadsDir, torrentName);
+  mkdirSync(torrentDir, { recursive: true });
+
+  const videoPath = join(libraryDir, videoFileName);
+  writeFileSync(videoPath, 'video');
+  // Doesn't need to exist on disk itself — resolveSourceDirs only parses the string to
+  // locate the torrent's own root folder under downloadsDir.
+  const droppedPath = join(torrentDir, videoFileName);
+
+  const episodes = opts?.episodes ?? [
+    episodeResource({ id: 1, seriesId: targetId, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+  ];
+  const episodeFiles = opts?.episodeFiles ?? [{ id: 100, seriesId: targetId, seasonNumber: 1, relativePath: videoFileName, path: videoPath }];
+  const movieFiles = opts?.movieFiles ?? [{ id: 200, movieId: targetId, relativePath: videoFileName, path: videoPath }];
+
+  const history: HistoryRecord[] = [
+    {
+      id: 1,
+      seriesId: targetKind === 'series' ? targetId : undefined,
+      movieId: targetKind === 'movie' ? targetId : undefined,
+      eventType: 'downloadFolderImported',
+      date: new Date().toISOString(),
+      sourceTitle: torrentName,
+      data: { droppedPath },
+    },
+  ];
+
+  const client = fakeArrClient({
+    series: targetKind === 'series' ? [seriesResource({ id: targetId, title: seriesTitle })] : [],
+    movies: targetKind === 'movie' ? [{ id: targetId, title: seriesTitle, year: 2024, tmdbId: 1, added: '', hasFile: true }] : [],
+    seriesHistory: targetKind === 'series' ? history : [],
+    movieHistory: targetKind === 'movie' ? history : [],
+    episodes: targetKind === 'series' ? episodes : [],
+    episodeFiles: targetKind === 'series' ? episodeFiles : [],
+    movieFiles: targetKind === 'movie' ? movieFiles : [],
+  });
+
+  const ctx = makeCtx({
+    clients: new Map([[arrInstanceName, client]]),
+    config: ConfigSchema.parse({
+      pathMappings: [
+        { from: downloadsDir, to: downloadsDir },
+        { from: libraryDir, to: libraryDir },
+      ],
+      ingest: { mountMarkers: opts?.mountMarkers ?? [], downloadRoots: [downloadsDir] },
+    }),
+  });
+
+  return { ctx, client, arrInstance: arrInstanceName, targetKind, targetId, downloadsDir, torrentDir, libraryDir, videoPath, droppedPath };
 }
 
 /**
