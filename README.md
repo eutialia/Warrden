@@ -43,8 +43,9 @@ Every config save requires a container restart to fully take effect (the save
 confirmation says so) — some fields are read live, but arr connections and the LLM
 provider/keys are only wired up at startup.
 
-**Tested against:** Sonarr v4 and Radarr v5. The release-profile API shape Warrden relies
-on for pinning assumes Sonarr v4 or newer.
+**Tested against:** live-verified against Sonarr v4. Radarr support is implemented against
+the same v3 API shape but not yet live-verified against a real Radarr instance. The
+release-profile API shape Warrden relies on for pinning assumes Sonarr v4 or newer.
 
 ## Configuration reference
 
@@ -67,7 +68,7 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `llm.activeProfile` | `prod` | Which of `llm.profiles` (`dev` or `prod`) is currently in effect. |
 | `llm.profiles` | `{ dev: {}, prod: {} }` | Per-profile, per-call-site model configuration (provider, model, optional fallback). Phase 1 has one call-site: `release-pick`. |
 | `llm.keys.openrouter` / `.openai` / `.anthropic` | unset | API keys for the corresponding LLM provider. Not required for the `claude-code` provider, which uses subscription auth instead. |
-| `reconcileIntervalMinutes` | `15` | How often the reconciliation loop polls each arr's history/queue as a backstop for missed webhooks. |
+| `reconcileIntervalMinutes` | `15` | How often the reconciliation loop diffs each arr's full series/movie list against what Warrden has already seen, as a backstop for missed webhooks. The same interval also doubles as the grace period before a newly-registered `warrden-` tag/profile becomes eligible for garbage collection. |
 
 Secrets (`arrs[].apiKey`, `llm.keys.*`) are shown as `•••` on the Config page once set.
 Leave a field as `•••`, or retype it to rotate it. For `llm.keys` specifically, clearing
