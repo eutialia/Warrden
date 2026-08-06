@@ -92,7 +92,7 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
   }
 
   const raw = await client.searchReleases({ movieId: job.target_id });
-  const result = await attempt(ctx, client, raw, { title, kind: 'movie' });
+  const result = await attempt(ctx, client, raw, { title, kind: 'movie', jobId: job.id });
 
   if (result.status !== 'grabbed') {
     recordOutcome(ctx, job, {
@@ -165,7 +165,12 @@ async function runSeriesAcquire(
     }
 
     const raw = await client.searchReleases({ seriesId: job.target_id, seasonNumber: season.seasonNumber });
-    const result = await attempt(ctx, client, raw, { title, kind: 'series', seasonNumber: season.seasonNumber });
+    const result = await attempt(ctx, client, raw, {
+      title,
+      kind: 'series',
+      seasonNumber: season.seasonNumber,
+      jobId: job.id,
+    });
     const seasonLabel = `${title} Season ${season.seasonNumber}`;
 
     if (result.status !== 'grabbed') {
@@ -234,7 +239,7 @@ async function attempt(
   ctx: AppContext,
   client: ArrApi,
   raw: ReleaseCandidate[],
-  input: { title: string; kind: 'series' | 'movie'; seasonNumber?: number },
+  input: { title: string; kind: 'series' | 'movie'; seasonNumber?: number; jobId: number },
 ): Promise<AttemptResult> {
   const { kept: prefiltered, dropped: prefilterDropped } = prefilter(raw, ctx.config.picking);
   const { kept, dropped: capDropped } = capCandidates(prefiltered);
@@ -245,6 +250,7 @@ async function attempt(
     ctx.events.append({
       kind: 'acquire.candidates-capped',
       level: 'warn',
+      jobId: input.jobId,
       message: `Capped candidates for "${label}" from ${prefiltered.length} to ${kept.length} (dropped ${capDropped.length} lower-seeded candidate(s))`,
       data: { title: input.title, seasonNumber: input.seasonNumber, droppedCount: capDropped.length },
     });
@@ -334,7 +340,9 @@ function appendRecordFailedEvent(ctx: AppContext, job: JobRow, label: string, pi
  * `created_at` after the existing record), so it always passes this check. */
 function alreadyGrabbed(ctx: AppContext, job: JobRow): boolean {
   const latest = new AcquireRecords(ctx.db).listByTarget(job.arr_instance, job.target_kind, job.target_id)[0];
-  return latest?.status === 'grabbed' && latest.created_at > job.created_at;
+  // `>=` (not `>`): a record in the same millisecond as the job's creation is treated as
+  // this job's own — erring toward skipping keeps the irreversible grab from duplicating.
+  return latest?.status === 'grabbed' && latest.created_at >= job.created_at;
 }
 
 /** True when `x` is a series-season `acquire_records.candidates_json` payload — i.e. it
@@ -353,7 +361,7 @@ function alreadyGrabbedSeasons(ctx: AppContext, job: JobRow): Set<number> {
   const records = new AcquireRecords(ctx.db).listByTarget(job.arr_instance, job.target_kind, job.target_id);
   const grabbed = new Set<number>();
   for (const r of records) {
-    if (r.created_at <= job.created_at) continue;
+    if (r.created_at < job.created_at) continue; // `>=` boundary, matching alreadyGrabbed()
     if (r.status !== 'grabbed') continue;
     if (hasSeasonNumber(r.candidates_json)) grabbed.add(r.candidates_json.seasonNumber);
   }

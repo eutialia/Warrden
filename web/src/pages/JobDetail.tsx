@@ -19,6 +19,7 @@ export default function JobDetail() {
         .then((result) => {
           if (opts?.isStale()) return; // a newer request (route change, refetch) already landed
           setData(result);
+          setError(null); // a transient failure must not stick once a later load succeeds
         })
         .catch((err: unknown) => {
           if (opts?.isStale()) return;

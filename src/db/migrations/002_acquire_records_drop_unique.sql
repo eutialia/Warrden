@@ -25,3 +25,8 @@ INSERT INTO acquire_records_new
 
 DROP TABLE acquire_records;
 ALTER TABLE acquire_records_new RENAME TO acquire_records;
+
+-- The recreate above dropped the table's only index; per-job outcome lookups
+-- (AcquireRecords.outcomeForJob, listByTarget) scan by target, so re-cover it.
+CREATE INDEX acquire_records_target
+  ON acquire_records (arr_instance, target_kind, target_id, created_at);

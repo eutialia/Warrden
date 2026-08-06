@@ -105,13 +105,24 @@ export class AcquireRecords {
    * alone doesn't tell you "did *any* season grab" when a later season's own outcome was
    * worse than an earlier one's.
    */
-  outcomeForJob(arrInstance: string, targetKind: TargetKind, targetId: number, sinceCreatedAt: number): AcquireStatus | null {
+  outcomeForJob(
+    arrInstance: string,
+    targetKind: TargetKind,
+    targetId: number,
+    sinceCreatedAt: number,
+    untilCreatedAt?: number,
+  ): AcquireStatus | null {
+    // The upper bound scopes a TERMINAL job to records its own run wrote (created_at ..
+    // updated_at); without it, a later re-pick's records would retroactively flip every
+    // older job's badge for the same target. Live jobs pass no bound — they're still writing.
     const rows = this.db
       .prepare(
         `SELECT status FROM acquire_records
-         WHERE arr_instance = ? AND target_kind = ? AND target_id = ? AND created_at >= ?`,
+         WHERE arr_instance = ? AND target_kind = ? AND target_id = ? AND created_at >= ? AND created_at <= ?`,
       )
-      .all(arrInstance, targetKind, targetId, sinceCreatedAt) as { status: AcquireStatus | null }[];
+      .all(arrInstance, targetKind, targetId, sinceCreatedAt, untilCreatedAt ?? Number.MAX_SAFE_INTEGER) as {
+      status: AcquireStatus | null;
+    }[];
     if (rows.some((r) => r.status === 'grabbed')) return 'grabbed';
     if (rows.some((r) => r.status === 'none-viable')) return 'none-viable';
     if (rows.some((r) => r.status === 'no-candidates')) return 'no-candidates';

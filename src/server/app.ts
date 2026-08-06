@@ -210,9 +210,26 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // non-acquire pipeline, or an acquire job with no record yet (still pending/running,
     // or it crashed before recording). See `AcquireRecords.outcomeForJob` for why this is
     // an aggregate over every record the job's own run produced, not just the latest one.
-    function acquireOutcome(job: { pipeline: string; arr_instance: string; target_kind: TargetKind; target_id: number; created_at: number }) {
+    function acquireOutcome(job: {
+      pipeline: string;
+      arr_instance: string;
+      target_kind: TargetKind;
+      target_id: number;
+      created_at: number;
+      status: string;
+      updated_at: number;
+    }) {
       if (job.pipeline !== 'acquire') return null;
-      return acquireRecords.outcomeForJob(job.arr_instance, job.target_kind, job.target_id, job.created_at);
+      // Terminal jobs are bounded to their own run window so a later re-pick's records
+      // can't retroactively change this job's badge; live jobs stay unbounded.
+      const terminal = job.status === 'done' || job.status === 'failed';
+      return acquireRecords.outcomeForJob(
+        job.arr_instance,
+        job.target_kind,
+        job.target_id,
+        job.created_at,
+        terminal ? job.updated_at : undefined,
+      );
     }
 
     app.get('/api/jobs', (c) => {

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import { ConfigSchema, type Config } from './schema.js';
@@ -67,5 +67,6 @@ export function saveConfig(dataDir: string, cfg: Config): void {
   // config.json holds plaintext secrets (arr apiKeys, llm.keys) — 0o600 keeps it
   // readable/writable by the owner only, not world-readable like the default 0o644.
   writeFileSync(tmpPath, JSON.stringify(validated, null, 2), { mode: 0o600 });
+  chmodSync(tmpPath, 0o600); // writeFileSync's mode only applies on create; a leftover 0644 tmp would be reused as-is
   renameSync(tmpPath, path);
 }

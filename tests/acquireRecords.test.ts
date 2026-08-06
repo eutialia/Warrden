@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { freshDb } from './helpers.js';
 
@@ -63,6 +63,24 @@ describe('AcquireRecords', () => {
       records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed' });
       const sinceCreatedAt = Date.now() + 1000; // job enqueued strictly after that old record
       expect(records.outcomeForJob('sonarr', 'series', 42, sinceCreatedAt)).toBeNull();
+    });
+
+    it('an until bound stops a later re-pick from retroactively changing a terminal job outcome', () => {
+      vi.useFakeTimers();
+      try {
+        const records = new AcquireRecords(freshDb());
+        vi.setSystemTime(1_000);
+        records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'none-viable' });
+        vi.setSystemTime(5_000);
+        records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed' });
+
+        // terminal job A ran 500..2000: only its own none-viable record is in the window
+        expect(records.outcomeForJob('sonarr', 'series', 42, 500, 2_000)).toBe('none-viable');
+        // live job B (created 4000, no bound): sees the grab it just made
+        expect(records.outcomeForJob('sonarr', 'series', 42, 4_000)).toBe('grabbed');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });
