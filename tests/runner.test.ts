@@ -67,19 +67,19 @@ describe('startRunner', () => {
   });
 
   it('reschedules a job that throws RescheduleError: back to pending with a future not_before, attempts untouched, only a job.rescheduled info event', async () => {
+    vi.setSystemTime(0); // pin the fake clock so the expected not_before below is exact, not a bound
     const ctx = makeCtx();
     const { id } = ctx.queue.enqueue(target);
     const handler = vi.fn().mockRejectedValue(new RescheduleError('waiting for settle', 5_000));
-    const start = Date.now();
     const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
 
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(10); // tick fires at t=10, which is when reschedule() reads Date.now()
     stop();
 
     const job = ctx.queue.get(id!)!;
     expect(job.status).toBe('pending');
     expect(job.attempts).toBe(0);
-    expect(job.not_before).toBeGreaterThanOrEqual(start + 5_000);
+    expect(job.not_before).toBe(10 + 5_000); // exact: claim-time (10) + err.delayMs (5_000), not some larger constant
 
     expect(ctx.events.list({ level: 'warn' })).toHaveLength(0);
     expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
@@ -88,6 +88,7 @@ describe('startRunner', () => {
     expect(infoEvents[0]!.level).toBe('info');
     expect(infoEvents[0]!.message).toContain('waiting for settle');
     expect(infoEvents[0]!.message).toContain('5s');
+    expect(infoEvents[0]!.data).toMatchObject({ pipeline: 'noop', delayMs: 5_000 });
   });
 
   it('a handler throwing a plain Error still takes the existing fail path, not reschedule', async () => {

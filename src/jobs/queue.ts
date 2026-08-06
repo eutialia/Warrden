@@ -235,6 +235,12 @@ export class JobQueue {
    * and `fail()`'s retry path: the future run this reschedule sets up already covers any
    * trigger that arrived mid-run, so there's nothing left for that flag to earn a requeue
    * for. Throws if the job isn't `running`, mirroring `complete()`/`fail()`'s own guards.
+   *
+   * Asymmetric with `enqueue()`'s last-trigger-wins pending branch: a trigger that arrives
+   * AFTER this reschedule resets `not_before` back to 0 and wakes the job early, ahead of
+   * the delay this call asked for. Handlers that reschedule themselves must therefore be
+   * cheap/idempotent on an early wake-up — they just re-evaluate and reschedule again if
+   * the condition they were waiting on still isn't met.
    */
   reschedule(id: number, delayMs: number): void {
     const now = Date.now();
