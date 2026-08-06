@@ -34,7 +34,7 @@ function pad(n: number): string {
 }
 
 /** Renders one numbered episode table row, e.g. `id=10 S01E05 abs=17 "The Journey's End"`. */
-function renderEpisodeLine(e: EpisodeResource): string {
+export function renderEpisodeLine(e: EpisodeResource): string {
   const abs = e.absoluteEpisodeNumber ? ` abs=${e.absoluteEpisodeNumber}` : '';
   return `id=${e.id} S${pad(e.seasonNumber)}E${pad(e.episodeNumber)}${abs} "${e.title}"`;
 }
@@ -70,6 +70,13 @@ export async function matchSidecarsWithLlm(input: {
   // Nothing to match — an empty file list isn't worth an LLM round-trip.
   if (files.length === 0) {
     return [];
+  }
+
+  // An empty episode table (e.g. Task 9's every-episode-is-hasFile:false case) guarantees
+  // every file is unmatchable regardless of what the LLM answers — skip the guaranteed-useless
+  // paid call and coerce straight to null.
+  if (episodes.length === 0) {
+    return files.map(() => null);
   }
 
   const system = [

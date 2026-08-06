@@ -67,6 +67,13 @@ describe('matchSidecarsWithLlm', () => {
     expect(llm.calls).toHaveLength(0);
   });
 
+  it('returns an all-null array without calling the llm when there are files but no episodes', async () => {
+    const llm = new FakeGenerator([]);
+    const result = await matchSidecarsWithLlm({ llm, seriesTitle, files: ['a.ass', 'b.ass'], episodes: [] });
+    expect(result).toEqual([null, null]);
+    expect(llm.calls).toHaveLength(0);
+  });
+
   it('builds a prompt with the series title, a padded episode table, and numbered sidecar files', async () => {
     const episodes = [
       episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 5, absoluteEpisodeNumber: 17, title: "The Journey's End" }),
