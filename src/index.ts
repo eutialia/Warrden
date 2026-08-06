@@ -12,6 +12,7 @@ import { AiSdkGenerator } from './llm/generator.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
 import { createApp } from './server/app.js';
 import { reclaimAbandonedJobs, scheduleReconcile } from './startup.js';
+import { errorMessage } from './util/errors.js';
 
 /** Builds the fully-wired `AppContext` for a fresh process: config, db, one `ArrClient`
  * per configured instance, and the shared queue/event-log/LLM singletons everything else
@@ -44,7 +45,7 @@ function registerWebhooksInBackground(ctx: AppContext): void {
     ctx.events.append({
       kind: 'webhook.register-crashed',
       level: 'warn',
-      message: `Webhook registration threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+      message: `Webhook registration threw unexpectedly: ${errorMessage(err)}`,
     });
   });
 }

@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { z } from 'zod';
+import { errorMessage } from '../util/errors.js';
 import { ConfigSchema, type Config } from './schema.js';
 
 export class ConfigError extends Error {
@@ -46,7 +47,7 @@ export function loadConfig(dataDir: string): Config {
   try {
     raw = JSON.parse(text);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     throw new ConfigError([
       {
         code: 'custom',

@@ -1,5 +1,6 @@
 import type { AppContext } from './context.js';
 import { reconcile } from './reconcile/reconcile.js';
+import { errorMessage } from './util/errors.js';
 
 /** Resets any job left `running` by a crashed previous process so it's claimable again,
  * reporting how many (if any) via the event log. Meant to run once at startup, before the
@@ -40,7 +41,7 @@ export function scheduleReconcile(ctx: AppContext): () => void {
         ctx.events.append({
           kind: 'reconcile.crashed',
           level: 'warn',
-          message: `Reconciliation pass threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+          message: `Reconciliation pass threw unexpectedly: ${errorMessage(err)}`,
         });
       })
       .finally(() => {

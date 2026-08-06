@@ -6,6 +6,7 @@ import { generateObject } from 'ai';
 import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import type { z } from 'zod';
 import type { Config, Provider } from '../config/schema.js';
+import { errorMessage } from '../util/errors.js';
 
 export interface GenerateOpts<T> {
   callsite: string; // e.g. 'release-pick'
@@ -146,7 +147,7 @@ export class AiSdkGenerator implements StructuredGenerator {
       );
     } catch (err) {
       if (err instanceof LlmError) throw err;
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite, {
         cause: err,
       });

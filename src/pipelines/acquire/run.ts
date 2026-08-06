@@ -2,6 +2,7 @@ import type { ArrApi, ReleaseCandidate } from '../../arr/types.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
 import type { JobRow } from '../../jobs/queue.js';
+import { errorMessage } from '../../util/errors.js';
 import { pickRelease } from './pick.js';
 import { pinReleaseGroup } from './pin.js';
 import { capCandidates, prefilter, type DroppedCandidate } from './prefilter.js';
@@ -36,16 +37,21 @@ interface RecordOutcomeInput {
  * it. "No candidates" and "none viable" are expected, normal outcomes, not failures: each is
  * recorded in `acquire_records` and raised as an `attention` event so it surfaces on the
  * dashboard, and the job still completes successfully. Only genuinely unexpected failures
- * before a grab (unknown arr instance, an arr API error, a picked guid that vanished) throw,
+ * before a grab (unknown arr instance, an arr API error, the LLM/pick call itself throwing —
+ * a bad response, an out-of-range candidate number — or a picked guid that vanished) throw,
  * which `startRunner` turns into a job failure via `queue.fail`.
  *
- * Once a `grabRelease` has succeeded, nothing after it is allowed to turn the job into a
- * failure: the grab is the irreversible, valuable part of the job, and a job failure would
- * retry the whole search-and-pick from scratch on an arr that's already downloading the
- * release. A pin failure past that point is caught and reported as a `warn` event, and so
- * is a failure recording the outcome itself (`acquire_records` insert, the final event) —
- * both are caught independently, so neither can turn an already-successful grab into a
- * retried job.
+ * Once a season's (or a movie's) `grabRelease` has succeeded, nothing about recording *that*
+ * grab is allowed to turn the job into a failure: the grab is the irreversible, valuable part,
+ * and a job failure would retry the whole search-and-pick from scratch on an arr that's
+ * already downloading the release. A pin failure past that point is caught and reported as a
+ * `warn` event, and so is a failure recording the outcome itself (`acquire_records` insert,
+ * the final event) — both are caught independently, so neither can turn an already-successful
+ * grab into a retried job. This containment is per-season, not per-job, though: a season
+ * search/pick failure *after* an earlier season in the same run already grabbed still fails
+ * the whole job (nothing catches it) — by design, so the runner's own retry re-runs the job and
+ * picks up the remaining seasons; the double-grab guard (`alreadyGrabbedSeasons` below) is what
+ * keeps that retry from re-grabbing the season(s) that already succeeded.
  *
  * A movie searches (and grabs) once, exactly as before. A Sonarr series searches and grabs
  * **per monitored season** (`{seriesId, seasonNumber}` — Sonarr's own `ReleaseController`
@@ -195,9 +201,7 @@ async function runSeriesAcquire(
           kind: 'acquire.pin-failed',
           level: 'warn',
           jobId: job.id,
-          message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${errorMessage(err)}`,
           data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, releaseGroup: result.releaseGroup },
         });
       }
@@ -233,8 +237,9 @@ async function runSeriesAcquire(
 /** Search → prefilter → cap → pick → grab for one target (a movie, or a single series
  * season). Shared by both branches of `runAcquireJob` so the policy — deterministic
  * prefilter, then a capped candidate list, then the LLM pick, then the grab — only lives
- * in one place. Never persists anything or throws for an expected outcome; the caller
- * decides how to record/report each `status`. */
+ * in one place. Never writes to `acquire_records` itself (the caller decides how to
+ * record/report each `status`) or throws for an expected outcome — it does append its own
+ * `acquire.candidates-capped` event directly when the cap actually drops something. */
 async function attempt(
   ctx: AppContext,
   client: ArrApi,
@@ -326,9 +331,7 @@ function appendRecordFailedEvent(ctx: AppContext, job: JobRow, label: string, pi
     kind: 'acquire.record-failed',
     level: 'warn',
     jobId: job.id,
-    message: `Grabbed "${pickedTitle}" for "${label}" but failed to record the outcome: ${
-      err instanceof Error ? err.message : String(err)
-    }`,
+    message: `Grabbed "${pickedTitle}" for "${label}" but failed to record the outcome: ${errorMessage(err)}`,
     data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
   });
 }

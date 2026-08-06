@@ -1,5 +1,6 @@
 import type { AppContext } from '../context.js';
 import { ManagedObjects } from '../db/managedObjects.js';
+import { errorMessage } from '../util/errors.js';
 
 const NOTIFICATION_NAME = 'Warrden';
 
@@ -62,7 +63,7 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
       ctx.events.append({
         kind: 'webhook.register-failed',
         level: 'warn',
-        message: `Failed to register webhook on "${arr.name}": ${err instanceof Error ? err.message : String(err)}`,
+        message: `Failed to register webhook on "${arr.name}": ${errorMessage(err)}`,
         data: { instance: arr.name },
       });
     }

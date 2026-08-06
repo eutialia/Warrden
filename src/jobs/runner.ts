@@ -1,4 +1,5 @@
 import type { AppContext } from '../context.js';
+import { errorMessage } from '../util/errors.js';
 import type { JobRow } from './queue.js';
 
 export type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
@@ -35,7 +36,7 @@ export function startRunner(ctx: AppContext, handlers: Record<string, JobHandler
         await handler(ctx, job);
         ctx.queue.complete(job.id);
       } catch (err) {
-        failJob(ctx, job, err instanceof Error ? err.message : String(err));
+        failJob(ctx, job, errorMessage(err));
       }
     } finally {
       ticking = false;
