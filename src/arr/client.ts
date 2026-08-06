@@ -134,12 +134,22 @@ export class ArrClient implements ArrApi {
     return res.records;
   }
 
-  listSeriesHistory(seriesId: number): Promise<HistoryRecord[]> {
-    return this.request('GET', '/history/series', { query: { seriesId, eventType: 'downloadFolderImported' } });
+  async listSeriesHistory(seriesId: number): Promise<HistoryRecord[]> {
+    const records = await this.request<HistoryRecord[]>('GET', '/history/series', {
+      query: { seriesId, eventType: 'downloadFolderImported' },
+    });
+    // Re-filter client-side so a binding change on the arr side can't silently widen this
+    // (same rationale as listRecentImports).
+    return records.filter((r) => r.eventType === 'downloadFolderImported');
   }
 
-  listMovieHistory(movieId: number): Promise<HistoryRecord[]> {
-    return this.request('GET', '/history/movie', { query: { movieId, eventType: 'downloadFolderImported' } });
+  async listMovieHistory(movieId: number): Promise<HistoryRecord[]> {
+    const records = await this.request<HistoryRecord[]>('GET', '/history/movie', {
+      query: { movieId, eventType: 'downloadFolderImported' },
+    });
+    // Re-filter client-side so a binding change on the arr side can't silently widen this
+    // (same rationale as listRecentImports).
+    return records.filter((r) => r.eventType === 'downloadFolderImported');
   }
 
   async listRecentImports(pageSize: number): Promise<HistoryRecord[]> {

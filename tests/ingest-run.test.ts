@@ -1,10 +1,21 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
+import { ConfigSchema } from '../src/config/schema.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS, MOUNT_RETRY_MS } from '../src/pipelines/ingest/run.js';
-import { enqueueAndClaim, episodeResource, FakeGenerator, ingestFixture, type IngestFixture } from './helpers.js';
+import {
+  enqueueAndClaim,
+  episodeResource,
+  fakeArrClient,
+  FakeGenerator,
+  ingestFixture,
+  makeCtx,
+  seriesResource,
+  tmpDir,
+  type IngestFixture,
+} from './helpers.js';
 
 function claimIngestJob(fx: IngestFixture) {
   return enqueueAndClaim(fx.ctx, {
@@ -153,6 +164,36 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.skipped-collision')).toHaveLength(1);
   });
 
+  it('restore: a placed file removed from the library (video intact) is restored from its recorded source, and the row is refreshed', async () => {
+    const fx = ingestFixture();
+    const sourcePath = join(fx.torrentDir, 'Show - 05 [JPSC].ass');
+    writeFileSync(sourcePath, 'subtitle-content');
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+    const targetPath = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
+    expect(existsSync(targetPath)).toBe(true);
+    const firstJobId = job.id;
+    fx.ctx.queue.complete(job.id); // free the singleton slot so a second job can be claimed below
+
+    // The placed file is removed by hand; its video and the provenance row are untouched.
+    const before = new PlacedFiles(fx.ctx.db).findByPlacedPath(targetPath);
+    expect(before).not.toBeNull();
+    unlinkSync(targetPath);
+
+    const job2 = claimIngestJob(fx); // a fresh job — proves the row's job_id gets refreshed too
+    await runIngestJob(fx.ctx, job2);
+
+    expect(existsSync(targetPath)).toBe(true);
+    expect(readFileSync(targetPath, 'utf-8')).toBe('subtitle-content');
+    expect(existsSync(sourcePath)).toBe(true); // source untouched by the restore
+
+    const after = new PlacedFiles(fx.ctx.db).findByPlacedPath(targetPath);
+    expect(after).not.toBeNull();
+    expect(after!.job_id).toBe(job2.id);
+    expect(after!.job_id).not.toBe(firstJobId);
+  });
+
   it('idempotent re-run: placing twice records one row and makes no second LLM call (provenance short-circuit)', async () => {
     const fx = ingestFixture();
     const crypticPath = join(fx.torrentDir, 'Random Title - XYZ.ass');
@@ -210,6 +251,136 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(1);
   });
 
+  it('stale cleanup containment: one row failing to rmSync (EISDIR, not ENOENT) warns and keeps that row, but still cleans the next stale row', async () => {
+    const fx = ingestFixture();
+    const placedFiles = new PlacedFiles(fx.ctx.db);
+
+    // Row 1: placed_path is actually a directory — rmSync throws EISDIR even with force:true
+    // (force only suppresses a missing-path ENOENT, not a genuine "can't unlink this" error).
+    const badPlacedPath = join(fx.libraryDir, 'not-actually-a-file');
+    mkdirSync(badPlacedPath);
+    placedFiles.upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: fx.targetKind,
+      targetId: fx.targetId,
+      kind: 'subtitle',
+      placedPath: badPlacedPath,
+      videoPath: join(fx.libraryDir, 'Gone Episode 1.mkv'), // never created — stale
+      sourcePath: join(fx.torrentDir, 'a.ass'),
+    });
+
+    // Row 2: an ordinary stale row — must still get cleaned up despite row 1's failure.
+    const staleTarget2 = join(fx.libraryDir, 'Gone Episode 2.ass');
+    writeFileSync(staleTarget2, 'stale');
+    placedFiles.upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: fx.targetKind,
+      targetId: fx.targetId,
+      kind: 'subtitle',
+      placedPath: staleTarget2,
+      videoPath: join(fx.libraryDir, 'Gone Episode 2.mkv'), // never created — stale
+      sourcePath: join(fx.torrentDir, 'b.ass'),
+    });
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.stale-clean-failed')).toHaveLength(1);
+    expect(placedFiles.findByPlacedPath(badPlacedPath)).not.toBeNull(); // kept for retry, not silently dropped
+
+    expect(existsSync(staleTarget2)).toBe(false);
+    expect(placedFiles.findByPlacedPath(staleTarget2)).toBeNull();
+    expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(1);
+  });
+
+  it('ingest.place-failed containment: one placement failure (target dir missing) warns but does not stop the next sidecar from placing', async () => {
+    const fx = ingestFixture();
+    // A second episode whose file lives under a directory that's never created — atomicCopy
+    // has nowhere to write, so placing anything matched to it must fail.
+    const missingDirVideoPath = join(fx.libraryDir, 'nonexistent-subdir', 'Show - S01E06.mkv');
+    fx.client.episodes.push(episodeResource({ id: 2, seriesId: fx.targetId, seasonNumber: 1, episodeNumber: 6, episodeFileId: 101, hasFile: true }));
+    fx.client.episodeFiles.push({ id: 101, seriesId: fx.targetId, seasonNumber: 1, relativePath: 'Show - S01E06.mkv', path: missingDirVideoPath });
+
+    writeFileSync(join(fx.torrentDir, 'Show - 06.ass'), 'sub-fail');
+    writeFileSync(join(fx.torrentDir, 'Show - 05.ass'), 'sub-ok');
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    const warnEvents = fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.place-failed');
+    expect(warnEvents).toHaveLength(1);
+
+    const succeededTarget = join(fx.libraryDir, 'Show - S01E05.ass');
+    expect(existsSync(succeededTarget)).toBe(true);
+    expect(readFileSync(succeededTarget, 'utf-8')).toBe('sub-ok');
+
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ placed_path: succeededTarget });
+  });
+
+  it('LLM contract: the sidecar-match prompt only ever includes hasFile:true episodes, never a hasFile:false one', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    // No bare number at all -> deterministic can't place it against either episode list,
+    // and it doesn't name a real (if fileless) episode either -> genuinely goes to the LLM.
+    writeFileSync(join(fx.torrentDir, 'Random Title - XYZ.ass'), 'sub');
+    const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 1 }], reasoning: 'x' }]);
+    fx.ctx.llm = llm;
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0]!.prompt).toContain('id=1 ');
+    expect(llm.calls[0]!.prompt).not.toContain('id=2 ');
+  });
+
+  it('dedupes swept sidecar paths across nested source dirs — a parent dir and its own subdirectory both resolving as sweep roots must not double-place or double-list a file', async () => {
+    const fx = ingestFixture();
+    fx.ctx.config.ingest.downloadRoots = []; // force the no-configured-root dirname fallback for both entries below
+
+    const nestedDir = join(fx.torrentDir, 'S1');
+    mkdirSync(nestedDir, { recursive: true });
+    const crypticPath = join(nestedDir, 'Random Title - XYZ.ass'); // deterministic-unmatchable -> LLM batch
+    writeFileSync(crypticPath, 'sub');
+
+    fx.client.seriesHistory = [
+      {
+        id: 1,
+        seriesId: fx.targetId,
+        eventType: 'downloadFolderImported',
+        date: '',
+        sourceTitle: 'x',
+        data: { droppedPath: join(fx.torrentDir, 'e1.mkv') }, // dirname -> fx.torrentDir
+      },
+      {
+        id: 2,
+        seriesId: fx.targetId,
+        eventType: 'downloadFolderImported',
+        date: '',
+        sourceTitle: 'x',
+        data: { droppedPath: join(nestedDir, 'e2.mkv') }, // dirname -> nestedDir, INSIDE fx.torrentDir
+      },
+    ];
+
+    const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 1 }], reasoning: 'x' }]);
+    fx.ctx.llm = llm;
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0]!.prompt).not.toContain('#2'); // one file listed, not the same file twice
+    expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.placed')).toHaveLength(1);
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId);
+    expect(rows).toHaveLength(1);
+  });
+
   it('episode without file: a sidecar matches an episode with hasFile:false -> ingest.deferred info event, not placed, no LLM call', async () => {
     const fx = ingestFixture({
       episodes: [
@@ -244,5 +415,60 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ data: { matchedBy: 'deterministic' } });
+  });
+});
+
+describe('runIngestJob — mapArrPath boundary', () => {
+  // Deliberately NOT using ingestFixture() here: its pathMappings are identity
+  // (from === to), so a bug that skipped mapArrPath entirely would still pass every other
+  // test in this file. This test uses genuinely distinct arr-side vs. local roots so the
+  // sidecar can only land in the real library dir if both mapArrPath call sites — the
+  // dropped-path -> source-dir translation, and the episode-file -> video-path translation
+  // — actually run.
+  it('sweeps and places using real, distinct arr-side/local path mappings, not identity ones', async () => {
+    const downloadsDir = tmpDir();
+    const libraryDir = tmpDir();
+    const torrentDir = join(downloadsDir, 'Show Torrent');
+    mkdirSync(torrentDir, { recursive: true });
+
+    const videoFileName = 'Show - S01E05.mkv';
+    writeFileSync(join(libraryDir, videoFileName), 'video');
+    writeFileSync(join(torrentDir, 'Show - 05 [JPSC].ass'), 'subtitle-content');
+
+    // Arr-side paths — under roots that don't exist locally at all; only the configured
+    // pathMappings below can bridge them to downloadsDir/libraryDir.
+    const arrDroppedPath = '/data/dl/Show Torrent/Show - S01E05.mkv';
+    const arrVideoPath = '/data/tv/Show - S01E05.mkv'; // directly under /data/tv, matching the local video's own placement directly under libraryDir
+
+    const client = fakeArrClient({
+      series: [seriesResource({ id: 42, title: 'Frieren' })],
+      seriesHistory: [
+        { id: 1, seriesId: 42, eventType: 'downloadFolderImported', date: '', sourceTitle: 'Show Torrent', data: { droppedPath: arrDroppedPath } },
+      ],
+      episodes: [episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true })],
+      episodeFiles: [{ id: 100, seriesId: 42, seasonNumber: 1, relativePath: videoFileName, path: arrVideoPath }],
+    });
+
+    const ctx = makeCtx({
+      clients: new Map([['sonarr', client]]),
+      config: ConfigSchema.parse({
+        pathMappings: [
+          { from: '/data/dl', to: downloadsDir },
+          { from: '/data/tv', to: libraryDir },
+        ],
+        ingest: { downloadRoots: ['/data/dl'] },
+      }),
+    });
+
+    const job = enqueueAndClaim(ctx, { pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });
+    await runIngestJob(ctx, job);
+
+    const expected = join(libraryDir, 'Show - S01E05.zh-Hans.ass');
+    expect(existsSync(expected)).toBe(true);
+    expect(readFileSync(expected, 'utf-8')).toBe('subtitle-content');
+
+    const rows = new PlacedFiles(ctx.db).listByTarget('sonarr', 'series', 42);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ video_path: join(libraryDir, videoFileName) });
   });
 });

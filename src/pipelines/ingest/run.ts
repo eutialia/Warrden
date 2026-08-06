@@ -54,10 +54,10 @@ type TargetContext = SeriesTargetContext | MovieTargetContext;
  * matters because `queue.reschedule`'s early-wake-up asymmetry means a fresh trigger can
  * re-run this handler well before the delay it asked for elapses.
  *
- * `stuckDownloadIds` (from a `'stuck'` queue assessment) and `sourceDirsArr` are both
- * computed here but not acted on beyond the sidecar sweep — Task 10's bundle/stuck-import
- * rescue stage slots in right after it, reusing this same target/source-dir context
- * instead of re-deriving it.
+ * `assessment` (whose `'stuck'` case carries the `downloadIds` a rescue pass would retry)
+ * and `sourceDirsArr` both stay in scope past the sidecar sweep without being acted on
+ * further here — Task 10's bundle/stuck-import rescue stage slots in right after it,
+ * reading them straight from this same scope instead of re-deriving them.
  */
 export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> {
   const client = ctx.clients.get(job.arr_instance);
@@ -84,9 +84,6 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
     throw new RescheduleError('arr still importing this target', SETTLE_RETRY_MS);
   }
 
-  // Consumed by Task 10's stuck-import rescue stage — not acted on in this task.
-  const stuckDownloadIds = assessment.state === 'stuck' ? assessment.downloadIds : [];
-
   const placedFiles = new PlacedFiles(ctx.db);
   cleanupStaleProvenance(ctx, job, placedFiles);
 
@@ -96,11 +93,14 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   const sourceDirsArr = resolveSourceDirs(droppedPaths, ctx.config.ingest.downloadRoots);
   const sourceDirsLocal = sourceDirsArr.map((d) => mapArrPath(ctx.config.pathMappings, d)).filter((d) => existsSync(d));
 
-  const sidecarPaths = sourceDirsLocal.flatMap((d) => walkFiles(d, SIDECAR_EXTS));
+  // Deduped: nested source dirs (e.g. a configured-root miss falling back to two different
+  // dropped files' own dirnames, one inside the other) would otherwise have `walkFiles`
+  // — itself recursive — walk the same physical file more than once, double-placing it and
+  // double-listing it in the LLM batch below.
+  const sidecarPaths = [...new Set(sourceDirsLocal.flatMap((d) => walkFiles(d, SIDECAR_EXTS)))];
   await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths);
 
-  // Task 10's rescue stage goes here, reading `stuckDownloadIds` / `sourceDirsArr` above.
-  void stuckDownloadIds;
+  // Task 10's rescue stage goes here, reading `assessment`/`sourceDirsArr` from this scope.
 }
 
 /** Verifies every configured mount marker is present, translating a `MountError` into an
@@ -127,12 +127,35 @@ function assertMounted(ctx: AppContext, job: JobRow): void {
  * disappeared — a re-imported/upgraded/deleted episode or movie takes its sidecar with
  * it, since a sidecar with no video beside it is just orphaned clutter. Only rows this
  * job's target owns are considered, and only `placed_files`-recorded paths are ever
- * touched, per the destruction limit: Warrden never deletes a file it didn't place. */
+ * touched, per the destruction limit: Warrden never deletes a file it didn't place.
+ *
+ * One row's `rmSync` failure (a permission error, the path being a directory, ...) is
+ * contained per-row (same shape as `tryPlace`'s containment) rather than aborting the rest
+ * of the cleanup pass — and the row is deliberately kept, not deleted, on failure: the file
+ * is still sitting there unremoved, so dropping provenance for it now would misrepresent
+ * reality and drop it from being retried next run. */
 function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles): void {
   const rows = placedFiles.listByTarget(job.arr_instance, job.target_kind, job.target_id);
   for (const row of rows) {
     if (existsSync(row.video_path)) continue;
-    rmSync(row.placed_path, { force: true });
+    try {
+      rmSync(row.placed_path, { force: true });
+    } catch (err) {
+      ctx.events.append({
+        kind: 'ingest.stale-clean-failed',
+        level: 'warn',
+        jobId: job.id,
+        message: `Failed to remove stale "${row.placed_path}": ${errorMessage(err)}`,
+        data: {
+          instance: job.arr_instance,
+          targetKind: job.target_kind,
+          targetId: job.target_id,
+          placedPath: row.placed_path,
+          videoPath: row.video_path,
+        },
+      });
+      continue;
+    }
     placedFiles.deleteById(row.id);
     ctx.events.append({
       kind: 'ingest.stale-cleaned',
@@ -168,9 +191,14 @@ async function resolveTarget(client: ArrApi, job: JobRow): Promise<TargetContext
  * `hasFile: true` episodes only — a sidecar needs a video already on disk to sit beside);
  * whatever it can't place, for a series target, is batched into a single `sidecar-match`
  * LLM call once the loop finishes (matching `matchSidecarsWithLlm`'s documented contract).
- * A sidecar whose source path already has a live provenance row (its video still exists)
- * short-circuits straight to a row refresh — no re-matching, no re-copy — which is what
- * keeps a settle-wait's early wake-up cheap to re-enter.
+ * A sidecar whose source path already has a live provenance row (its video still exists
+ * AND the placed file itself is still there) short-circuits straight to a row refresh —
+ * no re-matching, no re-copy — which is what keeps a settle-wait's early wake-up cheap to
+ * re-enter. When the video is intact but the placed file itself was removed (by hand, or
+ * by something outside Warrden), it's restored directly from the row's own recorded
+ * source instead — cheap and correct without paying for a second matching pass (or, for
+ * an LLM-matched file, a second LLM call), and it also clears the "phantom row" that would
+ * otherwise block the collision guard forever for a target that's actually free again.
  */
 async function sweepSidecars(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, target: TargetContext, sidecarPaths: string[]): Promise<void> {
   const existingPlaced = placedFiles.listByTarget(job.arr_instance, job.target_kind, job.target_id);
@@ -180,7 +208,11 @@ async function sweepSidecars(ctx: AppContext, job: JobRow, placedFiles: PlacedFi
   for (const sidecarPath of sidecarPaths) {
     const existing = existingPlaced.find((r) => r.source_path === sidecarPath);
     if (existing && existsSync(existing.video_path)) {
-      refreshPlacedRow(placedFiles, job, existing);
+      if (existsSync(existing.placed_path)) {
+        refreshPlacedRow(placedFiles, job, existing);
+      } else {
+        tryRestore(ctx, job, placedFiles, existing);
+      }
       continue;
     }
 
@@ -253,6 +285,39 @@ function refreshPlacedRow(placedFiles: PlacedFiles, job: JobRow, row: PlacedFile
     jobId: job.id,
     data: row.data,
   });
+}
+
+/** Re-copies an already-known-good sidecar from its recorded source straight back to its
+ * recorded target and refreshes the row — the restore path for a placed file that got
+ * removed while its video (and the row itself) are still intact. Wrapped the same way as
+ * `tryPlace`: a failure (e.g. the source itself has since vanished too) is contained to a
+ * warn event rather than aborting the sweep. */
+function tryRestore(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, row: PlacedFileRow): void {
+  try {
+    atomicCopy(row.source_path, row.placed_path);
+    refreshPlacedRow(placedFiles, job, row);
+    ctx.events.append({
+      kind: 'ingest.placed',
+      jobId: job.id,
+      message: `Restored "${basename(row.placed_path)}" — it had gone missing from the library`,
+      data: {
+        instance: job.arr_instance,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        sidecarPath: row.source_path,
+        placedPath: row.placed_path,
+        matchedBy: row.data.matchedBy,
+      },
+    });
+  } catch (err) {
+    ctx.events.append({
+      kind: 'ingest.place-failed',
+      level: 'warn',
+      jobId: job.id,
+      message: `Failed to restore "${basename(row.placed_path)}": ${errorMessage(err)}`,
+      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath: row.source_path },
+    });
+  }
 }
 
 function appendDeferred(ctx: AppContext, job: JobRow, sidecarPath: string, reason: string): void {
