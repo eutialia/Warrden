@@ -126,6 +126,17 @@ describe('AttentionItems', () => {
       items.open({ kind: 'ingest.mount-missing', message: 'second', jobId: 1, data });
       expect(items.list()).toHaveLength(2);
     });
+
+    it('refreshing a target-keyed row with no jobId of its own (COALESCE) keeps the existing job link instead of nulling it out', () => {
+      const items = new AttentionItems(freshDb());
+      const data = { instance: 'sonarr', targetKind: 'series', targetId: 42 };
+      const first = items.open({ kind: 'ingest.rescue-proposed', message: 'first', jobId: 7, data });
+
+      const second = items.open({ kind: 'ingest.rescue-proposed', message: 'second' /* no jobId */, data });
+
+      expect(second.id).toBe(first.id);
+      expect(items.get(first.id)).toMatchObject({ job_id: 7, message: 'second' });
+    });
   });
 
   describe('setStatus', () => {

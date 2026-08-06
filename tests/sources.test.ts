@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRootDerivedSourceDirs, resolveSourceDirs } from '../src/pipelines/ingest/sources.js';
+import { resolveRootDerivedSourceDirs, resolveSourceDirs, resolveSourceDirsDetailed } from '../src/pipelines/ingest/sources.js';
 
 describe('resolveSourceDirs', () => {
   it.each([
@@ -47,5 +47,21 @@ describe('resolveRootDerivedSourceDirs', () => {
   it('a single-file torrent (directly in the root) contributes nothing to either function', () => {
     expect(resolveSourceDirs(['/dl/movie.mkv'], ['/dl'])).toEqual([]);
     expect(resolveRootDerivedSourceDirs(['/dl/movie.mkv'], ['/dl'])).toEqual([]);
+  });
+});
+
+describe('resolveSourceDirsDetailed', () => {
+  it('returns {all, rootDerived} matching resolveSourceDirs/resolveRootDerivedSourceDirs\' own outputs for a mix of root-derived and fallback dirs', () => {
+    const dropped = ['/dl/Torrent A/e1.mkv', '/other/T/e1.mkv'];
+    const roots = ['/dl'];
+
+    expect(resolveSourceDirsDetailed(dropped, roots)).toEqual({
+      all: resolveSourceDirs(dropped, roots),
+      rootDerived: resolveRootDerivedSourceDirs(dropped, roots),
+    });
+    expect(resolveSourceDirsDetailed(dropped, roots)).toEqual({
+      all: ['/dl/Torrent A', '/other/T'],
+      rootDerived: ['/dl/Torrent A'],
+    });
   });
 });

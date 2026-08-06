@@ -603,7 +603,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(rescued!.data.reasoning).toEqual(expect.any(String));
   });
 
-  it('movie rescue filter: an item carrying a rejection is dropped, so the command carries only the clean file', async () => {
+  it('movie rescue filter: an item carrying a rejection is dropped, so the command carries only the clean file — and the drop is recorded in ingest.rescued\'s skipped', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
     fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
     const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
@@ -619,9 +619,12 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: clean.path })], 'copy');
+
+    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    expect(rescued!.data.skipped).toEqual([rejected.path]);
   });
 
-  it('movie rescue filter: an item whose item.movie names a DIFFERENT movie than the job target is dropped', async () => {
+  it('movie rescue filter: an item whose item.movie names a DIFFERENT movie than the job target is dropped — and recorded in ingest.rescued\'s skipped', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
     fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
     const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
@@ -633,6 +636,34 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: clean.path })], 'copy');
+
+    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    expect(rescued!.data.skipped).toEqual([otherMovie.path]);
+  });
+
+  it('movie rescue filter: when EVERY item is filtered out, an info ingest.rescue-skipped event names the dropped paths instead of the stage going silent', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const rejected = manualImportItem({
+      path: '/downloads/Movie/Sample.mkv',
+      folderName: 'Movie Torrent',
+      rejections: [{ reason: 'sample file' }],
+    });
+    const otherMovie = manualImportItem({ path: '/downloads/Movie/Featurette.mkv', folderName: 'Movie Torrent', movie: { id: 999 } });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [rejected, otherMovie];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).not.toHaveBeenCalled();
+    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(false);
+    expect(fx.ctx.events.list({ level: 'attention' }).some((e) => e.kind === 'ingest.rescue-proposed')).toBe(false);
+
+    const skippedEvents = fx.ctx.events.list().filter((e) => e.kind === 'ingest.rescue-skipped');
+    expect(skippedEvents).toHaveLength(1);
+    expect(skippedEvents[0]!.level).toBe('info');
+    expect(skippedEvents[0]!.data.skipped).toEqual(expect.arrayContaining([rejected.path, otherMovie.path]));
+    expect((skippedEvents[0]!.data.skipped as string[]).length).toBe(2);
   });
 
   it('movie occupied-guard: a movie that already has a file on disk proposes an attention item instead of executing', async () => {

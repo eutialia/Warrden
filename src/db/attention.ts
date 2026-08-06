@@ -103,8 +103,11 @@ export class AttentionItems {
       }
 
       if (existingId !== undefined) {
+        // COALESCE, not a bare overwrite: a target-keyed refresh with no jobId of its own
+        // (an event that carries instance/targetKind/targetId but no jobId) must not null
+        // out the existing row's job link — it just has nothing newer to offer for it.
         const row = this.db
-          .prepare(`UPDATE attention_items SET ts = ?, message = ?, data = ?, job_id = ? WHERE id = ? RETURNING *`)
+          .prepare(`UPDATE attention_items SET ts = ?, message = ?, data = ?, job_id = COALESCE(?, job_id) WHERE id = ? RETURNING *`)
           .get(now, input.message, data, input.jobId ?? null, existingId) as AttentionRowRaw;
         return parseRow(row);
       }

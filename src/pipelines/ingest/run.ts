@@ -21,7 +21,7 @@ import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
 import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, SIDECAR_EXTS } from './sidecars.js';
-import { resolveRootDerivedSourceDirs, resolveSourceDirs } from './sources.js';
+import { resolveSourceDirsDetailed } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
 export const SETTLE_DEADLINE_MS = 24 * 60 * 60_000;
@@ -65,9 +65,9 @@ type TargetContext = SeriesTargetContext | MovieTargetContext;
  *
  * Once sidecars are placed, a rescue stage retries anything the arr's own manual-import
  * queue is still holding: any `'stuck'` download (`assessment`'s `downloadIds`) plus, for
- * a series target, any leftover bundle video sitting in one of `sourceDirsArr`'s folders
- * that the sidecar sweep never touched — a sidecar only ever matches beside an EXISTING
- * video, so a whole extra episode file needs its own manual import instead. A
+ * a series target, any leftover bundle video sitting in one of `bundleFolders`'s
+ * root-derived folders that the sidecar sweep never touched — a sidecar only ever matches
+ * beside an EXISTING video, so a whole extra episode file needs its own manual import. A
  * high/medium-confidence mapping imports immediately (`copy` mode); a low-confidence one
  * is proposed as an `attention` item instead of executed unattended. Movies only ever
  * rescue a stuck download 1:1 onto `movieId` (dropping rejected/other-movie items first)
@@ -107,7 +107,10 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   const target = await resolveTarget(client, job);
 
   const droppedPaths = target.history.map((h) => h.data.droppedPath).filter((p): p is string => Boolean(p));
-  const sourceDirsArr = resolveSourceDirs(droppedPaths, ctx.config.ingest.downloadRoots);
+  // One derivation pass feeds both the sidecar sweep's full dir set (`all`) and the
+  // rescue stage's narrower, root-derived-only set (`rootDerived`) — see
+  // resolveSourceDirsDetailed's own doc for why the rescue stage needs the narrower one.
+  const { all: sourceDirsArr, rootDerived: bundleFolders } = resolveSourceDirsDetailed(droppedPaths, ctx.config.ingest.downloadRoots);
   const sourceDirsLocal = sourceDirsArr.map((d) => mapArrPath(ctx.config.pathMappings, d)).filter((d) => existsSync(d));
 
   // Deduped: nested source dirs (e.g. a configured-root miss falling back to two different
@@ -117,8 +120,6 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   const sidecarPaths = [...new Set(sourceDirsLocal.flatMap((d) => walkFiles(d, SIDECAR_EXTS)))];
   await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths);
 
-  // Narrower than sourceDirsArr on purpose — see resolveRootDerivedSourceDirs's own doc.
-  const bundleFolders = resolveRootDerivedSourceDirs(droppedPaths, ctx.config.ingest.downloadRoots);
   await rescueStuckImports(ctx, job, client, target, assessment, bundleFolders);
 }
 
@@ -578,8 +579,17 @@ async function rescueSeries(
  *   it's exactly the "unresolved, needs 1:1 mapping" case this rescue exists for.
  *
  * Surviving items map 1:1 onto `job.target_id` with `quality`/`languages`/`releaseGroup`
- * round-tripped verbatim — no LLM call, since there's no episode to guess at. If the movie
- * already has a file on disk (`target.movieFiles`, fetched once up front in
+ * round-tripped verbatim — no LLM call, since there's no episode to guess at. Every item
+ * the two filters drop is still tracked (by path) into `skipped`: when at least one item
+ * survives, `skipped` rides along in the eventual `ingest.rescued` event's `data` (parity
+ * with the series branch's `plan.skipped`); when NOTHING survives — dedupe returned
+ * something but the filters dropped all of it — an info `ingest.rescue-skipped` event
+ * names the dropped paths instead of the stage going quiet, since "the arr had leftover
+ * items but every one was unsafe to import" is worth a visible record, not silence. A
+ * dedupe result that was already empty (nothing to filter at all) stays silent, same as
+ * the "nothing leftover" case elsewhere in this stage.
+ *
+ * If the movie already has a file on disk (`target.movieFiles`, fetched once up front in
  * `resolveTarget` — the movie equivalent of the series occupied-episode cap), replacing it
  * is always a human decision: the command is proposed as an `attention` item instead of
  * executed, using the same `bundle-import` payload shape the series branch uses. This also
@@ -590,10 +600,25 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
   if (assessment.state !== 'stuck') return;
 
   const itemsByScope = await Promise.all(assessment.downloadIds.map((downloadId) => client.listManualImport({ downloadId })));
-  const items = dedupeManualImportItems(itemsByScope.flat()).filter(
-    (item) => item.rejections.length === 0 && (item.movie === undefined || item.movie.id === job.target_id),
-  );
-  if (items.length === 0) return;
+  const deduped = dedupeManualImportItems(itemsByScope.flat());
+  if (deduped.length === 0) return;
+
+  const skipped: string[] = [];
+  const items = deduped.filter((item) => {
+    const keep = item.rejections.length === 0 && (item.movie === undefined || item.movie.id === job.target_id);
+    if (!keep) skipped.push(item.path);
+    return keep;
+  });
+
+  if (items.length === 0) {
+    ctx.events.append({
+      kind: 'ingest.rescue-skipped',
+      jobId: job.id,
+      message: `Rescue found ${skipped.length} leftover file(s) for movie #${job.target_id}, but none were safe to import (rejected, or a different movie)`,
+      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, skipped },
+    });
+    return;
+  }
 
   const files: ManualImportFile[] = items.map((item) => ({
     path: item.path,
@@ -634,7 +659,7 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       targetKind: job.target_kind,
       targetId: job.target_id,
       files,
-      skipped: [],
+      skipped,
       reasoning: `stuck download(s) mapped 1:1 onto "${movieTitle}"`,
     },
   });
