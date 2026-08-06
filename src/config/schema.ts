@@ -35,7 +35,7 @@ export const ConfigSchema = z
     // is structural rather than case-by-case.
     server: z
       .object({
-        port: z.number().int().default(9797),
+        port: z.number().int().min(1).max(65535).default(9797),
         publicUrl: z.url().default('http://localhost:9797'), // used for webhook registration
       })
       .prefault({}),
@@ -44,11 +44,23 @@ export const ConfigSchema = z
     picking: z
       .object({
         tags: z.array(z.string()).default(() => []),
-        seederFloor: z.number().int().default(3),
-        minSizeMB: z.number().default(50),
-        maxSizeMB: z.number().default(60000),
+        seederFloor: z.number().int().min(0).default(3),
+        minSizeMB: z.number().min(0).default(50),
+        maxSizeMB: z.number().min(0).default(60000),
       })
-      .prefault({}),
+      .prefault({})
+      .check((ctx) => {
+        // minSizeMB > maxSizeMB would make every candidate fail the size window
+        // (src/pipelines/acquire/prefilter.ts) — an inverted window is never intentional.
+        if (ctx.value.minSizeMB > ctx.value.maxSizeMB) {
+          ctx.issues.push({
+            code: 'custom',
+            message: `picking.minSizeMB (${ctx.value.minSizeMB}) must be <= picking.maxSizeMB (${ctx.value.maxSizeMB})`,
+            input: ctx.value,
+            path: ['minSizeMB'],
+          });
+        }
+      }),
     llm: z
       .object({
         activeProfile: z.enum(['dev', 'prod']).default('prod'),
@@ -65,7 +77,7 @@ export const ConfigSchema = z
           .default(() => ({})),
       })
       .prefault({}),
-    reconcileIntervalMinutes: z.number().default(15),
+    reconcileIntervalMinutes: z.number().int().min(1).default(15),
   })
   .superRefine((cfg, ctx) => {
     // Defense-in-depth against `SECRET_PLACEHOLDER` ever being saved as a real secret:

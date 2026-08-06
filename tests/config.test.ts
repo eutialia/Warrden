@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig, saveConfig, ConfigError } from '../src/config/store.js';
-import { SECRET_PLACEHOLDER } from '../src/config/schema.js';
+import { ConfigSchema, SECRET_PLACEHOLDER } from '../src/config/schema.js';
 import { tmpDir as tmp } from './helpers.js';
 
 describe('config store', () => {
@@ -90,9 +90,78 @@ describe('config store', () => {
         return () => saveConfig(dir, cfg);
       },
     },
+    {
+      scenario: 'reconcileIntervalMinutes = 0 (must be at least 1)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, reconcileIntervalMinutes: 0 });
+      },
+    },
+    {
+      scenario: 'reconcileIntervalMinutes = 1.5 (must be an integer)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, reconcileIntervalMinutes: 1.5 });
+      },
+    },
+    {
+      scenario: 'server.port = 0 (below the valid TCP port range)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, server: { ...cfg.server, port: 0 } });
+      },
+    },
+    {
+      scenario: 'server.port = 65536 (above the valid TCP port range)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, server: { ...cfg.server, port: 65536 } });
+      },
+    },
+    {
+      scenario: 'picking.seederFloor = -1 (must be at least 0)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, picking: { ...cfg.picking, seederFloor: -1 } });
+      },
+    },
+    {
+      scenario: 'picking.minSizeMB = -1 (must be at least 0)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, picking: { ...cfg.picking, minSizeMB: -1 } });
+      },
+    },
+    {
+      scenario: 'picking.maxSizeMB = -1 (must be at least 0)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, picking: { ...cfg.picking, maxSizeMB: -1, minSizeMB: -1 } });
+      },
+    },
+    {
+      scenario: 'picking.minSizeMB > picking.maxSizeMB (an inverted size window would fail every candidate)',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        return () => saveConfig(dir, { ...cfg, picking: { ...cfg.picking, minSizeMB: 100, maxSizeMB: 50 } });
+      },
+    },
   ])('rejects invalid config with ConfigError: $scenario', ({ setup }) => {
     const dir = tmp();
     const run = setup(dir);
     expect(run).toThrow(ConfigError);
+  });
+
+  it.each([
+    { scenario: 'server.port at the minimum valid TCP port (1)', overrides: { server: { port: 1, publicUrl: 'http://x:0' } } },
+    { scenario: 'server.port at the maximum valid TCP port (65535)', overrides: { server: { port: 65535, publicUrl: 'http://x:0' } } },
+    { scenario: 'reconcileIntervalMinutes at its minimum (1)', overrides: { reconcileIntervalMinutes: 1 } },
+    { scenario: 'picking.seederFloor at its minimum (0)', overrides: { picking: { seederFloor: 0, minSizeMB: 50, maxSizeMB: 60000, tags: [] } } },
+    {
+      scenario: 'picking.minSizeMB exactly equal to picking.maxSizeMB (a zero-width but valid window)',
+      overrides: { picking: { seederFloor: 3, minSizeMB: 100, maxSizeMB: 100, tags: [] } },
+    },
+  ])('accepts the boundary value: $scenario', ({ overrides }) => {
+    expect(() => ConfigSchema.parse(overrides)).not.toThrow();
   });
 });
