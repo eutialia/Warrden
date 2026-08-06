@@ -101,6 +101,7 @@ export interface EpisodeFileResource {
   relativePath: string;
   path: string;
 }
+
 export interface MovieFileResource {
   id: number;
   movieId: number;

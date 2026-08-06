@@ -38,6 +38,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // Interactive release search fans out to every indexer and routinely runs 30-90s;
 // it gets its own, much longer deadline than ordinary API calls.
 const SEARCH_TIMEOUT_MS = 180_000;
+// The paged /history endpoint binds eventType as int[] (unlike /history/series and
+// /history/movie, which take the enum by name) — 3 = downloadFolderImported on both
+// Sonarr and Radarr.
+const IMPORT_EVENT_TYPE = 3;
 
 /**
  * Thin authenticated wrapper around the Sonarr/Radarr v3 HTTP API: every method is a
@@ -122,7 +126,10 @@ export class ArrClient implements ArrApi {
 
   async listQueue(): Promise<QueueRecord[]> {
     const res = await this.request<{ records: QueueRecord[] }>('GET', '/queue', {
-      query: { page: 1, pageSize: 1000, includeUnknownSeriesItems: true },
+      // One page big enough to hold any realistic queue; the arr has no unpaged variant.
+      // Sonarr and Radarr spell the include-unknown flag differently; each ignores the
+      // other's name, so sending both keeps this method kind-agnostic.
+      query: { page: 1, pageSize: 1000, includeUnknownSeriesItems: true, includeUnknownMovieItems: true },
     });
     return res.records;
   }
@@ -137,9 +144,10 @@ export class ArrClient implements ArrApi {
 
   async listRecentImports(pageSize: number): Promise<HistoryRecord[]> {
     const res = await this.request<{ records: HistoryRecord[] }>('GET', '/history', {
-      query: { page: 1, pageSize, sortKey: 'date', sortDirection: 'descending', eventType: 'downloadFolderImported' },
+      query: { page: 1, pageSize, sortKey: 'date', sortDirection: 'descending', eventType: IMPORT_EVENT_TYPE },
     });
-    return res.records;
+    // Re-filter client-side so a binding change on the arr side can't silently widen this.
+    return res.records.filter((r) => r.eventType === 'downloadFolderImported');
   }
 
   listEpisodes(seriesId: number): Promise<EpisodeResource[]> {

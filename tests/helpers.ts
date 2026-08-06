@@ -277,11 +277,16 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       return [...client.notifications];
     },
     createNotification: vi.fn(async (body: object): Promise<NotificationSummary> => {
-      const created: NotificationSummary = { id: nextNotificationId++, name: (body as { name: string }).name };
+      const b = body as { name: string; onDownload?: boolean; onUpgrade?: boolean };
+      const created: NotificationSummary = {
+        id: nextNotificationId++,
+        name: b.name,
+        onDownload: b.onDownload,
+        onUpgrade: b.onUpgrade,
+      };
       client.notifications.push(created);
       return created;
     }),
-    deleteNotification: vi.fn(async (): Promise<void> => {}),
 
     listQueue: async (): Promise<QueueRecord[]> => [],
     listSeriesHistory: async (): Promise<HistoryRecord[]> => [],
@@ -292,6 +297,9 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     listMovieFiles: async (): Promise<MovieFileResource[]> => [],
     listManualImport: async (): Promise<ManualImportItem[]> => [],
     executeManualImport: vi.fn(async (): Promise<void> => {}),
+    deleteNotification: vi.fn(async (id: number): Promise<void> => {
+      client.notifications = client.notifications.filter((n) => n.id !== id);
+    }),
 
     pushTag(label: string): TagResource {
       const tag: TagResource = { id: nextTagId++, label };
