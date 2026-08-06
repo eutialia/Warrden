@@ -84,12 +84,32 @@ export class JobQueue {
         // Reset not_before to this enqueue's own effective value (default 0, i.e.
         // immediately claimable) rather than leaving the twin's existing one in place — a
         // fresh trigger (a new webhook, a manual re-pick) legitimately overrides whatever
-        // retry backoff the pending twin was still waiting out.
-        this.db.prepare(`UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?`).run(j.notBefore ?? 0, now, twin.id);
+        // retry backoff the pending twin was still waiting out. Same "last trigger wins"
+        // rule for payload: when this enqueue provides one, it overwrites the pending
+        // twin's — otherwise a manual re-pick's fresh title/source would sit unused behind
+        // a stale payload already parked on the twin it coalesced into.
+        if (j.payload !== undefined) {
+          this.db
+            .prepare(`UPDATE jobs SET not_before = ?, payload = ?, updated_at = ? WHERE id = ?`)
+            .run(j.notBefore ?? 0, JSON.stringify(j.payload), now, twin.id);
+        } else {
+          this.db.prepare(`UPDATE jobs SET not_before = ?, updated_at = ? WHERE id = ?`).run(j.notBefore ?? 0, now, twin.id);
+        }
         return { id: twin.id, outcome: 'coalesced' };
       }
       if (twin?.status === 'running') {
-        this.db.prepare(`UPDATE jobs SET dirty = 1, updated_at = ? WHERE id = ?`).run(now, twin.id);
+        // Same last-trigger-wins rule as the pending branch above. Overwriting the running
+        // twin's payload here can't affect the run already in flight — its handler is
+        // working off the `JobRow` it got from `claim()`, not a live read of this row — but
+        // `complete()`'s dirty-requeue insert re-reads this row fresh once the run finishes,
+        // so the requeued twin naturally carries whatever payload landed here last.
+        if (j.payload !== undefined) {
+          this.db
+            .prepare(`UPDATE jobs SET dirty = 1, payload = ?, updated_at = ? WHERE id = ?`)
+            .run(JSON.stringify(j.payload), now, twin.id);
+        } else {
+          this.db.prepare(`UPDATE jobs SET dirty = 1, updated_at = ? WHERE id = ?`).run(now, twin.id);
+        }
         return { id: twin.id, outcome: 'marked-dirty' };
       }
       const info = this.db

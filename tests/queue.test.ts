@@ -34,6 +34,31 @@ describe('JobQueue', () => {
     expect(q.claim(6_000)).not.toBeNull();
   });
 
+  it('coalescing onto a pending twin overwrites its payload with the new enqueue\'s — last trigger wins, so a manual re-pick\'s fresh title/source is not lost behind a stale webhook payload', () => {
+    q.enqueue({ ...target, payload: { title: 'Old Title', source: 'webhook' } });
+    const second = q.enqueue({ ...target, payload: { title: 'New Title', source: 'manual' } });
+    expect(second.outcome).toBe('coalesced');
+    expect(q.get(second.id!)!.payload).toEqual({ title: 'New Title', source: 'manual' });
+  });
+
+  it('coalescing without a payload leaves the pending twin\'s existing payload untouched', () => {
+    q.enqueue({ ...target, payload: { title: 'Kept' } });
+    const second = q.enqueue({ ...target }); // no payload given
+    expect(second.outcome).toBe('coalesced');
+    expect(q.get(second.id!)!.payload).toEqual({ title: 'Kept' });
+  });
+
+  it('marking a running twin dirty overwrites its payload too, so the twin complete() requeues after the run finishes carries the new one', () => {
+    q.enqueue({ ...target, payload: { title: 'Old Title', source: 'webhook' } });
+    const job = q.claim()!;
+    const dirtied = q.enqueue({ ...target, payload: { title: 'New Title', source: 'manual' } });
+    expect(dirtied.outcome).toBe('marked-dirty');
+
+    expect(q.complete(job.id).requeued).toBe(true);
+    const requeued = q.claim()!;
+    expect(requeued.payload).toEqual({ title: 'New Title', source: 'manual' });
+  });
+
   it('coalescing onto a pending twin resets its not_before to the new enqueue\'s effective value, so a fresh trigger overrides an existing retry backoff', () => {
     const first = q.enqueue({ ...target, notBefore: 60_000 }); // waiting out a backoff, not yet claimable
     expect(q.claim(30_000)).toBeNull();
