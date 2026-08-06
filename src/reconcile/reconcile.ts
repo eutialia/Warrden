@@ -1,4 +1,5 @@
 import type { ArrApi, MovieResource, ReleaseProfileResource, SeriesResource, TagResource } from '../arr/types.js';
+import type { ArrInstance } from '../config/schema.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { SyncState } from '../db/syncState.js';
@@ -50,10 +51,17 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   await gc(ctx, seriesByInstance);
 }
 
+/** The configured `kind` for arr instance `name`, or `undefined` if it isn't in
+ * `ctx.config.arrs` at all — only really happens for an `ArrApi` registered without
+ * matching config (in practice, only in tests: `main()` always builds `ctx.clients`
+ * straight from `ctx.config.arrs`). */
+function instanceKind(ctx: AppContext, name: string): ArrInstance['kind'] | undefined {
+  return ctx.config.arrs.find((a) => a.name === name)?.kind;
+}
+
 /** Fetches the resource list(s) relevant to `name`'s configured kind: only series for a
- * `sonarr` instance, only movies for `radarr`, or both when the instance isn't in
- * `ctx.config.arrs` at all (an `ArrApi` registered without matching config) — safer than
- * guessing wrong and silently skipping an instance's actual library. Skipping the
+ * `sonarr` instance, only movies for `radarr`, or both when the kind is unknown — safer
+ * than guessing wrong and silently skipping an instance's actual library. Skipping the
  * irrelevant call for a known kind also avoids hitting an endpoint the real arr flavor
  * doesn't implement (Sonarr has no `/movie`, Radarr no `/series`) on every single pass. */
 async function fetchInstanceResources(
@@ -61,7 +69,7 @@ async function fetchInstanceResources(
   name: string,
   client: ArrApi,
 ): Promise<{ series: SeriesResource[]; movies: MovieResource[] }> {
-  const kind = ctx.config.arrs.find((a) => a.name === name)?.kind;
+  const kind = instanceKind(ctx, name);
   const series = kind === 'radarr' ? [] : await client.listSeries();
   const movies = kind === 'sonarr' ? [] : await client.listMovies();
   return { series, movies };
@@ -148,13 +156,25 @@ async function gc(ctx: AppContext, seriesByInstance: Map<string, SeriesResource[
     // would check it against `fetchInstanceResources`'s always-empty series list for a
     // radarr instance and mass-delete it as "orphaned" — skip radarr outright rather than
     // relying on that emptiness being the right answer.
-    if (ctx.config.arrs.find((a) => a.name === name)?.kind === 'radarr') continue;
+    if (instanceKind(ctx, name) === 'radarr') continue;
 
     const client = ctx.clients.get(name);
     const series = seriesByInstance.get(name);
     if (!client || !series) continue;
 
-    await gcInstance(ctx, managedObjects, name, client, series, tagRows);
+    try {
+      await gcInstance(ctx, managedObjects, name, client, series, tagRows);
+    } catch (err) {
+      // A failure fetching this instance's live tags/profiles (network blip, arr down)
+      // must not stop GC for every instance after it in this `Map` — each instance's GC is
+      // independent, same as `reconcile()`'s own per-instance isolation above.
+      ctx.events.append({
+        kind: 'reconcile.gc-failed',
+        level: 'warn',
+        message: `GC failed for "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        data: { instance: name },
+      });
+    }
   }
 }
 
@@ -213,6 +233,15 @@ async function gcTagRow(
   const profileTagIds = liveProfile?.tags ?? [tagRow.external_id];
   if (series.some((s) => s.tags.some((t) => profileTagIds.includes(t)))) return; // profile still serves another series
 
+  let profileDeleted = false;
+  // Set when the profile is skipped for not being warrden-owned: Sonarr cascades a tag
+  // deletion into stripping that tag from every entity referencing it, including this
+  // profile — a release profile left with an empty `tags` list matches *every* series, so
+  // deleting the tag out from under a user's profile would silently make it apply
+  // everywhere. Once this fires, the tag has to survive in the arr too, regardless of what
+  // its own label says.
+  let skipTagArrDeletion = false;
+
   if (profileRow) {
     if (liveProfile) {
       if (liveProfile.name.startsWith(WARRDEN_PROFILE_PREFIX)) {
@@ -221,14 +250,16 @@ async function gcTagRow(
         // registered id is the same one `liveProfile` was matched on, so it's used here
         // directly rather than asserting `liveProfile.id` (typed optional) non-null.
         await client.deleteReleaseProfile(profileRow.external_id);
+        profileDeleted = true;
       } else {
         // pinReleaseGroup can adopt a *user's* profile by tag membership rather than by
         // name (see its comment on matching by tag). Never delete something we didn't
         // name — drop only our registry's claim on it and say so.
+        skipTagArrDeletion = true;
         ctx.events.append({
           kind: 'reconcile.gc-skip-profile',
           level: 'warn',
-          message: `Skipped deleting non-warrden-named release profile "${liveProfile.name}" (id ${liveProfile.id}) on "${name}" — removed registry entry only`,
+          message: `Skipped deleting non-warrden-named release profile "${liveProfile.name}" (id ${liveProfile.id}) on "${name}" — removed registry entries for the profile and its tag, but left both live in the arr (deleting the tag would cascade into stripping it from this profile too, leaving it with no tags — which Sonarr treats as matching every series)`,
           data: { instance: name, profileId: liveProfile.id, group },
         });
       }
@@ -239,10 +270,12 @@ async function gcTagRow(
     managedObjects.delete(name, 'release_profile', profileRow.external_id);
   }
 
+  let tagDeleted = false;
   const liveTag = liveTags.find((t) => t.id === tagRow.external_id);
-  if (liveTag) {
+  if (liveTag && !skipTagArrDeletion) {
     if (liveTag.label.startsWith(WARRDEN_TAG_PREFIX)) {
       await client.deleteTag(tagRow.external_id);
+      tagDeleted = true;
     } else {
       // Same safety net as the profile above: pinReleaseGroup only ever registers tags it
       // created itself, so this shouldn't happen — but never delete an arr object we didn't
@@ -255,14 +288,18 @@ async function gcTagRow(
       });
     }
   }
-  // liveTag === undefined: already gone from the arr (deleted out-of-band, or a crash
-  // between the arr-side delete and this registry delete on a previous pass) — just clean
-  // up the stale registry row instead of calling deleteTag again and throwing a 404.
+  // Not deleted from the arr here either because it's already gone (out-of-band delete, or
+  // a crash between a previous pass's arr-side delete and this registry delete) or because
+  // `skipTagArrDeletion` vetoed it above — either way the registry row is stale bookkeeping
+  // at this point, dropped regardless.
   managedObjects.delete(name, 'tag', tagRow.external_id);
 
+  const deleted = profileDeleted || tagDeleted;
   ctx.events.append({
     kind: 'reconcile.gc',
-    message: `GC'd orphaned warrden tag/profile for group "${group}" on "${name}"`,
-    data: { instance: name, tagId: tagRow.external_id, group },
+    message: deleted
+      ? `GC'd orphaned warrden tag/profile for group "${group}" on "${name}"`
+      : `Cleaned up stale managed_objects registry entries for group "${group}" on "${name}" — nothing live was actually deleted (already gone, or protected by a safety net)`,
+    data: { instance: name, tagId: tagRow.external_id, group, deleted, profileDeleted, tagDeleted },
   });
 }

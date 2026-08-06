@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { freshDb } from './helpers.js';
 
@@ -15,12 +15,29 @@ describe('ManagedObjects', () => {
     expect(objs.list({ arrInstance: 'sonarr', kind: 'tag' })[0]).toMatchObject({ data: { group: 'Group' } });
   });
 
-  it('insert is a no-op for an existing (arrInstance, kind, externalId) triple', () => {
+  it('re-registering an existing (arrInstance, kind, externalId) triple does not create a duplicate row', () => {
     const objs = new ManagedObjects(freshDb());
     objs.insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 1, name: 'Warrden' });
     objs.insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 1, name: 'Warrden' });
 
     expect(objs.list()).toHaveLength(1);
+  });
+
+  it('re-registering an existing triple refreshes created_at instead of leaving it stale (GC uses it as a grace-period clock)', () => {
+    vi.useFakeTimers();
+    try {
+      const objs = new ManagedObjects(freshDb());
+      vi.setSystemTime(1_000);
+      objs.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 1, name: 'warrden-group' });
+      expect(objs.list()[0]!.created_at).toBe(1_000);
+
+      vi.setSystemTime(2_000);
+      objs.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 1, name: 'warrden-group' });
+      expect(objs.list()).toHaveLength(1); // still no duplicate row
+      expect(objs.list()[0]!.created_at).toBe(2_000); // but its clock restarted
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('deletes a row by (arrInstance, kind, externalId)', () => {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
 import { reconcile } from '../src/reconcile/reconcile.js';
 import { configWithArrs, makeCtx, fakeArrClient } from './helpers.js';
 
@@ -39,6 +40,8 @@ describe('reconcile', () => {
     expect(client.tags).toHaveLength(0);
     expect(client.profiles).toHaveLength(0);
     expect(ctx.db.prepare('SELECT COUNT(*) n FROM managed_objects').get()).toMatchObject({ n: 0 });
+    const gcEvent = ctx.events.list().find((e) => e.kind === 'reconcile.gc');
+    expect(gcEvent!.data).toMatchObject({ deleted: true, profileDeleted: true, tagDeleted: true });
   });
   it('gc leaves in-use pins alone', async () => {
     const client = fakeArrClient({ series: [] });
@@ -102,7 +105,7 @@ describe('reconcile', () => {
     expect(ctx.db.prepare('SELECT COUNT(*) n FROM managed_objects').get()).toMatchObject({ n: 2 });
   });
 
-  it('gc never deletes a profile whose live name is not warrden-owned — drops the registry row only, with a warn event', async () => {
+  it('gc never deletes a profile whose live name is not warrden-owned, and leaves its tag alone too (deleting it would cascade into the profile)', async () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the tag looks orphaned
     const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
     const tag = client.pushTag('warrden-adopted');
@@ -118,11 +121,21 @@ describe('reconcile', () => {
 
     expect(client.profiles).toHaveLength(1); // the user's profile survives in the arr
     expect(client.profiles[0]!.name).toBe('My Custom Profile');
-    expect(client.tags).toHaveLength(0); // the warrden-owned tag itself is still safe to remove
+    // The tag also survives — even though it *is* warrden-owned and would otherwise be
+    // fair game — because Sonarr cascades a tag delete into stripping it from every
+    // entity that references it, including this profile, which would leave the profile
+    // with an empty tags list (matching every series in Sonarr) rather than none.
+    expect(client.tags).toHaveLength(1);
+    expect(client.tags[0]!.label).toBe('warrden-adopted');
     expect(ctx.db.prepare(`SELECT COUNT(*) n FROM managed_objects`).get()).toMatchObject({ n: 0 }); // both registry claims dropped
     const skipEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.gc-skip-profile');
     expect(skipEvents).toHaveLength(1);
     expect(skipEvents[0]!.level).toBe('warn');
+    // No tag-specific skip event fires here — the profile-skip event already covers why,
+    // and the tag was never even considered for its own label check.
+    expect(ctx.events.list().some((e) => e.kind === 'reconcile.gc-skip-tag')).toBe(false);
+    const gcEvent = ctx.events.list().find((e) => e.kind === 'reconcile.gc');
+    expect(gcEvent!.data).toMatchObject({ deleted: false, profileDeleted: false, tagDeleted: false });
   });
 
   it('gc never deletes a tag from the arr whose live label is not warrden-owned — drops the registry row only, with a warn event', async () => {
@@ -160,6 +173,97 @@ describe('reconcile', () => {
 
     // Without the guard, an always-empty radarr series snapshot would make this look
     // orphaned and delete it — the guard means it's never even considered.
+    expect(client.tags).toHaveLength(1);
+    expect(client.profiles).toHaveLength(1);
+    expect(ctx.db.prepare('SELECT COUNT(*) n FROM managed_objects').get()).toMatchObject({ n: 2 });
+  });
+
+  it('one instance failing during gc does not stop gc for other instances, and reconcile() still resolves', async () => {
+    const created = wellPastGrace();
+
+    const brokenClient = fakeArrClient({ series: [series(1)] });
+    brokenClient.listReleaseProfiles = async () => {
+      throw new Error('sonarr is down');
+    };
+    const brokenTag = brokenClient.pushTag('warrden-brokengroup');
+    const brokenProf = brokenClient.pushProfile({
+      name: 'warrden: [BrokenGroup]',
+      enabled: true,
+      required: ['BrokenGroup'],
+      ignored: [],
+      tags: [brokenTag.id],
+      indexerId: 0,
+    });
+
+    const healthyClient = fakeArrClient({ series: [series(2)] });
+    const healthyTag = healthyClient.pushTag('warrden-healthygroup');
+    const healthyProf = healthyClient.pushProfile({
+      name: 'warrden: [HealthyGroup]',
+      enabled: true,
+      required: ['HealthyGroup'],
+      ignored: [],
+      tags: [healthyTag.id],
+      indexerId: 0,
+    });
+
+    const ctx = makeCtx({
+      clients: new Map([
+        ['broken', brokenClient],
+        ['healthy', healthyClient],
+      ]),
+    });
+    ctx.db.prepare(`INSERT INTO managed_objects (arr_instance, kind, external_id, name, data, created_at) VALUES
+      ('broken','tag',?,?,'{"group":"BrokenGroup"}',?), ('broken','release_profile',?,?,'{"group":"BrokenGroup"}',?),
+      ('healthy','tag',?,?,'{"group":"HealthyGroup"}',?), ('healthy','release_profile',?,?,'{"group":"HealthyGroup"}',?)`)
+      .run(
+        brokenTag.id,
+        brokenTag.label,
+        created,
+        brokenProf.id,
+        brokenProf.name,
+        created,
+        healthyTag.id,
+        healthyTag.label,
+        created,
+        healthyProf.id,
+        healthyProf.name,
+        created,
+      );
+
+    await expect(reconcile(ctx)).resolves.toBeUndefined();
+
+    const failedEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.gc-failed');
+    expect(failedEvents).toHaveLength(1);
+    expect(failedEvents[0]).toMatchObject({ level: 'warn', data: { instance: 'broken' } });
+    expect(failedEvents[0]!.message).toContain('sonarr is down');
+
+    // The broken instance's registry rows are untouched — GC never got past the fetch.
+    expect(brokenClient.tags).toHaveLength(1);
+    expect(brokenClient.profiles).toHaveLength(1);
+
+    // The healthy instance's real orphan was still GC'd normally.
+    expect(healthyClient.tags).toHaveLength(0);
+    expect(healthyClient.profiles).toHaveLength(0);
+  });
+
+  it('re-pinning an old registry row refreshes created_at, so a stale-snapshot race does not gc it out from under a fresh pin', async () => {
+    const client = fakeArrClient({ series: [{ id: 42, title: 'F', year: 2024, tvdbId: 1, tags: [], added: '' }] });
+    const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+
+    await pinReleaseGroup({ client, db: ctx.db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
+    // Backdate as if this pin were 3 days old — well past grace, and normally gc-eligible.
+    ctx.db.prepare(`UPDATE managed_objects SET created_at = ?`).run(Date.now() - 3 * 24 * 60 * 60_000);
+
+    // Re-pin: pinReleaseGroup re-attaches the tag to the series *and* re-registers it,
+    // refreshing created_at via ManagedObjects' upsert. Strip the tag back off the series
+    // afterward to simulate reconcile's series snapshot having been taken a moment before
+    // this concurrent re-pin's attach actually landed — the exact TOCTOU race the grace
+    // period exists to guard against.
+    await pinReleaseGroup({ client, db: ctx.db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
+    client.series[0]!.tags = [];
+
+    await reconcile(ctx);
+
     expect(client.tags).toHaveLength(1);
     expect(client.profiles).toHaveLength(1);
     expect(ctx.db.prepare('SELECT COUNT(*) n FROM managed_objects').get()).toMatchObject({ n: 2 });
