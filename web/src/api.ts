@@ -158,3 +158,40 @@ export function postAcquire(input: {
   });
 }
 
+export type AttentionStatus = 'open' | 'dismissed' | 'resolved';
+
+export interface AttentionItem {
+  id: number;
+  ts: number;
+  kind: string;
+  message: string;
+  job_id: number | null;
+  data: Record<string, unknown>;
+  status: AttentionStatus;
+  resolved_at: number | null;
+}
+
+export function fetchAttention(status: string): Promise<{ items: AttentionItem[] }> {
+  return fetchJson(`/api/attention?status=${encodeURIComponent(status)}`);
+}
+
+export function dismissAttention(id: number): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/attention/${id}/dismiss`, { method: 'POST' });
+}
+
+export function retryAttention(id: number): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/attention/${id}/retry`, { method: 'POST' });
+}
+
+export function repickAttention(id: number, hint?: string): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/attention/${id}/repick`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hint }),
+  });
+}
+
+export function acceptAttention(id: number): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/attention/${id}/accept`, { method: 'POST' });
+}
+

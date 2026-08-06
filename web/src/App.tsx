@@ -3,6 +3,7 @@ import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { Toaster } from '@/components/ui/sonner';
 import Activity from '@/pages/Activity';
+import Attention from '@/pages/Attention';
 import ConfigPage from '@/pages/Config';
 import JobDetail from '@/pages/JobDetail';
 import NotFound from '@/pages/NotFound';
@@ -19,6 +20,7 @@ export default function App() {
           <main className="p-6">
             <Routes>
               <Route path="/" element={<Activity />} />
+              <Route path="/attention" element={<Attention />} />
               <Route path="/jobs/:id" element={<JobDetail />} />
               <Route path="/config" element={<ConfigPage />} />
               <Route path="*" element={<NotFound />} />
