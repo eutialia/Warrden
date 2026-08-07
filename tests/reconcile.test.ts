@@ -10,13 +10,12 @@ import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, se
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
 const movie = (id: number): MovieResource => ({ id, title: `M${id}`, year: 2024, tmdbId: id, added: '', hasFile: true });
 
-/** A `downloadFolderImported` history record fixture for `ingestBackstop` tests — `data.downloadId`
- * defaults to a value derived from `id` so tests that don't care about it don't have to spell it out. */
+/** A `downloadFolderImported` history record fixture for `ingestBackstop` tests. */
 const historyRecord = (overrides: Partial<HistoryRecord> & { id: number }): HistoryRecord => ({
   eventType: 'downloadFolderImported',
   date: new Date().toISOString(),
   sourceTitle: 'Test Release',
-  data: { downloadId: `dl-${overrides.id}` },
+  data: {},
   ...overrides,
 });
 
@@ -408,9 +407,9 @@ describe('reconcile', () => {
         await reconcile(ctx); // bootstrap: cursor -> 3
 
         client.listRecentImports = async () => [
-          historyRecord({ id: 6, [field]: 2, data: { downloadId: 'dl-6' } }), // newest-first, per the real /history contract
-          historyRecord({ id: 4, [field]: 1, data: { downloadId: 'dl-4' } }),
-          historyRecord({ id: 3, [field]: 1, data: { downloadId: 'dl-3' } }), // at old cursor — ignored
+          historyRecord({ id: 6, [field]: 2 }), // newest-first, per the real /history contract
+          historyRecord({ id: 4, [field]: 1 }),
+          historyRecord({ id: 3, [field]: 1 }), // at old cursor — ignored
         ];
         await reconcile(ctx);
 
@@ -421,7 +420,7 @@ describe('reconcile', () => {
         expect(target1Job).toMatchObject({
           arr_instance: arrName,
           target_kind: kind,
-          payload: { source: 'reconcile', downloadId: 'dl-4' },
+          payload: { source: 'reconcile' },
         });
 
         expect(new SyncState(ctx.db).read(`history:${arrName}`)).toBe(6);
@@ -431,23 +430,21 @@ describe('reconcile', () => {
       },
     );
 
-    it('multiple new records for the same target collapse into a single enqueue, keeping the newest (first-in-page) downloadId', async () => {
+    it('multiple new records for the same target collapse into a single enqueue', async () => {
       const client = fakeArrClient({ series: [series(1)] });
       const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
       client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
       await reconcile(ctx); // bootstrap: cursor -> 1
 
-      // Real /history is newest-first — the newest (highest id) record for a target is the
-      // first one seen for its key, so it's the one whose downloadId reaches the enqueue.
       client.listRecentImports = async () => [
-        historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }),
-        historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } }),
+        historyRecord({ id: 3, seriesId: 1 }),
+        historyRecord({ id: 2, seriesId: 1 }),
       ];
       await reconcile(ctx);
 
       const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
       expect(jobs).toHaveLength(1);
-      expect(jobs[0]).toMatchObject({ target_kind: 'series', target_id: 1, payload: { downloadId: 'dl-3' } });
+      expect(jobs[0]).toMatchObject({ target_kind: 'series', target_id: 1, payload: { source: 'reconcile' } });
     });
 
     it('a record with neither seriesId nor movieId is skipped', async () => {
@@ -485,7 +482,7 @@ describe('reconcile', () => {
 
       // Every id the arr reports now is lower than the tracked cursor — impossible under
       // normal operation (ids only grow), the signature of a rebuilt/restored history table.
-      client.listRecentImports = async () => [historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } })];
+      client.listRecentImports = async () => [historyRecord({ id: 2, seriesId: 1 })];
       await reconcile(ctx);
 
       expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
@@ -499,13 +496,13 @@ describe('reconcile', () => {
       // Next pass resumes normally from the reset cursor: the id at it is ignored, a genuinely
       // new one above it enqueues.
       client.listRecentImports = async () => [
-        historyRecord({ id: 3, seriesId: 1, data: { downloadId: 'dl-3' } }),
-        historyRecord({ id: 2, seriesId: 1, data: { downloadId: 'dl-2' } }),
+        historyRecord({ id: 3, seriesId: 1 }),
+        historyRecord({ id: 2, seriesId: 1 }),
       ];
       await reconcile(ctx);
       const jobs = ctx.queue.list().filter((j) => j.pipeline === 'ingest');
       expect(jobs).toHaveLength(1);
-      expect(jobs[0]).toMatchObject({ target_id: 1, payload: { downloadId: 'dl-3' } });
+      expect(jobs[0]).toMatchObject({ target_id: 1, payload: { source: 'reconcile' } });
     });
   });
 });

@@ -7,6 +7,9 @@ const seriesAdd = { eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren', 
 const movieAdded = { eventType: 'MovieAdded', movie: { id: 7, title: 'Perfect Blue', year: 1997, tmdbId: 573 } };
 const seriesDownload = { eventType: 'Download', series: { id: 42, title: 'Frieren' }, isUpgrade: false, downloadId: 'abc' };
 const movieDownload = { eventType: 'Download', movie: { id: 7, title: 'Perfect Blue' }, isUpgrade: true, downloadId: 'def' };
+// `downloadId` above is on the INCOMING payload, mimicking a real Sonarr/Radarr webhook
+// body — it's parsed and then deliberately dropped: nothing reads it (see handleWebhook's
+// own comment), so it must never end up on the job payload down below.
 
 function knownArrsCtx() {
   return makeCtx({
@@ -30,15 +33,17 @@ describe('handleWebhook', () => {
   });
 
   it.each([
-    { name: 'sonarr Download (new)', instance: 'sonarr', payload: seriesDownload, targetKind: 'series', targetId: 42, isUpgrade: false, downloadId: 'abc' },
-    { name: 'radarr Download (upgrade)', instance: 'radarr', payload: movieDownload, targetKind: 'movie', targetId: 7, isUpgrade: true, downloadId: 'def' },
-  ])('$name enqueues ingest', ({ instance, payload, targetKind, targetId, isUpgrade, downloadId }) => {
+    { name: 'sonarr Download (new)', instance: 'sonarr', payload: seriesDownload, targetKind: 'series', targetId: 42, isUpgrade: false },
+    { name: 'radarr Download (upgrade)', instance: 'radarr', payload: movieDownload, targetKind: 'movie', targetId: 7, isUpgrade: true },
+  ])('$name enqueues ingest', ({ instance, payload, targetKind, targetId, isUpgrade }) => {
     const ctx = knownArrsCtx();
     const target = 'series' in payload ? payload.series : payload.movie;
     expect(handleWebhook(ctx, instance, payload).handled).toBe(true);
     const job = ctx.queue.claim()!;
     expect(job).toMatchObject({ pipeline: 'ingest', target_kind: targetKind, target_id: targetId, arr_instance: instance });
-    expect(job.payload).toEqual({ title: target.title, downloadId });
+    // No `downloadId` — the payload above carries one (mimicking a real webhook body), but
+    // it's never read, so it must not survive onto the job payload.
+    expect(job.payload).toEqual({ title: target.title });
     const events = ctx.events.list();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: 'webhook.received', job_id: job.id });
@@ -49,16 +54,6 @@ describe('handleWebhook', () => {
     const ctx = knownArrsCtx();
     expect(handleWebhook(ctx, 'sonarr', { eventType: 'Download', isUpgrade: false })).toEqual({ handled: false, reason: 'ignored' });
     expect(ctx.queue.claim()).toBeNull();
-  });
-
-  it('still enqueues a Download event with downloadId absent', () => {
-    const ctx = knownArrsCtx();
-    const { downloadId: _drop, ...withoutDownloadId } = seriesDownload;
-    expect(handleWebhook(ctx, 'sonarr', withoutDownloadId).handled).toBe(true);
-    const job = ctx.queue.claim()!;
-    // `downloadId: undefined` is dropped by JSON serialization on the way into/out of
-    // the jobs table, so the claimed payload simply omits the key.
-    expect(job.payload).toEqual({ title: 'Frieren' });
   });
 
   it('acknowledges Test events without enqueueing', () => {

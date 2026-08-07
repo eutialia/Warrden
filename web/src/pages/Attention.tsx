@@ -104,8 +104,9 @@ export default function Attention() {
   refetchRef.current = refetch;
 
   useEffect(() => {
-    setItems([]); // don't show the previous tab's rows under the new tab's spinner
+    setItems([]); // don't show the previous tab's rows while the new tab is loading
     setLoading(true);
+    setError(null); // a previous tab's stale error must not bleed into the new tab
     setRepickOpenId(null);
     setRepickHint('');
     refetch();
@@ -176,7 +177,7 @@ export default function Attention() {
       <CardContent className="space-y-3">
         {disconnected && <p className="text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
         {error && <p className="text-sm text-destructive">{error}</p>}
-        {items.length === 0 && !loading && <p className="text-center text-muted-foreground">{EMPTY_MESSAGE[status]}</p>}
+        {items.length === 0 && !loading && !error && <p className="text-center text-muted-foreground">{EMPTY_MESSAGE[status]}</p>}
         {items.map((item) => {
           const pending = pendingIds.has(item.id);
           const canRetry = item.job_id !== null;

@@ -240,7 +240,9 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
       targetKind: target.kind,
       targetId: target.id,
       arrInstance: name,
-      payload: { source: RECONCILE_SOURCE, downloadId: r.data.downloadId },
+      // No `downloadId` here — nothing reads it; ingest derives its own download ids
+      // straight from the arr's live queue (`assessQueue`), not from the payload.
+      payload: { source: RECONCILE_SOURCE },
     });
     enqueuedTargets.push(key);
   }

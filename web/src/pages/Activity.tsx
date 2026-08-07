@@ -54,7 +54,7 @@ export default function Activity() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {jobs.length === 0 && !loading && (
+            {jobs.length === 0 && !loading && !error && (
               <TableRow>
                 <TableCell colSpan={4} className="text-center text-muted-foreground">
                   No jobs yet.

@@ -163,17 +163,6 @@ const AcceptDataSchema = z.object({
   files: z.array(AcceptFileSchema).min(1),
 });
 
-// Guards `POST /api/attention/:id/accept` against two overlapping requests for the SAME
-// item both passing the open-status check before either has resolved it — without this,
-// both would go on to call `executeManualImport`, importing the same files twice. Keyed by
-// attention item id (not request/connection identity) and module-level rather than
-// per-`createApp()` instance: the dashboard only ever runs one server process against one
-// `AttentionItems` table, so a single shared guard is simpler than threading one through
-// every `createApp()` caller, and an id is always removed in the handler's `finally` the
-// moment its own request finishes (success OR failure), so it never outlives the request
-// that added it.
-const inFlightAccepts = new Set<number>();
-
 /**
  * Reads the *current* config directly off `ctx` rather than a value captured once at
  * `createApp` time — every route below shares this so a `PUT /api/config` (which
@@ -349,6 +338,16 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     const clients = ctx.clients;
     const events = ctx.events;
     const attentionItems = new AttentionItems(db);
+    // Guards `POST /api/attention/:id/accept` against two overlapping requests for the SAME
+    // item both passing the open-status check before either has resolved it — without this,
+    // both would go on to call `executeManualImport`, importing the same files twice. Keyed
+    // by attention item id (not request/connection identity) and scoped to this `createApp()`
+    // call rather than the module: each app instance owns its own `AttentionItems` table
+    // (tests build many independent ones in the same process), so a module-level Set would
+    // leak state across them. An id is always removed in the handler's `finally` the moment
+    // its own request finishes (success OR failure), so it never outlives the request that
+    // added it.
+    const inFlightAccepts = new Set<number>();
 
     app.get('/api/attention', (c) => {
       const raw = c.req.query('status');

@@ -99,9 +99,10 @@ export default function ManagedObjects() {
         {disconnected && <p className="text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
         {/* A fetch failure keeps whatever rows are already on screen (stale, but still
             useful) rather than blanking the table out from under the user — same
-            convention as Activity/Attention. Unlike those two, there's no SSE burst about
-            to retry this on its own if the very first load failed, so a Retry button is
-            the only way back short of a page reload. */}
+            convention as Activity/Attention. Registry rows only change on startup
+            registration and the occasional GC pass, so a page left open after a failed
+            load could sit stale for a long time before any SSE event happens to trigger a
+            fresh refetch — a Retry button is the reliable way back, not a reload. */}
         {error && (
           <div className="flex items-center gap-2">
             <p className="text-sm text-destructive">{error}</p>

@@ -28,7 +28,6 @@ const DownloadSchema = z.object({
   series: z.object({ id: z.number(), title: z.string() }).optional(),
   movie: z.object({ id: z.number(), title: z.string() }).optional(),
   isUpgrade: z.boolean().optional(),
-  downloadId: z.string().optional(),
 });
 
 const WebhookSchema = z.discriminatedUnion('eventType', [SeriesAddSchema, MovieAddedSchema, DownloadSchema, TestSchema]);
@@ -77,7 +76,6 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
   let pipeline: PipelineName;
   let targetKind: TargetKind;
   let target: { id: number; title: string } | undefined;
-  let jobPayload: object;
   let extraData: Record<string, unknown> = {};
 
   if (event.eventType === 'Download') {
@@ -94,14 +92,15 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
   if (!target) {
     return { handled: false, reason: 'ignored' };
   }
-  jobPayload = event.eventType === 'Download' ? { title: target.title, downloadId: event.downloadId } : { title: target.title };
-
+  // No `downloadId` here (even for a Download event): nothing downstream reads it — ingest
+  // derives its own download ids straight from the arr's live queue (`assessQueue`), not
+  // from whatever the webhook happened to carry when the job was first enqueued.
   const result = ctx.queue.enqueue({
     pipeline,
     targetKind,
     targetId: target.id,
     arrInstance: instanceName,
-    payload: jobPayload,
+    payload: { title: target.title },
   });
   ctx.events.append({
     kind: 'webhook.received',
