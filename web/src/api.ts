@@ -128,6 +128,14 @@ export class ApiError extends Error {
   }
 }
 
+/** A `fetchJson` failure's human-readable message — the `ApiError`'s own message when it
+ * is one, otherwise `fallback` for anything else (a network failure, a JS error thrown
+ * before the request even went out, ...). Every page's error/toast handling funnels
+ * through this instead of repeating `err instanceof ApiError ? err.message : fallback`. */
+export function apiErrorMessage(err: unknown, fallback: string): string {
+  return err instanceof ApiError ? err.message : fallback;
+}
+
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   if (!res.ok) {

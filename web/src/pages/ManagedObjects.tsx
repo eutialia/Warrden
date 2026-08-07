@@ -1,22 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  ApiError,
+  apiErrorMessage,
   deleteManagedObject,
   fetchManagedObjects,
   type ManagedObject,
   type ManagedObjectKind,
 } from '@/api';
+import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-
-// Same reasoning as Activity.tsx/Attention.tsx: registration (startup, tag/release-profile
-// pinning) and GC (reconcile) can each touch several rows in quick succession — coalesce to
-// one refetch per burst instead of one round trip per event.
-const REFETCH_DEBOUNCE_MS = 500;
 
 const KIND_LABEL: Record<ManagedObjectKind, string> = {
   notification: 'Notification',
@@ -43,12 +40,7 @@ export default function ManagedObjects() {
   // "Confirm?" button actually deletes — nothing here uses the browser's own `confirm()`.
   const [confirmId, setConfirmId] = useState<number | null>(null);
 
-  // `useSseRefetch` needs `refetch`'s identity to call it, but `refetch` itself needs
-  // `beginFetch` from `useSseRefetch`'s return — a genuine circular reference broken via
-  // this ref indirection, same as Attention.tsx.
-  const refetchRef = useRef<() => void>(() => {});
-  const { disconnected, beginFetch } = useSseRefetch(() => refetchRef.current(), REFETCH_DEBOUNCE_MS);
-
+  const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
     const isStale = beginFetch();
     fetchManagedObjects()
@@ -59,14 +51,14 @@ export default function ManagedObjects() {
       })
       .catch((err: unknown) => {
         if (isStale()) return;
-        setError(err instanceof ApiError ? err.message : 'failed to load managed objects');
+        setError(apiErrorMessage(err, 'failed to load managed objects'));
       })
       .finally(() => {
         if (isStale()) return;
         setLoading(false);
       });
   }, [beginFetch]);
-  refetchRef.current = refetch;
+  const { disconnected, reconnect } = useSseRefetch(refetch);
 
   useEffect(refetch, [refetch]);
 
@@ -78,7 +70,7 @@ export default function ManagedObjects() {
       setConfirmId(null);
       refetch();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'failed to delete');
+      toast.error(apiErrorMessage(err, 'failed to delete'));
     } finally {
       setPendingIds((prev) => {
         const next = new Set(prev);
@@ -96,21 +88,14 @@ export default function ManagedObjects() {
         <CardTitle>Managed objects</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {disconnected && <p className="text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
+        {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
         {/* A fetch failure keeps whatever rows are already on screen (stale, but still
             useful) rather than blanking the table out from under the user — same
             convention as Activity/Attention. Registry rows only change on startup
             registration and the occasional GC pass, so a page left open after a failed
             load could sit stale for a long time before any SSE event happens to trigger a
             fresh refetch — a Retry button is the reliable way back, not a reload. */}
-        {error && (
-          <div className="flex items-center gap-2">
-            <p className="text-sm text-destructive">{error}</p>
-            <Button variant="outline" size="sm" onClick={refetch}>
-              Retry
-            </Button>
-          </div>
-        )}
+        {error && <StatusNotice message={error} onRetry={refetch} />}
         {loading && objects.length === 0 && <p className="text-muted-foreground">Loading…</p>}
         {!loading && groups.length === 0 && !error && (
           <p className="text-center text-muted-foreground">No managed objects yet.</p>

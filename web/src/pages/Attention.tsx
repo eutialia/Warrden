@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   acceptAttention,
-  ApiError,
+  apiErrorMessage,
   dismissAttention,
   fetchAttention,
   repickAttention,
@@ -11,16 +11,13 @@ import {
   type AttentionItem,
   type AttentionStatus,
 } from '@/api';
+import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-
-// Same reasoning as Activity.tsx: SSE fires per-event, and a busy pipeline can raise
-// several attention items (or resolve several) in quick succession — coalesce to one
-// refetch per burst instead of one round trip per event.
-const REFETCH_DEBOUNCE_MS = 500;
 
 const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
   { value: 'open', label: 'Open' },
@@ -75,15 +72,9 @@ export default function Attention() {
   const statusRef = useRef(status);
   statusRef.current = status;
 
-  // `useSseRefetch` needs `refetch`'s identity to call it, but `refetch` itself needs
-  // `beginFetch` from `useSseRefetch`'s return — a genuine circular reference broken via
-  // this ref indirection (`useSseRefetch` doesn't need its `onEvent` argument to be stable;
-  // it's read through its own ref internally, same idea as this one).
-  const refetchRef = useRef<() => void>(() => {});
   // Guards against any overlapping request clobbering an earlier one — an SSE burst, a tab
   // switch, a post-action refetch — not just an unmounted effect.
-  const { disconnected, beginFetch } = useSseRefetch(() => refetchRef.current(), REFETCH_DEBOUNCE_MS);
-
+  const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
     const isStale = beginFetch();
     fetchAttention(statusRef.current)
@@ -94,14 +85,14 @@ export default function Attention() {
       })
       .catch((err: unknown) => {
         if (isStale()) return;
-        setError(err instanceof ApiError ? err.message : 'failed to load attention items');
+        setError(apiErrorMessage(err, 'failed to load attention items'));
       })
       .finally(() => {
         if (isStale()) return;
         setLoading(false);
       });
   }, [beginFetch]);
-  refetchRef.current = refetch;
+  const { disconnected, reconnect } = useSseRefetch(refetch);
 
   useEffect(() => {
     setItems([]); // don't show the previous tab's rows while the new tab is loading
@@ -121,7 +112,7 @@ export default function Attention() {
         refetch();
         return true;
       } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : failMsg);
+        toast.error(apiErrorMessage(err, failMsg));
         return false;
       } finally {
         setPendingIds((prev) => {
@@ -175,8 +166,8 @@ export default function Attention() {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {disconnected && <p className="text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
+        {error && <StatusNotice message={error} onRetry={refetch} />}
         {items.length === 0 && !loading && !error && <p className="text-center text-muted-foreground">{EMPTY_MESSAGE[status]}</p>}
         {items.map((item) => {
           const pending = pendingIds.has(item.id);

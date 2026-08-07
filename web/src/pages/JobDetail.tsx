@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { ApiError, fetchJob, postAcquire, type JobDetailResponse, type PlacedFileKind } from '@/api';
+import { apiErrorMessage, fetchJob, postAcquire, type JobDetailResponse, type PlacedFileKind } from '@/api';
 import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
+import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -32,7 +33,7 @@ export default function JobDetail() {
         })
         .catch((err: unknown) => {
           if (opts?.isStale()) return;
-          setError(err instanceof ApiError ? err.message : 'failed to load job');
+          setError(apiErrorMessage(err, 'failed to load job'));
         });
     },
     [id],
@@ -56,7 +57,7 @@ export default function JobDetail() {
   // pulled into the shared hook: the per-`id` guard above is what actually matters, and a
   // late-resolving SSE-triggered load for the *same* `id` is harmless to apply. `enabled:
   // Boolean(id)` — no point opening a connection whose `onEvent` (`load`) would just no-op.
-  useSseRefetch(() => load(), 0, Boolean(id));
+  const { disconnected, reconnect } = useSseRefetch(() => load(), 0, Boolean(id));
 
   async function handleRepick(): Promise<void> {
     if (!data) return;
@@ -69,7 +70,7 @@ export default function JobDetail() {
       });
       toast.success('Re-pick queued');
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'failed to queue re-pick');
+      toast.error(apiErrorMessage(err, 'failed to queue re-pick'));
     } finally {
       setRepicking(false);
     }
@@ -79,7 +80,7 @@ export default function JobDetail() {
     return (
       <div className="space-y-4">
         <BackLink />
-        <p className="text-destructive">{error}</p>
+        <StatusNotice message={error} onRetry={() => load()} />
       </div>
     );
   }
@@ -99,6 +100,7 @@ export default function JobDetail() {
   return (
     <div className="space-y-4">
       <BackLink />
+      {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
 
       <Card>
         <CardHeader>

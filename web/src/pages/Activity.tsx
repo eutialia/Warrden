@@ -1,18 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ApiError, fetchJobs, type Job } from '@/api';
+import { apiErrorMessage, fetchJobs, type Job } from '@/api';
 import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
+import { StatusNotice } from '@/components/StatusNotice';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 
 const JOBS_LIMIT = 50;
-// SSE fires one event per job-queue/acquire-record write, and a busy pipeline (a
-// multi-season series job, several webhooks landing together) can write several in quick
-// succession — without coalescing, each one would independently trigger its own
-// `fetchJobs` round trip. Trailing-debounced (via `useSseRefetch`) to one refetch per
-// burst instead.
-const REFETCH_DEBOUNCE_MS = 500;
 
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -26,13 +21,15 @@ export default function Activity() {
         setJobs(j);
         setError(null);
       })
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : 'failed to load jobs'))
+      .catch((err: unknown) => setError(apiErrorMessage(err, 'failed to load jobs')))
       .finally(() => setLoading(false));
   }, []);
 
   // Any event (job update, acquire result, etc.) can mean the job list changed, so just
   // refetch wholesale on every message rather than trying to reconcile individual rows.
-  const { disconnected } = useSseRefetch(refetch, REFETCH_DEBOUNCE_MS);
+  // Debounce left at useSseRefetch's own default (a busy pipeline can write several
+  // job-queue/acquire-record rows in quick succession; coalesce to one refetch per burst).
+  const { disconnected, reconnect } = useSseRefetch(refetch);
 
   useEffect(refetch, [refetch]);
 
@@ -41,9 +38,9 @@ export default function Activity() {
       <CardHeader>
         <CardTitle>Activity</CardTitle>
       </CardHeader>
-      <CardContent>
-        {disconnected && <p className="mb-3 text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
-        {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
+      <CardContent className="space-y-3">
+        {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
+        {error && <StatusNotice message={error} onRetry={refetch} />}
         <Table>
           <TableHeader>
             <TableRow>

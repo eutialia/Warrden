@@ -6,15 +6,14 @@ export interface SseRefetch {
    * while it was down). Render a "reconnecting…" hint off this, or ignore it entirely. */
   disconnected: boolean;
   /**
-   * Ready-made guard for a page's own async refetch, for pages that don't already have
-   * one: call it right before starting the fetch to get back an `isStale()` check, then
-   * skip applying the result (`setState`, etc.) if `isStale()` is true by the time it
-   * resolves. Each call bumps a shared generation counter, so it protects against ANY
-   * overlapping trigger clobbering an earlier one — an SSE burst, a manual retry, a tab
-   * switch — not just SSE traffic specifically, the same way Attention's and Managed
-   * objects' own `requestIdRef` did before this was pulled out from under them.
+   * Tears down the current `EventSource` (if any) and opens a fresh one. Needed because a
+   * `readyState === CLOSED` error (the browser gave up retrying on its own — a hard
+   * HTTP-level failure, not a transient drop `EventSource`'s built-in backoff would have
+   * recovered from) leaves `disconnected` stuck `true` forever with nothing left to bring
+   * the stream back except a brand-new connection. Wire this to a "Retry" button next to
+   * the disconnected banner.
    */
-  beginFetch: () => () => boolean;
+  reconnect: () => void;
 }
 
 /**
@@ -26,8 +25,9 @@ export interface SseRefetch {
  * reconnect to catch up on whatever was missed while it was down.
  *
  * `onEvent` is read through a ref rather than the effect's own dependency array, so the
- * connection is opened once per mount and stays open across re-renders (a new `onEvent`
- * closure — e.g. from a page's own state changing — never tears down and reopens it).
+ * connection is opened once per mount (or `reconnect()` call) and stays open across
+ * re-renders (a new `onEvent` closure — e.g. from a page's own state changing — never
+ * tears down and reopens it).
  *
  * `debounceMs: 0` skips debouncing entirely: every message calls `onEvent` immediately.
  * Use this for a page watching one specific thing (e.g. a single job's detail) where SSE
@@ -42,11 +42,22 @@ export function useSseRefetch(onEvent: () => void, debounceMs = 500, enabled = t
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const generationRef = useRef(0);
+  // Whether this hook has ever successfully opened a connection before — the very first
+  // open of the component's lifetime has nothing to "catch up" on yet (whatever the
+  // page's own initial fetch already loaded covers it); only a RECONNECT (a drop followed
+  // by the stream coming back, or a manual reconnect()) needs the catch-up refetch.
+  const wasConnectedRef = useRef(false);
+  // Bumped by reconnect() to force the effect below to tear down the old EventSource and
+  // open a brand-new one — a plain state flip wouldn't otherwise change anything the
+  // effect's own dependency array reads.
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
 
-  const beginFetch = useCallback(() => {
-    const generation = ++generationRef.current;
-    return () => generationRef.current !== generation;
+  // Deliberately does NOT touch `wasConnectedRef` — a manual reconnect is still a
+  // *reconnect* (there was a prior connection, now broken), so its first `onopen` must
+  // still fire the catch-up call, same as an automatic browser-retried reconnect would.
+  // Only the very first connection of the hook's lifetime skips it.
+  const reconnect = useCallback(() => {
+    setConnectionAttempt((n) => n + 1);
   }, []);
 
   useEffect(() => {
@@ -69,14 +80,25 @@ export function useSseRefetch(onEvent: () => void, debounceMs = 500, enabled = t
         debounceRef.current = null;
       }
       setDisconnected(false);
-      onEventRef.current(); // reconnected — catch up on anything missed while the stream was down
+      if (wasConnectedRef.current) {
+        onEventRef.current(); // reconnected — catch up on anything missed while the stream was down
+      }
+      wasConnectedRef.current = true;
     };
-    source.onerror = () => setDisconnected(true);
+    source.onerror = () => {
+      setDisconnected(true);
+      // `readyState === CLOSED` means the browser has already given up retrying this
+      // connection on its own (EventSource's automatic backoff only applies while it's
+      // still `CONNECTING`) — `disconnected` will never clear itself in that case, so
+      // `reconnect()` (a fresh `EventSource`, not a retry of this one) is the only way
+      // back. A transient drop still mid-retry leaves `readyState` at `CONNECTING`, and
+      // its own eventual `onopen` clears `disconnected` normally with no action needed.
+    };
     return () => {
       source.close();
       if (debounceRef.current !== null) clearTimeout(debounceRef.current);
     };
-  }, [debounceMs, enabled]);
+  }, [debounceMs, enabled, connectionAttempt]);
 
-  return { disconnected, beginFetch };
+  return { disconnected, reconnect };
 }
