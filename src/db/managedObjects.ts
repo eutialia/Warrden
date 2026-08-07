@@ -39,7 +39,7 @@ function parseRow(row: ManagedObjectRowRaw): ManagedObjectRow {
  * Typed wrapper over the `managed_objects` table — the registry of every arr-side
  * resource Warrden has created (webhook notifications, `warrden-` tags, `warrden: `
  * release profiles). Registration paths use it to record what they created (or found
- * already existing), and GC (Task 12) uses it to find orphans to clean up. Keeping the
+ * already existing), and GC (`reconcile.ts`'s `gc()`) uses it to find orphans to clean up. Keeping the
  * SQL here means neither side hand-rolls it.
  */
 export class ManagedObjects {
@@ -49,7 +49,7 @@ export class ManagedObjects {
    * Upsert: re-registering an existing (arrInstance, kind, externalId) triple refreshes
    * `created_at` rather than being a no-op — everything else about the row is left as
    * first recorded. `created_at` therefore means "last (re-)registered at," not "first
-   * created at": GC (Task 12) uses it as a grace-period clock, and a re-pin of an existing
+   * created at": GC (`reconcile.ts`'s `gc()`) uses it as a grace-period clock, and a re-pin of an existing
    * tag/profile (`pinReleaseGroup` re-registering on every call, idempotent or not) needs
    * to restart that clock — otherwise a long-lived row re-pinned moments ago could still
    * read as old enough to GC from under it.

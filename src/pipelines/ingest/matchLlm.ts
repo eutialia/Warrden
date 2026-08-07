@@ -72,7 +72,7 @@ export async function matchSidecarsWithLlm(input: {
     return [];
   }
 
-  // An empty episode table (e.g. Task 9's every-episode-is-hasFile:false case) guarantees
+  // An empty episode table (e.g. every episode being hasFile:false) guarantees
   // every file is unmatchable regardless of what the LLM answers — skip the guaranteed-useless
   // paid call and coerce straight to null.
   if (episodes.length === 0) {

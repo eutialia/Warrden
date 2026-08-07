@@ -1,5 +1,5 @@
 import type { ArrApi, MovieResource, ReleaseProfileResource, SeriesResource, TagResource } from '../arr/types.js';
-import type { ArrInstance } from '../config/schema.js';
+import { instanceKind } from '../config/instances.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { SyncState } from '../db/syncState.js';
@@ -46,7 +46,7 @@ export async function reconcile(ctx: AppContext): Promise<void> {
     // BOTH list endpoints, and the one the real arr flavor doesn't implement 404s — taking
     // this whole instance's reconcile+GC down every single pass until a restart rebuilds
     // `ctx.clients`. Skip it outright instead, touching neither `seen` nor GC.
-    if (instanceKind(ctx, name) === undefined) {
+    if (instanceKind(ctx.config, name) === undefined) {
       ctx.events.append({
         kind: 'reconcile.config-drift',
         level: 'warn',
@@ -82,16 +82,6 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   }
 }
 
-/** The configured `kind` for arr instance `name`, or `undefined` if it isn't in
- * `ctx.config.arrs` at all. Not just a theoretical/test-only case: a `PUT /api/config`
- * that renames or drops an arr instance updates `ctx.config` immediately, while
- * `ctx.clients` keeps the old `ArrClient` under its old name until a restart rebuilds it
- * (see the README's config docs) — `reconcile()`'s instance loop above checks this and
- * skips rather than guesses. */
-function instanceKind(ctx: AppContext, name: string): ArrInstance['kind'] | undefined {
-  return ctx.config.arrs.find((a) => a.name === name)?.kind;
-}
-
 /** Fetches the resource list(s) relevant to `name`'s configured kind: only series for a
  * `sonarr` instance, only movies for `radarr`, or both when the kind is unknown — safer
  * than guessing wrong and silently skipping an instance's actual library. Skipping the
@@ -102,7 +92,7 @@ async function fetchInstanceResources(
   name: string,
   client: ArrApi,
 ): Promise<{ series: SeriesResource[]; movies: MovieResource[] }> {
-  const kind = instanceKind(ctx, name);
+  const kind = instanceKind(ctx.config, name);
   const series = kind === 'radarr' ? [] : await client.listSeries();
   const movies = kind === 'sonarr' ? [] : await client.listMovies();
   return { series, movies };
@@ -292,7 +282,7 @@ async function gc(ctx: AppContext, seriesByInstance: Map<string, SeriesResource[
     // would check it against `fetchInstanceResources`'s always-empty series list for a
     // radarr instance and mass-delete it as "orphaned" — skip radarr outright rather than
     // relying on that emptiness being the right answer.
-    if (instanceKind(ctx, name) === 'radarr') continue;
+    if (instanceKind(ctx.config, name) === 'radarr') continue;
 
     const client = ctx.clients.get(name);
     const series = seriesByInstance.get(name);

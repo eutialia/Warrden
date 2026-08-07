@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import type { ArrApi, TagResource } from '../../arr/types.js';
 import { ManagedObjects } from '../../db/managedObjects.js';
 
-// Exported so GC (Task 12, reconcile.ts) can apply the same "never delete something we
+// Exported so GC (`reconcile.ts`'s `gc()`) can apply the same "never delete something we
 // didn't name" safety net to tags that it already applies to release profiles.
 export const WARRDEN_TAG_PREFIX = 'warrden-';
 
@@ -29,7 +29,7 @@ export interface PinReleaseGroupInput {
  * Pins a release group to a series: finds-or-creates a `warrden-<slug>` tag and a
  * `warrden: [<group>]` release profile requiring that group, attaches the tag to the
  * series (swapping out any previously-pinned warrden tag — a series is pinned to at most
- * one group at a time), and records both resources in `managed_objects` so GC (Task 12)
+ * one group at a time), and records both resources in `managed_objects` so GC (`reconcile.ts`'s `gc()`)
  * can find them later. Idempotent on the arr side: re-pinning the same group leaves
  * everything there as-is, including skipping the `updateSeries` call. It is NOT a pure
  * no-op on the registry, though — every call, including a same-group re-pin, re-registers

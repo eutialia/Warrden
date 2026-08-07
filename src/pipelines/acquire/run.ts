@@ -374,8 +374,8 @@ function alreadyGrabbedSeasons(ctx: AppContext, job: JobRow): Set<number> {
   return grabbed;
 }
 
-/** What enqueued this job — `job.payload.source` when the enqueuer set one (Task 12's
- * reconciliation pipeline will), otherwise `'webhook'`, the only source Phase 1 has. */
+/** What enqueued this job — `job.payload.source` when the enqueuer set one (`reconcile.ts`'s
+ * reconciliation pipeline does), otherwise `'webhook'`, the default when nothing else set one. */
 function resolveSource(job: JobRow): string {
   const source = job.payload.source;
   return typeof source === 'string' && source.length > 0 ? source : DEFAULT_SOURCE;

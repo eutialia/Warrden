@@ -1,7 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRootDerivedSourceDirs, resolveSourceDirs, resolveSourceDirsDetailed } from '../src/pipelines/ingest/sources.js';
+import { resolveSourceDirsDetailed } from '../src/pipelines/ingest/sources.js';
 
-describe('resolveSourceDirs', () => {
+function allDirs(dropped: readonly string[], roots: readonly string[]): string[] {
+  return resolveSourceDirsDetailed([...dropped], [...roots]).all;
+}
+
+function rootDerivedDirs(dropped: readonly string[], roots: readonly string[]): string[] {
+  return resolveSourceDirsDetailed([...dropped], [...roots]).rootDerived;
+}
+
+describe('resolveSourceDirsDetailed — all', () => {
   it.each([
     // torrent root = first path segment under a download root
     [['/dl/Torrent A/S1/e1.mkv', '/dl/Torrent A/S2/e2.mkv'], ['/dl'], ['/dl/Torrent A']],
@@ -11,54 +19,50 @@ describe('resolveSourceDirs', () => {
     [['/other/T/e1.mkv'], ['/dl'], ['/other/T']],
     // never the root itself, results deduped + sorted
     [['/dl/T/e1.mkv', '/dl/T/e2.mkv'], ['/dl'], ['/dl/T']],
-  ] as const)('resolveSourceDirs(%j, %j) -> %j', (dropped, roots, expected) => {
-    expect(resolveSourceDirs([...dropped], [...roots])).toEqual([...expected]);
+  ] as const)('all(%j, %j) -> %j', (dropped, roots, expected) => {
+    expect(allDirs(dropped, roots)).toEqual([...expected]);
   });
 
   it('a bare string prefix must not match past a path segment boundary', () => {
     // '/downloadsX' is NOT under root '/downloads' even though it starts with that string.
-    expect(resolveSourceDirs(['/downloadsX/T/e1.mkv'], ['/downloads'])).toEqual(['/downloadsX/T']);
+    expect(allDirs(['/downloadsX/T/e1.mkv'], ['/downloads'])).toEqual(['/downloadsX/T']);
   });
 
   it('the longest matching root wins when roots nest', () => {
-    expect(resolveSourceDirs(['/dl/sub/T/e1.mkv'], ['/dl', '/dl/sub'])).toEqual(['/dl/sub/T']);
+    expect(allDirs(['/dl/sub/T/e1.mkv'], ['/dl', '/dl/sub'])).toEqual(['/dl/sub/T']);
   });
 
   it('results are sorted', () => {
-    expect(resolveSourceDirs(['/dl/Zeta/e1.mkv', '/dl/Alpha/e1.mkv'], ['/dl'])).toEqual(['/dl/Alpha', '/dl/Zeta']);
+    expect(allDirs(['/dl/Zeta/e1.mkv', '/dl/Alpha/e1.mkv'], ['/dl'])).toEqual(['/dl/Alpha', '/dl/Zeta']);
   });
 });
 
-describe('resolveRootDerivedSourceDirs', () => {
-  it('excludes a dirname()-fallback dir that resolveSourceDirs would still include', () => {
-    expect(resolveSourceDirs(['/other/T/e1.mkv'], ['/dl'])).toEqual(['/other/T']);
-    expect(resolveRootDerivedSourceDirs(['/other/T/e1.mkv'], ['/dl'])).toEqual([]);
+describe('resolveSourceDirsDetailed — rootDerived', () => {
+  it('excludes a dirname()-fallback dir that `all` would still include', () => {
+    expect(allDirs(['/other/T/e1.mkv'], ['/dl'])).toEqual(['/other/T']);
+    expect(rootDerivedDirs(['/other/T/e1.mkv'], ['/dl'])).toEqual([]);
   });
 
   it('includes a dir that resolved through a configured downloadRoots entry', () => {
-    expect(resolveRootDerivedSourceDirs(['/dl/Torrent A/e1.mkv'], ['/dl'])).toEqual(['/dl/Torrent A']);
+    expect(rootDerivedDirs(['/dl/Torrent A/e1.mkv'], ['/dl'])).toEqual(['/dl/Torrent A']);
   });
 
   it('a dir reached both ways (root-derived for one dropped path, fallback for another) counts as root-derived', () => {
     const dropped = ['/dl/T/e1.mkv', '/dl/T/e2.mkv']; // both under the configured root, same torrent dir
-    expect(resolveRootDerivedSourceDirs(dropped, ['/dl'])).toEqual(['/dl/T']);
+    expect(rootDerivedDirs(dropped, ['/dl'])).toEqual(['/dl/T']);
   });
 
-  it('a single-file torrent (directly in the root) contributes nothing to either function', () => {
-    expect(resolveSourceDirs(['/dl/movie.mkv'], ['/dl'])).toEqual([]);
-    expect(resolveRootDerivedSourceDirs(['/dl/movie.mkv'], ['/dl'])).toEqual([]);
+  it('a single-file torrent (directly in the root) contributes nothing to either field', () => {
+    expect(allDirs(['/dl/movie.mkv'], ['/dl'])).toEqual([]);
+    expect(rootDerivedDirs(['/dl/movie.mkv'], ['/dl'])).toEqual([]);
   });
 });
 
-describe('resolveSourceDirsDetailed', () => {
-  it('returns {all, rootDerived} matching resolveSourceDirs/resolveRootDerivedSourceDirs\' own outputs for a mix of root-derived and fallback dirs', () => {
+describe('resolveSourceDirsDetailed — both fields together', () => {
+  it('returns {all, rootDerived} for a mix of root-derived and fallback dirs', () => {
     const dropped = ['/dl/Torrent A/e1.mkv', '/other/T/e1.mkv'];
     const roots = ['/dl'];
 
-    expect(resolveSourceDirsDetailed(dropped, roots)).toEqual({
-      all: resolveSourceDirs(dropped, roots),
-      rootDerived: resolveRootDerivedSourceDirs(dropped, roots),
-    });
     expect(resolveSourceDirsDetailed(dropped, roots)).toEqual({
       all: ['/dl/Torrent A', '/other/T'],
       rootDerived: ['/dl/Torrent A'],

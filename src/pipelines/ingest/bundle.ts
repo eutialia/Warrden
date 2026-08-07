@@ -29,7 +29,8 @@ const BundleMapResponseSchema = z.object({
 });
 
 /** The three-level gate every tier reports on, and the whole plan's overall risk —
- * inferred from the schema so Task 10/12/13 (which act on a `BundlePlan`) share this
+ * inferred from the schema so every caller that acts on a `BundlePlan` (the rescue stage in
+ * `run.ts`, the accept-attention route in `server/app.ts`) shares this
  * exact type instead of re-declaring the union. */
 export type BundleConfidence = z.infer<typeof BundleMapResponseSchema>['confidence'];
 
@@ -49,7 +50,8 @@ function renderFileLine(index: number, item: ManualImportItem): string {
   return `#${index + 1} ${basename(item.path)} (${sizeGB} GB)`;
 }
 
-/** Builds the `ManualImportFile` row `executeManualImport` (Task 10) expects, stamping
+/** Builds the `ManualImportFile` row `executeManualImport` (called from `run.ts`'s rescue
+ * stage) expects, stamping
  * `seriesId` and round-tripping `quality`/`languages`/`releaseGroup`/`folderName`
  * verbatim from the arr-reported `item` — Warrden never inspects or rewrites those
  * opaque blobs, only decides which episode(s) the file maps to. `episodeIds` is deduped
@@ -142,7 +144,7 @@ export interface BundlePlan {
 
 /**
  * Plans a manual-import batch for one bundle folder/downloadId's leftover video files —
- * pure planning, no I/O; Task 10 is the one that actually calls `executeManualImport`
+ * pure planning, no I/O; `run.ts`'s rescue stage is the one that actually calls `executeManualImport`
  * with the resulting `files`. Movies never take this path: a stuck movie import maps
  * 1:1 to its `movieId` in `run.ts`, and leftover movie-folder videos are extras that
  * must never be imported.

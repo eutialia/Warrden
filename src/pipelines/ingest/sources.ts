@@ -15,7 +15,7 @@ function longestMatchingRoot(p: string, roots: string[]): string | undefined {
 }
 
 /**
- * Shared derivation behind `resolveSourceDirs`/`resolveRootDerivedSourceDirs`: for each
+ * Shared derivation behind `resolveSourceDirsDetailed`: for each
  * dropped path, the longest matching `downloadRoots` entry (segment-aware, like
  * `mapArrPath`) identifies the torrent's own root folder (`root + '/' + firstSegment`,
  * `rootDerived: true`); a path matching no configured root falls back to its own
@@ -46,19 +46,17 @@ function deriveSourceDirs(droppedPaths: string[], downloadRoots: string[]): { di
 }
 
 export interface SourceDirsDetailed {
-  /** Every sweep-worthy dir — what `resolveSourceDirs` returns. */
+  /** Every sweep-worthy dir. */
   all: string[];
   /** The subset that resolved through a configured `downloadRoots` entry, excluding the
-   * dirname() fallback — what `resolveRootDerivedSourceDirs` returns. */
+   * dirname() fallback. */
   rootDerived: string[];
 }
 
 /**
  * Derives both directory sets `runIngestJob` needs from one `deriveSourceDirs` pass, so a
  * caller that wants both (as `runIngestJob` does — the sidecar sweep's full set AND the
- * rescue stage's narrower one) doesn't run the same derivation twice. `resolveSourceDirs`/
- * `resolveRootDerivedSourceDirs` below are thin single-field views over this for callers
- * (and tests) that only want one side.
+ * rescue stage's narrower one) doesn't run the same derivation twice.
  *
  * `all`: the set of ARR-side directories to sweep for leftover sidecar/video files, from
  * every dropped-file path an import event reported. All paths in and out are ARR-side
@@ -71,7 +69,7 @@ export interface SourceDirsDetailed {
  * "completed" folder (used by every torrent, not just this one) rather than something
  * scoped to this torrent — folder-scoped manual-import lookups there would risk
  * auto-importing an unrelated bare-number file sitting in the same shared directory.
- * Task 10's rescue stage uses this for that reason.
+ * runIngestJob's rescue stage (`rescueStuckImports`) uses this for that reason.
  *
  * Both are deduped and sorted for a deterministic order.
  */
@@ -84,14 +82,4 @@ export function resolveSourceDirsDetailed(droppedPaths: string[], downloadRoots:
       .map((d) => d.dir)
       .sort(),
   };
-}
-
-/** Thin view over `resolveSourceDirsDetailed` — see its doc for `all`'s semantics. */
-export function resolveSourceDirs(droppedPaths: string[], downloadRoots: string[]): string[] {
-  return resolveSourceDirsDetailed(droppedPaths, downloadRoots).all;
-}
-
-/** Thin view over `resolveSourceDirsDetailed` — see its doc for `rootDerived`'s semantics. */
-export function resolveRootDerivedSourceDirs(droppedPaths: string[], downloadRoots: string[]): string[] {
-  return resolveSourceDirsDetailed(droppedPaths, downloadRoots).rootDerived;
 }

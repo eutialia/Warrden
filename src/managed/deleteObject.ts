@@ -1,6 +1,6 @@
 import { ArrApiError } from '../arr/client.js';
 import type { ArrApi } from '../arr/types.js';
-import type { ArrInstance } from '../config/schema.js';
+import { instanceKind } from '../config/instances.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../pipelines/acquire/pin.js';
@@ -64,12 +64,6 @@ function skippedNoClient(ctx: Pick<AppContext, 'events'>, row: ManagedObjectRow)
     data: { instance: row.arr_instance, kind: row.kind, externalId: row.external_id },
   });
   return false;
-}
-
-/** The configured `kind` for arr instance `name`, or `undefined` if it isn't in
- * `config.arrs` at all — same lookup `reconcile.ts` uses for its own radarr guard below. */
-function instanceKind(config: AppContext['config'], name: string): ArrInstance['kind'] | undefined {
-  return config.arrs.find((a) => a.name === name)?.kind;
 }
 
 async function deleteInArr(ctx: Pick<AppContext, 'events' | 'config'>, arr: ArrApi, row: ManagedObjectRow): Promise<boolean> {

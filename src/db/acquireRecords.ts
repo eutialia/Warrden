@@ -8,8 +8,8 @@ export interface InsertAcquireRecordInput {
   targetKind: TargetKind;
   targetId: number;
   status: AcquireStatus;
-  /** Where the job that produced this record came from, e.g. `'webhook'` or (once Task 12
-   * lands) `'reconcile'` — free-form, not constrained to a fixed set here. */
+  /** Where the job that produced this record came from, e.g. `'webhook'` or `'reconcile'`
+   * (`reconcile.ts`'s own enqueue source) — free-form, not constrained to a fixed set here. */
   source?: string;
   pickedGuid?: string;
   releaseGroup?: string | null;
@@ -57,7 +57,7 @@ function parseRow(row: AcquireRecordRowRaw): AcquireRecordRow {
 /**
  * Typed wrapper over the `acquire_records` table — one append-only audit row per acquire
  * job outcome (`no-candidates` / `none-viable` / `grabbed`), written by `runAcquireJob`
- * and read by the dashboard (Task 13). Kept alongside `ManagedObjects` as the one place
+ * and read by the dashboard (`GET /api/jobs`). Kept alongside `ManagedObjects` as the one place
  * that owns this table's SQL.
  */
 export class AcquireRecords {

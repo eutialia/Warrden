@@ -37,7 +37,7 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         if (found.onDownload === true && found.onUpgrade === true) {
           // Already present in the arr and subscribed to everything we need, but the
           // local registry may have been reset (fresh db, restore) — re-record it so
-          // GC (Task 12) can still find it.
+          // GC (reconcile.ts's gc()) can still find it.
           managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
           continue;
         }

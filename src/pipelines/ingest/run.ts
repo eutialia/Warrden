@@ -30,7 +30,7 @@ export const MOUNT_RETRY_MS = 5 * 60_000;
 type MatchedBy = 'deterministic' | 'llm';
 
 /** Everything `runIngestJob` fetched about this job's target, gathered once up front so
- * the sidecar sweep (and, after it, Task 10's stuck-import/bundle rescue stage) both work
+ * the sidecar sweep (and, after it, this file's own stuck-import/bundle rescue stage) both work
  * off the same snapshot instead of re-querying the arr mid-run. */
 interface SeriesTargetContext {
   kind: 'series';
@@ -481,7 +481,7 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
 }
 
 /**
- * Task 10's rescue stage — retries anything the sidecar sweep above couldn't touch
+ * The rescue stage — retries anything the sidecar sweep above couldn't touch
  * because there was no video on disk to sit beside: a `'stuck'` download's own
  * manual-import queue, and (series only) a leftover bundle video sitting in one of the
  * torrent's own source folders. Wrapped in its own try/catch so a planning/import
@@ -535,8 +535,8 @@ function dedupeManualImportItems(items: ManualImportItem[]): ManualImportItem[] 
  * aren't re-offered) — then hands the deduped batch to `planBundleImport` with the
  * FULL episode list. A `null` plan (nothing importable) ends the rescue quietly; a
  * high/medium-confidence plan imports immediately in `copy` mode; a low-confidence one
- * is proposed as an `attention` item instead of executed unattended (Task 12's
- * accept-anyway endpoint is what actually runs it).
+ * is proposed as an `attention` item instead of executed unattended (`POST /api/attention/:id/accept`
+ * is what actually runs it).
  */
 async function rescueSeries(
   ctx: AppContext,
