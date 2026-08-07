@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import type { TargetKind } from '../jobs/queue.js';
+import type { PipelineName, TargetKind } from '../jobs/queue.js';
 
 // Zod object schemas strip unknown keys by default rather than rejecting them, so real
 // Sonarr/Radarr payloads — which carry many more fields than we care about — parse
@@ -74,7 +74,7 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
   // event here reduces to the same shape (a pipeline, a series-or-movie target, and a
   // job payload), so branching only to fill that in keeps the two near-identical
   // enqueue + append calls this used to have from drifting apart.
-  let pipeline: string;
+  let pipeline: PipelineName;
   let targetKind: TargetKind;
   let target: { id: number; title: string } | undefined;
   let jobPayload: object;

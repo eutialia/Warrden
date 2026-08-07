@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { JobQueue } from '../src/jobs/queue.js';
 import { freshDb } from './helpers.js';
 
-const target = { pipeline: 'acquire', targetKind: 'series' as const, targetId: 42, arrInstance: 'sonarr' };
+const target = { pipeline: 'acquire' as const, targetKind: 'series' as const, targetId: 42, arrInstance: 'sonarr' };
 let q: JobQueue;
 beforeEach(() => { q = new JobQueue(freshDb()); });
 

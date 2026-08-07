@@ -1,7 +1,7 @@
 import type { AppContext } from '../context.js';
 import { errorMessage } from '../util/errors.js';
 import { RescheduleError } from './errors.js';
-import type { JobRow } from './queue.js';
+import type { JobRow, PipelineName } from './queue.js';
 
 export type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
 
@@ -19,7 +19,16 @@ const DEFAULT_INTERVAL_MS = 1000;
  * terminal (non-retried) one additionally raises an `attention` event so it surfaces on the
  * dashboard instead of silently parking. Returns a stop function that clears the interval.
  */
-export function startRunner(ctx: AppContext, handlers: Record<string, JobHandler>, opts?: { intervalMs?: number }): () => void {
+export function startRunner(
+  ctx: AppContext,
+  // `Partial` (not a fully-required `Record`) on purpose: `job.pipeline` is typed as
+  // `PipelineName` everywhere a job gets enqueued, but a row already sitting in the db from
+  // before a pipeline was renamed/removed isn't bound by that — the "no handler registered"
+  // path right below exists specifically for that drift, so the caller must be allowed to
+  // register a handler map that doesn't cover every `PipelineName`.
+  handlers: Partial<Record<PipelineName, JobHandler>>,
+  opts?: { intervalMs?: number },
+): () => void {
   let ticking = false;
 
   const tick = async (): Promise<void> => {

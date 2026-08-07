@@ -2,9 +2,10 @@ import type Database from 'better-sqlite3';
 
 export type TargetKind = 'series' | 'movie';
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed';
+export type PipelineName = 'acquire' | 'ingest';
 
 export interface EnqueueInput {
-  pipeline: string;
+  pipeline: PipelineName;
   targetKind: TargetKind;
   targetId: number;
   arrInstance: string;
@@ -19,7 +20,7 @@ export interface EnqueueResult {
 
 export interface JobRow {
   id: number;
-  pipeline: string;
+  pipeline: PipelineName;
   target_kind: TargetKind;
   target_id: number;
   arr_instance: string;
@@ -37,7 +38,7 @@ export interface JobRow {
 // Raw shape as read from SQLite, before JSON columns are parsed at the boundary.
 interface JobRowRaw {
   id: number;
-  pipeline: string;
+  pipeline: PipelineName;
   target_kind: TargetKind;
   target_id: number;
   arr_instance: string;
@@ -130,7 +131,7 @@ export class JobQueue {
    * pending/running-only twin check inside `enqueue()`, this also matches a job that has
    * already finished — e.g. a webhook-triggered acquire that ran to completion before a
    * later reconcile pass sees the same target and would otherwise mistake it for missed. */
-  hasJobFor(pipeline: string, arrInstance: string, targetKind: TargetKind, targetId: number): boolean {
+  hasJobFor(pipeline: PipelineName, arrInstance: string, targetKind: TargetKind, targetId: number): boolean {
     const row = this.db
       .prepare(
         `SELECT 1 FROM jobs WHERE pipeline = ? AND arr_instance = ? AND target_kind = ? AND target_id = ? LIMIT 1`,

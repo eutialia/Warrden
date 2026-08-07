@@ -3,7 +3,7 @@ import { RescheduleError } from '../src/jobs/errors.js';
 import { startRunner } from '../src/jobs/runner.js';
 import { makeCtx } from './helpers.js';
 
-const target = { pipeline: 'noop', targetKind: 'series' as const, targetId: 1, arrInstance: 'sonarr' };
+const target = { pipeline: 'acquire' as const, targetKind: 'series' as const, targetId: 1, arrInstance: 'sonarr' };
 
 describe('startRunner', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -13,13 +13,13 @@ describe('startRunner', () => {
     const ctx = makeCtx();
     const { id } = ctx.queue.enqueue(target);
     const handler = vi.fn().mockResolvedValue(undefined);
-    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
 
     await vi.advanceTimersByTimeAsync(10);
     stop();
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler.mock.calls[0][1]).toMatchObject({ id, pipeline: 'noop' });
+    expect(handler.mock.calls[0][1]).toMatchObject({ id, pipeline: 'acquire' });
     expect(ctx.queue.get(id!)!.status).toBe('done');
   });
 
@@ -27,7 +27,7 @@ describe('startRunner', () => {
     const ctx = makeCtx();
     ctx.queue.enqueue(target);
     const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
-    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
 
     await vi.advanceTimersByTimeAsync(10);
     stop();
@@ -44,7 +44,7 @@ describe('startRunner', () => {
     // Default maxAttempts is 3 — pre-seed attempts=2 so this run's failure is the final one.
     ctx.db.prepare('UPDATE jobs SET attempts = 2 WHERE id = ?').run(id);
     const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
-    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
 
     await vi.advanceTimersByTimeAsync(10);
     stop();
@@ -55,15 +55,17 @@ describe('startRunner', () => {
 
   it('fails a job immediately, with an attention-worthy message, when no handler is registered for its pipeline', async () => {
     const ctx = makeCtx();
-    ctx.queue.enqueue({ ...target, pipeline: 'mystery' });
-    const stop = startRunner(ctx, { noop: vi.fn() }, { intervalMs: 10 });
+    // A real pipeline name ('ingest'), just one the handler map below doesn't cover — the
+    // same drift a stale db row (from before a pipeline rename/removal) would produce.
+    ctx.queue.enqueue({ ...target, pipeline: 'ingest' });
+    const stop = startRunner(ctx, { acquire: vi.fn() }, { intervalMs: 10 });
 
     await vi.advanceTimersByTimeAsync(10);
     stop();
 
     const warnEvents = ctx.events.list({ level: 'warn' });
     expect(warnEvents).toHaveLength(1);
-    expect(warnEvents[0]!.message).toContain('mystery');
+    expect(warnEvents[0]!.message).toContain('ingest');
   });
 
   it('reschedules a job that throws RescheduleError: back to pending with a future not_before, attempts untouched, only a job.rescheduled info event', async () => {
@@ -71,7 +73,7 @@ describe('startRunner', () => {
     const ctx = makeCtx();
     const { id } = ctx.queue.enqueue(target);
     const handler = vi.fn().mockRejectedValue(new RescheduleError('waiting for settle', 5_000));
-    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
 
     await vi.advanceTimersByTimeAsync(10); // tick fires at t=10, which is when reschedule() reads Date.now()
     stop();
@@ -88,14 +90,14 @@ describe('startRunner', () => {
     expect(infoEvents[0]!.level).toBe('info');
     expect(infoEvents[0]!.message).toContain('waiting for settle');
     expect(infoEvents[0]!.message).toContain('5s');
-    expect(infoEvents[0]!.data).toMatchObject({ pipeline: 'noop', delayMs: 5_000 });
+    expect(infoEvents[0]!.data).toMatchObject({ pipeline: 'acquire', delayMs: 5_000 });
   });
 
   it('a handler throwing a plain Error still takes the existing fail path, not reschedule', async () => {
     const ctx = makeCtx();
     const { id } = ctx.queue.enqueue(target);
     const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
-    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
 
     await vi.advanceTimersByTimeAsync(10);
     stop();
@@ -108,7 +110,7 @@ describe('startRunner', () => {
   it('stop() halts further polling', async () => {
     const ctx = makeCtx();
     const handler = vi.fn().mockResolvedValue(undefined);
-    const stop = startRunner(ctx, { noop: handler }, { intervalMs: 10 });
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
     stop();
 
     ctx.queue.enqueue(target);
