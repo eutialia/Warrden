@@ -8,7 +8,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
 
@@ -245,7 +245,7 @@ describe('app', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
       expect(attentionItems.get(item.id)!.status).toBe('dismissed');
-      expect(ctx.events.list().find((e) => e.kind === 'attention.dismissed')).toMatchObject({ data: { id: item.id, kind: 'ingest.unmatched' } });
+      expect(findEvent(ctx.events.list(), 'attention.dismissed')).toMatchObject({ data: { id: item.id, kind: 'ingest.unmatched' } });
 
       const again = await app.request(`/api/attention/${item.id}/dismiss`, { method: 'POST', headers: jsonHeaders });
       expect(again.status).toBe(409);
@@ -285,7 +285,7 @@ describe('app', () => {
       expect(job.pipeline).toBe('ingest');
       expect(job.payload).toEqual({ downloadId: 'dl-1', source: 'retry' });
 
-      const retriedEvent = ctx.events.list().find((e) => e.kind === 'attention.retried');
+      const retriedEvent = findEvent(ctx.events.list(), 'attention.retried');
       expect(retriedEvent).toMatchObject({ data: { id: item.id, jobId: enqueueResult.id, pipeline: 'ingest' } });
     });
 
@@ -383,7 +383,7 @@ describe('app', () => {
       expect(repicked.pipeline).toBe('acquire');
       expect(repicked.payload).toEqual({ title: 'Frieren', source: 'repick', hint: 'prefer the 10bit encode' });
 
-      const repickedEvent = ctx.events.list().find((e) => e.kind === 'attention.repicked');
+      const repickedEvent = findEvent(ctx.events.list(), 'attention.repicked');
       expect(repickedEvent).toMatchObject({ data: { id: item.id, jobId: enqueueResult.id, hasHint: true } });
     });
 
@@ -427,7 +427,7 @@ describe('app', () => {
       expect(await res.json()).toEqual({ ok: true });
       expect(client.executeManualImport).toHaveBeenCalledWith(files, 'copy');
       expect(attentionItems.get(item.id)!.status).toBe('resolved');
-      expect(ctx.events.list().find((e) => e.kind === 'attention.accepted')).toMatchObject({
+      expect(findEvent(ctx.events.list(), 'attention.accepted')).toMatchObject({
         data: { id: item.id, kind: 'ingest.rescue-proposed', fileCount: 1 },
       });
     });
@@ -579,7 +579,7 @@ describe('app', () => {
 
       expect(res.status).toBe(500);
       expect(managedObjects.list()).toHaveLength(1); // NOT dropped — still the retry pointer
-      expect(ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-failed')).toMatchObject({
+      expect(findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-failed')).toMatchObject({
         data: { instance: 'sonarr', kind: 'release_profile', externalId: 9 },
       });
     });

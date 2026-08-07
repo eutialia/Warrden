@@ -5,7 +5,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { SyncState } from '../src/db/syncState.js';
 import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
 import { reconcile } from '../src/reconcile/reconcile.js';
-import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource, movieResource, ctxWithClient } from './helpers.js';
+import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource, movieResource, ctxWithClient, findEvent, hasEvent } from './helpers.js';
 
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
 const movie = (id: number) => movieResource({ id, title: `M${id}`, year: 2024, tmdbId: id, hasFile: true });
@@ -64,7 +64,7 @@ describe('reconcile', () => {
     expect(ctx.queue.claim()).toMatchObject({ target_id: 3 });
     expect(ctx.queue.claim()).toBeNull();
 
-    const event = ctx.events.list().find((e) => e.kind === 'reconcile.missed-adds')!;
+    const event = findEvent(ctx.events.list(), 'reconcile.missed-adds')!;
     expect(event.data).toMatchObject({ count: 1, ids: [3], alreadyHandled: 1 });
   });
 
@@ -108,7 +108,7 @@ describe('reconcile', () => {
     expect(failedEvents[0]!.message).toContain('managed_objects table is gone');
 
     // The missed-adds phase, independent of GC, still ran normally.
-    expect(ctx.events.list().some((e) => e.kind === 'reconcile.bootstrapped')).toBe(true);
+    expect(hasEvent(ctx.events.list(), 'reconcile.bootstrapped')).toBe(true);
 
     listSpy.mockRestore();
   });
@@ -129,7 +129,7 @@ describe('reconcile', () => {
     expect(client.tags).toHaveLength(0);
     expect(client.profiles).toHaveLength(0);
     expect(ctx.db.prepare('SELECT COUNT(*) n FROM managed_objects').get()).toMatchObject({ n: 0 });
-    const gcEvent = ctx.events.list().find((e) => e.kind === 'reconcile.gc');
+    const gcEvent = findEvent(ctx.events.list(), 'reconcile.gc');
     expect(gcEvent!.data).toMatchObject({ deleted: true, profileDeleted: true, tagDeleted: true });
   });
   it('gc leaves in-use pins alone', async () => {
@@ -216,8 +216,8 @@ describe('reconcile', () => {
     expect(skipEvents[0]!.level).toBe('warn');
     // No tag-specific skip event fires here — the profile-skip event already covers why,
     // and the tag was never even considered for its own label check.
-    expect(ctx.events.list().some((e) => e.kind === 'reconcile.gc-skip-tag')).toBe(false);
-    const gcEvent = ctx.events.list().find((e) => e.kind === 'reconcile.gc');
+    expect(hasEvent(ctx.events.list(), 'reconcile.gc-skip-tag')).toBe(false);
+    const gcEvent = findEvent(ctx.events.list(), 'reconcile.gc');
     expect(gcEvent!.data).toMatchObject({ deleted: false, profileDeleted: false, tagDeleted: false });
   });
 
@@ -389,7 +389,7 @@ describe('reconcile', () => {
 
       expect(ctx.queue.claim()).toBeNull(); // bootstrap enqueues nothing, on either axis
       expect(new SyncState(ctx.db).read('history:sonarr')).toBe(9);
-      const event = ctx.events.list().find((e) => e.kind === 'reconcile.history-bootstrapped');
+      const event = findEvent(ctx.events.list(), 'reconcile.history-bootstrapped');
       expect(event).toBeDefined();
       expect(event!.data).toMatchObject({ instance: 'sonarr', cursor: 9 });
     });
@@ -424,7 +424,7 @@ describe('reconcile', () => {
         });
 
         expect(new SyncState(ctx.db).read(`history:${arrName}`)).toBe(6);
-        const event = ctx.events.list().find((e) => e.kind === 'reconcile.missed-imports');
+        const event = findEvent(ctx.events.list(), 'reconcile.missed-imports');
         expect(event!.data).toMatchObject({ instance: arrName, targets: [`${kind}:2`, `${kind}:1`] });
         expect(event!.message).toContain('2');
       },
@@ -458,7 +458,7 @@ describe('reconcile', () => {
 
       expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
       expect(new SyncState(ctx.db).read('history:sonarr')).toBe(2); // cursor still advances past the skipped record
-      expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
+      expect(hasEvent(ctx.events.list(), 'reconcile.missed-imports')).toBe(false);
     });
 
     it('no records above the cursor leaves it unchanged and appends no missed-imports event', async () => {
@@ -470,7 +470,7 @@ describe('reconcile', () => {
       await reconcile(ctx); // same records again — nothing new
 
       expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
-      expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
+      expect(hasEvent(ctx.events.list(), 'reconcile.missed-imports')).toBe(false);
       expect(new SyncState(ctx.db).read('history:sonarr')).toBe(3);
     });
 
@@ -487,11 +487,11 @@ describe('reconcile', () => {
 
       expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
       expect(new SyncState(ctx.db).read('history:sonarr')).toBe(2);
-      const event = ctx.events.list().find((e) => e.kind === 'reconcile.history-cursor-reset');
+      const event = findEvent(ctx.events.list(), 'reconcile.history-cursor-reset');
       expect(event).toBeDefined();
       expect(event!.level).toBe('warn');
       expect(event!.data).toMatchObject({ instance: 'sonarr', cursor: 50, maxId: 2 });
-      expect(ctx.events.list().some((e) => e.kind === 'reconcile.missed-imports')).toBe(false);
+      expect(hasEvent(ctx.events.list(), 'reconcile.missed-imports')).toBe(false);
 
       // Next pass resumes normally from the reset cursor: the id at it is ignored, a genuinely
       // new one above it enqueues.

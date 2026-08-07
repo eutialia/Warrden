@@ -23,7 +23,7 @@ import type { AppContext } from '../src/context.js';
 import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { openDb } from '../src/db/db.js';
-import { EventLog } from '../src/events/log.js';
+import { EventLog, type EventRow } from '../src/events/log.js';
 import { JobQueue, type EnqueueInput, type JobRow, type TargetKind } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
 import { BYTES_PER_GB } from '../src/util/bytes.js';
@@ -91,6 +91,18 @@ export function makeCtx(overrides?: Partial<AppContext>): AppContext {
     llm: new FakeGenerator(),
     ...overrides,
   };
+}
+
+/** The first event of `kind` in `events` (`ctx.events.list()`'s result, or a subset of
+ * it) — replaces the repeated `events.find((e) => e.kind === 'x')`. */
+export function findEvent(events: EventRow[], kind: string): EventRow | undefined {
+  return events.find((e) => e.kind === kind);
+}
+
+/** Whether any event of `kind` is present in `events` — replaces the repeated
+ * `events.some((e) => e.kind === 'x')`. */
+export function hasEvent(events: EventRow[], kind: string): boolean {
+  return events.some((e) => e.kind === kind);
 }
 
 /**

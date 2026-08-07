@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { reclaimAbandonedJobs, scheduleReconcile } from '../src/startup.js';
-import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
+import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient, hasEvent } from './helpers.js';
 
 describe('reclaimAbandonedJobs', () => {
   it('reclaim called on boot makes a wedged running job claimable again, and reports it via an event', () => {
@@ -12,7 +12,7 @@ describe('reclaimAbandonedJobs', () => {
     reclaimAbandonedJobs(ctx);
 
     expect(ctx.queue.claim()).not.toBeNull(); // claimable again after reclaim
-    expect(ctx.events.list().some((e) => e.kind === 'jobs.reclaimed')).toBe(true);
+    expect(hasEvent(ctx.events.list(), 'jobs.reclaimed')).toBe(true);
   });
 
   it('is silent (no event) when nothing needed reclaiming', () => {

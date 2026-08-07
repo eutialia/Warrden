@@ -11,6 +11,8 @@ import {
   episodeResource,
   fakeArrClient,
   FakeGenerator,
+  findEvent,
+  hasEvent,
   ingestFixture,
   makeCtx,
   manualImportItem,
@@ -40,7 +42,7 @@ describe('runIngestJob — settle gate', () => {
     await expect(call).rejects.toMatchObject({ delayMs: SETTLE_RETRY_MS });
 
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId)).toHaveLength(0);
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.placed')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.placed')).toBe(false);
   });
 
   it('settle deadline: created_at older than SETTLE_DEADLINE_MS -> completes with an ingest.settle-timeout attention event, nothing swept', async () => {
@@ -53,7 +55,7 @@ describe('runIngestJob — settle gate', () => {
 
     await expect(runIngestJob(fx.ctx, staleJob)).resolves.toBeUndefined();
 
-    expect(fx.ctx.events.list({ level: 'attention' }).some((e) => e.kind === 'ingest.settle-timeout')).toBe(true);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.settle-timeout')).toBe(true);
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId)).toHaveLength(0);
   });
 
@@ -67,7 +69,7 @@ describe('runIngestJob — settle gate', () => {
     await expect(call).rejects.toThrow(RescheduleError);
     await expect(call).rejects.toMatchObject({ delayMs: MOUNT_RETRY_MS });
 
-    expect(fx.ctx.events.list({ level: 'attention' }).some((e) => e.kind === 'ingest.mount-missing')).toBe(true);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.mount-missing')).toBe(true);
   });
 });
 
@@ -128,7 +130,7 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ source_path: matchedPath, data: { matchedBy: 'llm' } });
 
-    expect(fx.ctx.events.list({ level: 'attention' }).some((e) => e.kind === 'ingest.unmatched')).toBe(true);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.unmatched')).toBe(true);
   });
 
   it('foreign-file guard: the placement target already exists with no placed_files row -> ingest.skipped-foreign warn, content untouched', async () => {
@@ -542,7 +544,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
       'copy',
     );
 
-    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    const rescued = findEvent(fx.ctx.events.list(), 'ingest.rescued');
     expect(rescued).toBeTruthy();
     expect(rescued!.data.skipped).toEqual([]);
     expect(rescued!.data.reasoning).toEqual(expect.any(String));
@@ -568,7 +570,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     await expect(runIngestJob(fx.ctx, job)).resolves.toBeUndefined();
 
     expect(fx.client.executeManualImport).not.toHaveBeenCalled();
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
 
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
@@ -600,7 +602,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1' });
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, episodeIds: [2] })], 'copy');
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(true);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(true);
   });
 
   it('dedupes manual-import items by path across the downloadId + folder scopes before planning: the same leftover file surfacing from both never double-imports', async () => {
@@ -682,7 +684,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     );
 
     // Uniform event shape across branches: title in the message, skipped + reasoning in data.
-    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    const rescued = findEvent(fx.ctx.events.list(), 'ingest.rescued');
     expect(rescued).toBeTruthy();
     expect(rescued!.message).toContain('Frieren'); // ingestFixture's default movie title
     expect(rescued!.data.skipped).toEqual([]);
@@ -706,7 +708,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: clean.path })], 'copy');
 
-    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    const rescued = findEvent(fx.ctx.events.list(), 'ingest.rescued');
     expect(rescued!.data.skipped).toEqual([rejected.path]);
   });
 
@@ -723,7 +725,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1);
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: clean.path })], 'copy');
 
-    const rescued = fx.ctx.events.list().find((e) => e.kind === 'ingest.rescued');
+    const rescued = findEvent(fx.ctx.events.list(), 'ingest.rescued');
     expect(rescued!.data.skipped).toEqual([otherMovie.path]);
   });
 
@@ -742,8 +744,8 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     await runIngestJob(fx.ctx, job);
 
     expect(fx.client.executeManualImport).not.toHaveBeenCalled();
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(false);
-    expect(fx.ctx.events.list({ level: 'attention' }).some((e) => e.kind === 'ingest.rescue-proposed')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.rescue-proposed')).toBe(false);
 
     const skippedEvents = fx.ctx.events.list().filter((e) => e.kind === 'ingest.rescue-skipped');
     expect(skippedEvents).toHaveLength(1);
@@ -763,7 +765,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     await runIngestJob(fx.ctx, job);
 
     expect(fx.client.executeManualImport).not.toHaveBeenCalled();
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
 
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
@@ -858,7 +860,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     const warnEvents = fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.rescue-failed');
     expect(warnEvents).toHaveLength(1);
-    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
 
     const placedTarget = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
     expect(existsSync(placedTarget)).toBe(true);

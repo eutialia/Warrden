@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { startRunner } from '../src/jobs/runner.js';
-import { makeCtx } from './helpers.js';
+import { makeCtx, hasEvent } from './helpers.js';
 
 const target = { pipeline: 'acquire' as const, targetKind: 'series' as const, targetId: 1, arrInstance: 'sonarr' };
 
@@ -103,7 +103,7 @@ describe('startRunner', () => {
     stop();
 
     expect(ctx.queue.get(id!)!.attempts).toBe(1);
-    expect(ctx.events.list().some((e) => e.kind === 'job.rescheduled')).toBe(false);
+    expect(hasEvent(ctx.events.list(), 'job.rescheduled')).toBe(false);
     expect(ctx.events.list({ level: 'warn' })).toHaveLength(1);
   });
 

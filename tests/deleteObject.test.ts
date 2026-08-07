@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { deleteManagedObject } from '../src/managed/deleteObject.js';
 import { ManagedObjects, type ManagedObjectKind } from '../src/db/managedObjects.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { makeCtx, fakeArrClient, configWithArrs, ctxWithClient } from './helpers.js';
+import { makeCtx, fakeArrClient, configWithArrs, ctxWithClient, findEvent, hasEvent } from './helpers.js';
 
 /** Seeds a `managed_objects` row via the real `ManagedObjects.insert` (so it round-trips
  * through the same upsert path production code uses) and reads it straight back — the
@@ -23,7 +23,7 @@ describe('deleteManagedObject', () => {
     await deleteManagedObject(ctx, row);
 
     expect(managedObjects.list()).toHaveLength(0);
-    const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+    const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
     expect(deletedEvent).toMatchObject({ data: { instance: 'sonarr', kind: 'notification', externalId: 5 } });
   });
 
@@ -37,7 +37,7 @@ describe('deleteManagedObject', () => {
       await deleteManagedObject(ctx, row);
 
       expect(client.deleteNotification).toHaveBeenCalledWith(5);
-      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: true });
     });
 
@@ -55,7 +55,7 @@ describe('deleteManagedObject', () => {
 
       expect(managedObjects.list()).toHaveLength(0);
       expect(ctx.events.list({ level: 'warn' })).toHaveLength(0);
-      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
     });
 
@@ -86,7 +86,7 @@ describe('deleteManagedObject', () => {
 
       expect(client.deleteReleaseProfile).toHaveBeenCalledWith(9);
       expect(managedObjects.list()).toHaveLength(0);
-      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: true });
     });
 
@@ -100,9 +100,9 @@ describe('deleteManagedObject', () => {
 
       expect(client.deleteReleaseProfile).not.toHaveBeenCalled();
       expect(managedObjects.list()).toHaveLength(0);
-      const warnEvent = ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-skipped');
+      const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
       expect(warnEvent).toBeDefined();
-      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
     });
 
@@ -118,11 +118,11 @@ describe('deleteManagedObject', () => {
       await expect(deleteManagedObject(ctx, row)).rejects.toThrow('arr 500');
 
       expect(managedObjects.list()).toHaveLength(1); // NOT dropped — this is the retry pointer
-      const warnEvent = ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-failed');
+      const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-failed');
       expect(warnEvent).toBeDefined();
       expect(warnEvent!.data).toMatchObject({ instance: 'sonarr', kind: 'release_profile', externalId: 9 });
       expect(warnEvent!.message).toContain('arr 500');
-      expect(ctx.events.list().some((e) => e.kind === 'managed.deleted')).toBe(false); // never reached
+      expect(hasEvent(ctx.events.list(), 'managed.deleted')).toBe(false); // never reached
     });
 
     it('an already-absent live profile is dropped from the registry with no arr call and no warn', async () => {
@@ -150,7 +150,7 @@ describe('deleteManagedObject', () => {
 
       expect(client.deleteTag).toHaveBeenCalledWith(3);
       expect(managedObjects.list()).toHaveLength(0);
-      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: true });
     });
 
@@ -164,7 +164,7 @@ describe('deleteManagedObject', () => {
 
       expect(client.deleteTag).not.toHaveBeenCalled();
       expect(managedObjects.list()).toHaveLength(0);
-      const warnEvent = ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-skipped');
+      const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
       expect(warnEvent).toBeDefined();
     });
 
@@ -181,7 +181,7 @@ describe('deleteManagedObject', () => {
 
       expect(client.deleteTag).not.toHaveBeenCalled();
       expect(managedObjects.list()).toHaveLength(0);
-      const warnEvent = ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-skipped');
+      const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
       expect(warnEvent).toBeDefined();
     });
 
@@ -207,9 +207,9 @@ describe('deleteManagedObject', () => {
     await deleteManagedObject(ctx, row);
 
     expect(managedObjects.list()).toHaveLength(0);
-    const warnEvent = ctx.events.list({ level: 'warn' }).find((e) => e.kind === 'managed.delete-skipped');
+    const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
     expect(warnEvent).toBeDefined();
-    const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+    const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
     expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
   });
 
@@ -236,7 +236,7 @@ describe('deleteManagedObject', () => {
         expect(client.deleteReleaseProfile).not.toHaveBeenCalled();
         expect(managedObjects.list()).toHaveLength(0); // registry entry still dropped
         expect(ctx.events.list({ level: 'warn' })).toHaveLength(0); // silent skip, same as reconcile's GC guard
-        const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+        const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
         expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
       },
     );
@@ -250,7 +250,7 @@ describe('deleteManagedObject', () => {
       await deleteManagedObject(ctx, row);
 
       expect(client.deleteNotification).toHaveBeenCalledWith(5);
-      const deletedEvent = ctx.events.list().find((e) => e.kind === 'managed.deleted');
+      const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: true });
     });
   });
