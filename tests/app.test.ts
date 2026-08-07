@@ -8,7 +8,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent, bundleImportPayload } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
 
@@ -419,7 +419,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'needs review',
-        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files, reasoning: 'low confidence' },
+        data: bundleImportPayload({ files, reasoning: 'low confidence' }),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
@@ -454,7 +454,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'x',
-        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files, reasoning: 'x' },
+        data: bundleImportPayload({ files, reasoning: 'x' }),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
@@ -471,7 +471,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'x',
-        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files: [{ path: '/x.mkv' }], reasoning: 'x' },
+        data: bundleImportPayload({ files: [{ path: '/x.mkv' }] }),
       });
 
       const [res1, res2] = await Promise.all([
@@ -491,7 +491,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'x',
-        data: { action: 'bundle-import', instance: 'no-such-instance', targetKind: 'movie', targetId: 7, files: [{ path: '/x.mkv' }], reasoning: 'x' },
+        data: bundleImportPayload({ instance: 'no-such-instance', files: [{ path: '/x.mkv' }] }),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
@@ -510,7 +510,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'ingest.rescue-proposed',
         message: 'x',
-        data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'movie', targetId: 7, files: [{ path: '/x.mkv' }], reasoning: 'x' },
+        data: bundleImportPayload({ files: [{ path: '/x.mkv' }] }),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });

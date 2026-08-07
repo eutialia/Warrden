@@ -474,6 +474,23 @@ describe('reconcile', () => {
       expect(new SyncState(ctx.db).read('history:sonarr')).toBe(3);
     });
 
+    it('an empty history page never resets the cursor — a temporary empty response (arr restarting, a blip) must not be read the same as a real regression', async () => {
+      const client = fakeArrClient({ series: [series(1)] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      client.listRecentImports = async () => [historyRecord({ id: 50, seriesId: 1 })];
+      await reconcile(ctx); // bootstrap: cursor -> 50
+
+      // An empty page proves nothing about the arr's real ids — maxId reduces to 0 here,
+      // which is BELOW the tracked cursor (50), but that must never be read as a regression
+      // (see ingestBackstop's own doc: "only possible when there's at least one live record").
+      client.listRecentImports = async () => [];
+      await reconcile(ctx);
+
+      expect(new SyncState(ctx.db).read('history:sonarr')).toBe(50); // unchanged
+      expect(hasEvent(ctx.events.list(), 'reconcile.history-cursor-reset')).toBe(false);
+      expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(0);
+    });
+
     it('cursor regression (arr history ids restarted, e.g. its database was rebuilt/restored from an old backup): resets the cursor to the new max, warns, and enqueues nothing that pass — then resumes normally', async () => {
       const client = fakeArrClient({ series: [series(1)] });
       const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });

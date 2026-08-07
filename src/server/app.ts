@@ -157,7 +157,10 @@ const AcceptFileSchema = z
     languages: z.array(z.record(z.string(), z.unknown())).optional(),
   })
   .loose();
-const AcceptDataSchema = z.object({
+// Exported so tests can run a producer's actual emitted `ingest.rescue-proposed` payload
+// straight through this exact schema — a shared fixture guards against DRIFT between the
+// two shapes, but only running the real thing through the real schema catches it for sure.
+export const AcceptDataSchema = z.object({
   action: z.literal('bundle-import'),
   instance: z.string(),
   files: z.array(AcceptFileSchema).min(1),

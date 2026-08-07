@@ -101,7 +101,8 @@ describe('deleteManagedObject', () => {
       expect(client.deleteReleaseProfile).not.toHaveBeenCalled();
       expect(managedObjects.list()).toHaveLength(0);
       const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
-      expect(warnEvent).toBeDefined();
+      expect(warnEvent!.message).toContain('non-warrden-named release profile "Some User Profile"');
+      expect(warnEvent!.data).toMatchObject({ instance: 'sonarr', kind: 'release_profile', externalId: 9 });
       const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
       expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
     });
@@ -165,7 +166,8 @@ describe('deleteManagedObject', () => {
       expect(client.deleteTag).not.toHaveBeenCalled();
       expect(managedObjects.list()).toHaveLength(0);
       const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
-      expect(warnEvent).toBeDefined();
+      expect(warnEvent!.message).toContain('non-warrden-named tag "user-tag"');
+      expect(warnEvent!.data).toMatchObject({ instance: 'sonarr', kind: 'tag', externalId: 3 });
     });
 
     it('never deletes a tag still carried by a non-warrden release profile, even when the tag itself is warrden-labeled (Sonarr cascade safety net)', async () => {
@@ -182,7 +184,8 @@ describe('deleteManagedObject', () => {
       expect(client.deleteTag).not.toHaveBeenCalled();
       expect(managedObjects.list()).toHaveLength(0);
       const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
-      expect(warnEvent).toBeDefined();
+      expect(warnEvent!.message).toContain('still carried by a non-warrden release profile');
+      expect(warnEvent!.data).toMatchObject({ instance: 'sonarr', kind: 'tag', externalId: 3 });
     });
 
     it('an already-absent live tag is dropped from the registry with no arr call and no warn', async () => {
@@ -208,7 +211,8 @@ describe('deleteManagedObject', () => {
 
     expect(managedObjects.list()).toHaveLength(0);
     const warnEvent = findEvent(ctx.events.list({ level: 'warn' }), 'managed.delete-skipped');
-    expect(warnEvent).toBeDefined();
+    expect(warnEvent!.message).toContain('No arr client configured for "sonarr"');
+    expect(warnEvent!.data).toMatchObject({ instance: 'sonarr', kind: 'tag', externalId: 3 });
     const deletedEvent = findEvent(ctx.events.list(), 'managed.deleted');
     expect(deletedEvent!.data).toMatchObject({ deletedInArr: false });
   });

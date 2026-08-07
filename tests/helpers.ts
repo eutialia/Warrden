@@ -634,6 +634,34 @@ export function bundleResponse(
 }
 
 /**
+ * A `bundle-import` attention payload — the exact `data` shape both `runIngestJob`'s
+ * rescue stage (an `ingest.rescue-proposed` event) and `POST /api/attention/:id/accept`'s
+ * `AcceptDataSchema` (`src/server/app.ts`) need to agree on. Shared by ingest-run.test.ts
+ * (asserting what the producer actually emits) and app.test.ts (seeding attention items
+ * for the accept route) so neither side can silently drift from the other undetected.
+ */
+export function bundleImportPayload(
+  overrides?: Partial<{
+    action: 'bundle-import';
+    instance: string;
+    targetKind: TargetKind;
+    targetId: number;
+    files: Record<string, unknown>[];
+    reasoning: string;
+  }>,
+): Record<string, unknown> {
+  return {
+    action: 'bundle-import',
+    instance: 'sonarr',
+    targetKind: 'movie',
+    targetId: 7,
+    files: [{ path: '/downloads/Show/ep1.mkv', movieId: 7 }],
+    reasoning: 'needs review',
+    ...overrides,
+  };
+}
+
+/**
  * A `ReleaseCandidate` fixture with sane defaults (a realistic 1080p dual-audio-style
  * anime release, ~1.4 GB, 25 seeders, not rejected) — override any field for the case
  * under test. Used by acquire pipeline tests (prefilter, pick) so each test only spells

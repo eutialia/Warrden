@@ -5,7 +5,9 @@ import { ConfigSchema } from '../src/config/schema.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS, MOUNT_RETRY_MS } from '../src/pipelines/ingest/run.js';
+import { AcceptDataSchema } from '../src/server/app.js';
 import {
+  bundleImportPayload,
   bundleResponse,
   ctxWithClient,
   enqueueAndClaim,
@@ -575,14 +577,15 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toEqual({
-      action: 'bundle-import',
-      instance: fx.arrInstance,
-      targetKind: fx.targetKind,
-      targetId: fx.targetId,
-      files: [expect.objectContaining({ path: item.path, episodeIds: [2] })],
-      reasoning: 'guessing from context',
-    });
+    expect(proposed[0]!.data).toEqual(
+      bundleImportPayload({
+        instance: fx.arrInstance,
+        targetKind: fx.targetKind,
+        targetId: fx.targetId,
+        files: [expect.objectContaining({ path: item.path, episodeIds: [2] })],
+        reasoning: 'guessing from context',
+      }),
+    );
   });
 
   it('stuck download (series): assessQueue -> stuck with a downloadId -> listManualImport({downloadId}) feeds the same planning path as a bundle folder', async () => {
@@ -770,17 +773,36 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toEqual({
-      action: 'bundle-import',
-      instance: fx.arrInstance,
-      targetKind: 'movie',
-      targetId: 7,
-      files: [
-        expect.objectContaining({ path: itemA.path }),
-        expect.objectContaining({ path: itemB.path }),
-      ],
-      reasoning: expect.any(String),
-    });
+    expect(proposed[0]!.data).toEqual(
+      bundleImportPayload({
+        instance: fx.arrInstance,
+        files: [
+          expect.objectContaining({ path: itemA.path }),
+          expect.objectContaining({ path: itemB.path }),
+        ],
+        reasoning: expect.any(String),
+      }),
+    );
+  });
+
+  it("the producer's actual ingest.rescue-proposed payload parses through AcceptDataSchema — the two shapes can never silently drift apart", async () => {
+    // Same fixture as app.test.ts's own accept-route tests (bundleImportPayload) guards
+    // against the two sides drifting in the fixture itself; this test goes one step
+    // further and feeds runIngestJob's REAL emitted event.data through the REAL schema
+    // the accept route validates against, so a genuine shape mismatch fails here even if
+    // both test files' fixtures happened to still agree with each other.
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const itemA = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    const itemB = manualImportItem({ path: '/downloads/Movie/Movie.Alt.mkv', folderName: 'Movie Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [itemA, itemB];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    const proposed = findEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.rescue-proposed');
+    const result = AcceptDataSchema.safeParse(proposed!.data);
+    expect(result.success).toBe(true);
   });
 
   it('movie occupied-guard: a movie that already has a file on disk proposes an attention item instead of executing', async () => {
@@ -796,14 +818,13 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(fx.client.executeManualImport).not.toHaveBeenCalled();
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toEqual({
-      action: 'bundle-import',
-      instance: fx.arrInstance,
-      targetKind: 'movie',
-      targetId: 7,
-      files: [expect.objectContaining({ path: item.path })],
-      reasoning: expect.any(String),
-    });
+    expect(proposed[0]!.data).toEqual(
+      bundleImportPayload({
+        instance: fx.arrInstance,
+        files: [expect.objectContaining({ path: item.path })],
+        reasoning: expect.any(String),
+      }),
+    );
   });
 
   it('movie occupied-guard breaks the re-execution loop: once the movie has a file (post-import), a lingering stuck record proposes instead of re-executing', async () => {
