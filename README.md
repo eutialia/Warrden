@@ -37,17 +37,19 @@ dashboard at `http://<host>:9797`. Before adding any arr instance, set `server.p
 on the **Config** page to a URL your Sonarr/Radarr instances can reach the container at —
 this is the address Warrden registers as its own webhook. Registration is by name
 (`"Warrden"`) and re-checked on every startup, not a one-time thing: whenever the
-Warrden-named webhook on an instance isn't subscribed to both On Download and On Upgrade
-(no webhook at all yet; a Phase 1-vintage one that predates those events; or one a human
-unticked "On Import" on by hand in the arr's own settings), it's deleted and recreated at
-the *then-current* `publicUrl`, and this check runs again every startup — so fixing it is
-just a container restart away, however it got into that state. A webhook already
-subscribed to both is left alone; changing `publicUrl` afterward does **not** re-point
-it — delete the "Warrden" webhook in the arr's own settings first if you need to move it.
-If the recreate itself fails partway (the delete lands but the create doesn't, even after
-one immediate retry), the instance is left with no Warrden webhook at all until the next
-startup tries again. Then add your arr instances (name, kind, base URL, API key), set
-picking and ingest preferences, and choose an LLM provider.
+Warrden-named webhook on an instance isn't subscribed to both On Download and On Upgrade,
+it's (re)created at the *then-current* `publicUrl`. If there's no webhook at all yet, one
+is simply created. If one already exists but isn't fully subscribed — a Phase 1-vintage
+webhook that predates those events, or one a human unticked "On Import" on by hand in the
+arr's own settings — it's deleted first, then recreated the same way. Either way this
+check runs again every startup, so fixing a bad state is just a container restart away,
+however it got into that state. A webhook already subscribed to both is left alone;
+changing `publicUrl` afterward does **not** re-point it — delete the "Warrden" webhook in
+the arr's own settings first if you need to move it. If a delete-then-recreate fails
+partway (the delete lands but the create doesn't, even after one immediate retry), the
+instance is left with no Warrden webhook at all until the next startup tries again. Then
+add your arr instances (name, kind, base URL, API key), set picking and ingest
+preferences, and choose an LLM provider.
 
 Every config save requires a container restart to fully take effect (the save
 confirmation says so) — some fields are read live, but arr connections and the LLM
@@ -62,11 +64,11 @@ client is still pending.
 
 ## Ingest
 
-Ingest runs once per target per import burst (an on-download/on-upgrade webhook enqueues
-it; the job queue coalesces anything else that lands for the same target while that run is
-still pending or in progress into the same run, rather than piling up one job per webhook;
-a reconciliation-loop backstop covers anything a webhook missed entirely) and rescues what
-the arr's own import leaves behind:
+Ingest runs once per target per import burst (an on-download/on-upgrade webhook enqueues a
+job for that target; anything else that lands while it's still pending folds into that same
+row, and anything that lands while a run is already in progress is folded into a single
+follow-up run rather than one job per webhook; a reconciliation-loop backstop covers
+anything a webhook missed entirely) and rescues what the arr's own import leaves behind:
 
 - **Sidecar rescue** — sweeps the torrent's own source folder(s) for `.mka` audio and
   `.srt`/`.ass` subtitle files the arr doesn't import on its own, and copies (never moves —

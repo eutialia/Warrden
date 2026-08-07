@@ -54,8 +54,9 @@ export default function JobDetail() {
   // ManagedObjects's own lists, SSE traffic about one job is never a "burst" worth
   // coalescing. `load()` is called with no staleness guard here, same as before this was
   // pulled into the shared hook: the per-`id` guard above is what actually matters, and a
-  // late-resolving SSE-triggered load for the *same* `id` is harmless to apply.
-  useSseRefetch(() => load(), 0);
+  // late-resolving SSE-triggered load for the *same* `id` is harmless to apply. `enabled:
+  // Boolean(id)` — no point opening a connection whose `onEvent` (`load`) would just no-op.
+  useSseRefetch(() => load(), 0, Boolean(id));
 
   async function handleRepick(): Promise<void> {
     if (!data) return;

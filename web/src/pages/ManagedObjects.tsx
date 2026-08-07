@@ -99,8 +99,17 @@ export default function ManagedObjects() {
         {disconnected && <p className="text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
         {/* A fetch failure keeps whatever rows are already on screen (stale, but still
             useful) rather than blanking the table out from under the user — same
-            convention as Activity/Attention. */}
-        {error && <p className="text-sm text-destructive">{error}</p>}
+            convention as Activity/Attention. Unlike those two, there's no SSE burst about
+            to retry this on its own if the very first load failed, so a Retry button is
+            the only way back short of a page reload. */}
+        {error && (
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-destructive">{error}</p>
+            <Button variant="outline" size="sm" onClick={refetch}>
+              Retry
+            </Button>
+          </div>
+        )}
         {loading && objects.length === 0 && <p className="text-muted-foreground">Loading…</p>}
         {!loading && groups.length === 0 && !error && (
           <p className="text-center text-muted-foreground">No managed objects yet.</p>

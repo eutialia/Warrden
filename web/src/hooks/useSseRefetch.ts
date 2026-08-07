@@ -32,8 +32,12 @@ export interface SseRefetch {
  * `debounceMs: 0` skips debouncing entirely: every message calls `onEvent` immediately.
  * Use this for a page watching one specific thing (e.g. a single job's detail) where SSE
  * traffic is never a "burst" worth coalescing.
+ *
+ * `enabled: false` skips opening the connection at all (and closes it if it was already
+ * open) — for a page whose subject doesn't exist yet (e.g. no `:id` route param resolved
+ * yet), rather than opening a connection whose `onEvent` would just no-op.
  */
-export function useSseRefetch(onEvent: () => void, debounceMs = 500): SseRefetch {
+export function useSseRefetch(onEvent: () => void, debounceMs = 500, enabled = true): SseRefetch {
   const [disconnected, setDisconnected] = useState(false);
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
@@ -46,6 +50,7 @@ export function useSseRefetch(onEvent: () => void, debounceMs = 500): SseRefetch
   }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     const source = new EventSource('/api/events/stream');
     source.onmessage = () => {
       if (debounceMs <= 0) {
@@ -56,6 +61,13 @@ export function useSseRefetch(onEvent: () => void, debounceMs = 500): SseRefetch
       debounceRef.current = setTimeout(() => onEventRef.current(), debounceMs);
     };
     source.onopen = () => {
+      // Drop any debounced call still pending from just before the drop — without this,
+      // it fires its own extra `onEvent` up to `debounceMs` after the catch-up call below
+      // already did the job.
+      if (debounceRef.current !== null) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
       setDisconnected(false);
       onEventRef.current(); // reconnected — catch up on anything missed while the stream was down
     };
@@ -64,7 +76,7 @@ export function useSseRefetch(onEvent: () => void, debounceMs = 500): SseRefetch
       source.close();
       if (debounceRef.current !== null) clearTimeout(debounceRef.current);
     };
-  }, [debounceMs]);
+  }, [debounceMs, enabled]);
 
   return { disconnected, beginFetch };
 }
