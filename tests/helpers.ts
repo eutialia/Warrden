@@ -586,6 +586,54 @@ export function manualImportItem(overrides?: Partial<ManualImportItem>): ManualI
 }
 
 /**
+ * The raw shape `pickRelease` (`src/pipelines/acquire/pick.ts`) expects an LLM to answer
+ * with — a `FakeGenerator` queue entry, not `PickResult` (`pickRelease`'s own resolved
+ * output, which carries a `guid` instead of a candidate number and has no `candidate`
+ * field at all). Defaults to a straightforward "pick candidate #1" answer; override
+ * `decision: 'none'` along with `candidate`/`releaseGroup`/`confidence` (all `null` for a
+ * `'none'` decision, per `LlmPickResponseSchema`) for the no-viable-candidate case.
+ */
+export function pickResponse(
+  overrides?: Partial<{
+    decision: 'pick' | 'none';
+    candidate: number | null;
+    releaseGroup: string | null;
+    confidence: 'high' | 'medium' | 'low' | null;
+    reasoning: string;
+  }>,
+): Record<string, unknown> {
+  return {
+    decision: 'pick',
+    candidate: 1,
+    releaseGroup: 'SubsPlease',
+    confidence: 'high',
+    reasoning: 'ok',
+    ...overrides,
+  };
+}
+
+/**
+ * The raw shape `planBundleImport` (`src/pipelines/ingest/bundle.ts`) expects an LLM to
+ * answer with — a `FakeGenerator` queue entry for the `bundle-map` callsite. Defaults to
+ * one file mapped to no episode (the "not an episode" signal); override `mappings` for a
+ * real file-to-episode(s) mapping.
+ */
+export function bundleResponse(
+  overrides?: Partial<{
+    mappings: { file: number; episodeIds: number[] }[];
+    confidence: 'high' | 'medium' | 'low';
+    reasoning: string;
+  }>,
+): Record<string, unknown> {
+  return {
+    mappings: [{ file: 1, episodeIds: [] }],
+    confidence: 'high',
+    reasoning: 'ok',
+    ...overrides,
+  };
+}
+
+/**
  * A `ReleaseCandidate` fixture with sane defaults (a realistic 1080p dual-audio-style
  * anime release, ~1.4 GB, 25 seeders, not rejected) — override any field for the case
  * under test. Used by acquire pipeline tests (prefilter, pick) so each test only spells

@@ -6,6 +6,7 @@ import { PlacedFiles } from '../src/db/placedFiles.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS, MOUNT_RETRY_MS } from '../src/pipelines/ingest/run.js';
 import {
+  bundleResponse,
   ctxWithClient,
   enqueueAndClaim,
   episodeResource,
@@ -563,7 +564,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     });
     const item = manualImportItem({ path: '/downloads/Show/Cryptic Name.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope[`folder:${fx.torrentDir}`] = [item];
-    const llm = new FakeGenerator([{ mappings: [{ file: 1, episodeIds: [2] }], confidence: 'low', reasoning: 'guessing from context' }]);
+    const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: 1, episodeIds: [2] }], confidence: 'low', reasoning: 'guessing from context' })]);
     fx.ctx.llm = llm;
     const job = claimIngestJob(fx);
 

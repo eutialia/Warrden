@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
-import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient } from './helpers.js';
+import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
   const client = fakeArrClient({
@@ -15,7 +15,7 @@ function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPleas
 
 describe('runAcquireJob — single-season series (the common case)', () => {
   it('happy path: grabs, pins, records reasoning', async () => {
-    const { ctx, client, job } = setup({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'matches CHS policy' });
+    const { ctx, client, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'matches CHS policy' }));
     await runAcquireJob(ctx, job);
     expect(client.grabbed).toEqual([{ guid: 'g1', indexerId: candidate({}).indexerId }]);
     expect(client.profiles[0].required).toEqual(['SubsPlease']);
@@ -24,14 +24,14 @@ describe('runAcquireJob — single-season series (the common case)', () => {
     expect(rec.reasoning).toContain('CHS');
   });
   it('records the source from job.payload.source when the enqueuer set one, instead of the "webhook" default', async () => {
-    const { ctx, job } = setup({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' });
+    const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
     job.payload.source = 'reconcile';
     await runAcquireJob(ctx, job);
     const rec: any = ctx.db.prepare('SELECT * FROM acquire_records').get();
     expect(rec.source).toBe('reconcile');
   });
   it('forwards job.payload.hint into the pick prompt when it is a non-empty string', async () => {
-    const { ctx, job } = setup({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' });
+    const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
     job.payload.hint = 'prefer the 10bit encode this time';
     await runAcquireJob(ctx, job);
     const llm = ctx.llm as FakeGenerator;
@@ -42,14 +42,14 @@ describe('runAcquireJob — single-season series (the common case)', () => {
     { name: 'empty string', hint: '' },
     { name: 'non-string', hint: 42 },
   ])('does not forward job.payload.hint when it is $name', async ({ hint }) => {
-    const { ctx, job } = setup({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' });
+    const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
     job.payload.hint = hint;
     await runAcquireJob(ctx, job);
     const llm = ctx.llm as FakeGenerator;
     expect(llm.calls[0]!.prompt).not.toContain('Operator hint');
   });
   it('none-viable: no grab, attention event, record kept', async () => {
-    const { ctx, client, job } = setup({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'no CHS release yet' });
+    const { ctx, client, job } = setup(pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'no CHS release yet' }));
     await runAcquireJob(ctx, job);
     expect(client.grabbed).toHaveLength(0);
     expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
@@ -66,13 +66,13 @@ describe('runAcquireJob — single-season series (the common case)', () => {
   });
 
   it('a pin failure after a successful grab does not fail the job — it warns and still records "grabbed"', async () => {
-    const { ctx, client, job } = setup({
+    const { ctx, client, job } = setup(pickResponse({
       decision: 'pick',
       candidate: 1,
       releaseGroup: 'SubsPlease',
       confidence: 'high',
       reasoning: 'matches CHS policy',
-    });
+    }));
     client.createTag = vi.fn(async () => {
       throw new Error('arr is down');
     });
@@ -89,13 +89,13 @@ describe('runAcquireJob — single-season series (the common case)', () => {
   });
 
   it('a failure recording the outcome after a successful grab does not fail the job — it warns instead', async () => {
-    const { ctx, client, job } = setup({
+    const { ctx, client, job } = setup(pickResponse({
       decision: 'pick',
       candidate: 1,
       releaseGroup: 'SubsPlease',
       confidence: 'high',
       reasoning: 'matches CHS policy',
-    });
+    }));
     const insertSpy = vi.spyOn(AcquireRecords.prototype, 'insert').mockImplementation(() => {
       throw new Error('db is down');
     });
@@ -119,7 +119,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       series: [seriesResource({ id: 42, title: 'Frieren' })],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' })]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -134,7 +134,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       movies: [movieResource({ title: 'A Movie', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' })]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'sonarr', payload: { title: 'X' } });
 
     await runAcquireJob(ctx, job);
@@ -149,7 +149,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       movies: [movieResource({ title: 'Looked Up Title', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'n/a' }]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'n/a' })]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'sonarr', payload: {} });
 
     await runAcquireJob(ctx, job);
@@ -190,8 +190,8 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([
-        { decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 1 ok' },
-        { decision: 'pick', candidate: 1, releaseGroup: 'OtherGroup', confidence: 'high', reasoning: 'season 2 ok' },
+        pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 1 ok' }),
+        pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'OtherGroup', confidence: 'high', reasoning: 'season 2 ok' }),
       ]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
@@ -235,7 +235,7 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
       if (params.seasonNumber === 1) return [];
       return [candidate({ guid: 'g1' })];
     });
-    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches policy' }]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches policy' })]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -272,8 +272,8 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
       return [candidate({ guid: 'g2' })];
     });
     const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([
-        { decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 1' },
-        { decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'season 2 has nothing good' },
+        pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 1' }),
+        pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'season 2 has nothing good' }),
       ]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
@@ -327,7 +327,7 @@ describe('runAcquireJob — candidate cap (I11)', () => {
     // prefilter — only the cap itself should be responsible for the drop this test checks.
     const many = Array.from({ length: 35 }, (_, i) => candidate({ guid: `g${i}`, seeders: 100 - i }));
     const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'Frieren' })], releases: many });
-    const llm = new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: null, confidence: 'high', reasoning: 'top seeded' }]);
+    const llm = new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: null, confidence: 'high', reasoning: 'top seeded' })]);
     const ctx = ctxWithClient('sonarr', client, { llm });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
@@ -396,7 +396,7 @@ describe('runAcquireJob — double-grab guard (I10)', () => {
       if (params.seasonNumber === 1) throw new Error('season 1 should never be searched again');
       return [candidate({ guid: 'g2' })];
     });
-    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 2' }]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 2' })]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     new AcquireRecords(ctx.db).insert({

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { LlmError } from '../src/llm/generator.js';
 import { planBundleImport } from '../src/pipelines/ingest/bundle.js';
-import { episodeResource, manualImportItem, FakeGenerator } from './helpers.js';
+import { episodeResource, manualImportItem, FakeGenerator, bundleResponse } from './helpers.js';
 
 const seriesTitle = 'Frieren';
 const seriesId = 42;
@@ -111,7 +111,7 @@ describe('planBundleImport', () => {
     // S02E03 already has a file: a bundle rescue must not silently displace it.
     const episodes = [episodeResource({ id: 7, seasonNumber: 2, episodeNumber: 3, hasFile: true })];
     const item = manualImportItem({ path: '/downloads/Show/Show - S02E03 [1080p].mkv', episodes: [] });
-    const llm = new FakeGenerator([{ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'already has a file' }]);
+    const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'already has a file' })]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
 
@@ -141,7 +141,7 @@ describe('planBundleImport', () => {
     ];
     const item = manualImportItem({ path: '/downloads/Bundle/Show - 05.mkv', episodes: [] });
     const llm = new FakeGenerator([
-      { mappings: [{ file: 1, episodeIds: [] }], confidence: 'medium', reasoning: 'genuinely ambiguous between seasons' },
+      bundleResponse({ mappings: [{ file: 1, episodeIds: [] }], confidence: 'medium', reasoning: 'genuinely ambiguous between seasons' }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
@@ -162,14 +162,14 @@ describe('planBundleImport', () => {
     const itemA = manualImportItem({ path: '/downloads/Bundle/Bundle - Ep A.mkv' });
     const itemB = manualImportItem({ path: '/downloads/Bundle/Bundle - Ep B.mkv' });
     const llm = new FakeGenerator([
-      {
+      bundleResponse({
         mappings: [
           { file: 1, episodeIds: [1] },
           { file: 2, episodeIds: [2] },
         ],
         confidence: 'medium',
         reasoning: 'matched by absolute order',
-      },
+      }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [itemA, itemB], episodes });
@@ -191,7 +191,7 @@ describe('planBundleImport', () => {
     const episodes = [episodeResource({ id: 1, hasFile: false })];
     const item = manualImportItem({ path: '/downloads/Bundle/NCOP.mkv' });
     const llm = new FakeGenerator([
-      { mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'not an episode' },
+      bundleResponse({ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'not an episode' }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
@@ -204,14 +204,14 @@ describe('planBundleImport', () => {
     const ncop = manualImportItem({ path: '/downloads/Bundle/NCOP.mkv' });
     const ep = manualImportItem({ path: '/downloads/Bundle/Ep One.mkv' });
     const llm = new FakeGenerator([
-      {
+      bundleResponse({
         mappings: [
           { file: 1, episodeIds: [] },
           { file: 2, episodeIds: [1] },
         ],
         confidence: 'high',
         reasoning: 'one episode, one non-video extra',
-      },
+      }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [ncop, ep], episodes });
@@ -226,7 +226,7 @@ describe('planBundleImport', () => {
     const menu = manualImportItem({ path: '/downloads/Bundle/Menu.mkv' });
     const llm = new FakeGenerator([
       // Only file 1 (Ep One) is mentioned; file 2 (Menu) never appears in `mappings` at all.
-      { mappings: [{ file: 1, episodeIds: [1] }], confidence: 'high', reasoning: 'only one real episode' },
+      bundleResponse({ mappings: [{ file: 1, episodeIds: [1] }], confidence: 'high', reasoning: 'only one real episode' }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [ep, menu], episodes });
@@ -239,7 +239,7 @@ describe('planBundleImport', () => {
     const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
     const item = manualImportItem({ path: '/downloads/Bundle/Ep One.mkv' });
     const llm = new FakeGenerator([
-      { mappings: [{ file: 1, episodeIds: [999] }], confidence: 'medium', reasoning: 'guess' },
+      bundleResponse({ mappings: [{ file: 1, episodeIds: [999] }], confidence: 'medium', reasoning: 'guess' }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
@@ -254,7 +254,7 @@ describe('planBundleImport', () => {
     ];
     const item = manualImportItem({ path: '/downloads/Bundle/Double Episode.mkv' });
     const llm = new FakeGenerator([
-      { mappings: [{ file: 1, episodeIds: [1, 999, 2] }], confidence: 'low', reasoning: 'double episode file' },
+      bundleResponse({ mappings: [{ file: 1, episodeIds: [1, 999, 2] }], confidence: 'low', reasoning: 'double episode file' }),
     ]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
@@ -269,7 +269,7 @@ describe('planBundleImport', () => {
   ])('throws LlmError naming the number when the LLM maps an out-of-range file index ($name)', async ({ fileNumber }) => {
     const episodes = [episodeResource({ id: 1, hasFile: false })];
     const item = manualImportItem({ path: '/downloads/Bundle/Ep One.mkv' });
-    const llm = new FakeGenerator([{ mappings: [{ file: fileNumber, episodeIds: [1] }], confidence: 'high', reasoning: '?' }]);
+    const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: fileNumber, episodeIds: [1] }], confidence: 'high', reasoning: '?' })]);
 
     const call = planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
     await expect(call).rejects.toThrow(LlmError);
@@ -279,7 +279,7 @@ describe('planBundleImport', () => {
   it('returns null when every item is unimportable (no arr resolution, no deterministic match, LLM finds nothing)', async () => {
     const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
     const sample = manualImportItem({ path: '/downloads/Bundle/sample.mkv' });
-    const llm = new FakeGenerator([{ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'sample file' }]);
+    const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'sample file' })]);
 
     const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [sample], episodes });
 
@@ -309,7 +309,7 @@ describe('planBundleImport', () => {
       episodeResource({ id: 2, seasonNumber: 1, episodeNumber: 1, hasFile: true }),
     ];
     const item = manualImportItem({ path: '/downloads/Bundle/Extra.mkv', size: Math.round(0.7 * 1_073_741_824) });
-    const llm = new FakeGenerator([{ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'extra' }]);
+    const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: 1, episodeIds: [] }], confidence: 'high', reasoning: 'extra' })]);
 
     await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
 
@@ -372,7 +372,7 @@ describe('planBundleImport', () => {
       const episodes = [episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 1, hasFile: true })];
       const item = manualImportItem({ path: '/downloads/Bundle/Weird Name.mkv' });
       const llm = new FakeGenerator([
-        { mappings: [{ file: 1, episodeIds: [10] }], confidence: 'high', reasoning: 'certain match, replaces existing file' },
+        bundleResponse({ mappings: [{ file: 1, episodeIds: [10] }], confidence: 'high', reasoning: 'certain match, replaces existing file' }),
       ]);
 
       const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
@@ -383,7 +383,7 @@ describe('planBundleImport', () => {
     it('never upgrades: a plan with no occupied targets keeps the LLM-reported confidence as-is', async () => {
       const episodes = [episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
       const item = manualImportItem({ path: '/downloads/Bundle/Weird Name.mkv' });
-      const llm = new FakeGenerator([{ mappings: [{ file: 1, episodeIds: [10] }], confidence: 'medium', reasoning: 'inferred' }]);
+      const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: 1, episodeIds: [10] }], confidence: 'medium', reasoning: 'inferred' })]);
 
       const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
 
@@ -402,7 +402,7 @@ describe('planBundleImport', () => {
     const tier2Item = manualImportItem({ path: '/downloads/Bundle/Show - S01E02.mkv' }); // deterministic -> id 2
 
     const llm = new FakeGenerator([
-      { mappings: [{ file: 1, episodeIds: [3] }], confidence: 'medium', reasoning: 'inferred from absolute order' },
+      bundleResponse({ mappings: [{ file: 1, episodeIds: [3] }], confidence: 'medium', reasoning: 'inferred from absolute order' }),
     ]);
 
     const plan = await planBundleImport({
@@ -431,7 +431,7 @@ describe('planBundleImport', () => {
       const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
       const item = manualImportItem({ path: '/downloads/Bundle/Ep One.mkv' });
       const llm = new FakeGenerator([
-        { mappings: [{ file: 1, episodeIds: [1, 1] }], confidence: 'high', reasoning: 'dup id from the LLM' },
+        bundleResponse({ mappings: [{ file: 1, episodeIds: [1, 1] }], confidence: 'high', reasoning: 'dup id from the LLM' }),
       ]);
 
       const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
@@ -461,7 +461,7 @@ describe('planBundleImport', () => {
       ];
       const item = manualImportItem({ path: '/downloads/Bundle/Double Episode.mkv' });
       const llm = new FakeGenerator([
-        { mappings: [{ file: 1, episodeIds: [1, 2] }], confidence: 'high', reasoning: 'double episode' },
+        bundleResponse({ mappings: [{ file: 1, episodeIds: [1, 2] }], confidence: 'high', reasoning: 'double episode' }),
       ]);
 
       const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
