@@ -3,7 +3,7 @@ import type { ArrApi } from '../arr/types.js';
 import { instanceKind } from '../config/instances.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
-import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../pipelines/acquire/pin.js';
+import { foreignProfilesCarryingTag, isWarrdenProfile, isWarrdenTag } from './ownership.js';
 import { errorMessage } from '../util/errors.js';
 
 /**
@@ -16,11 +16,14 @@ import { errorMessage } from '../util/errors.js';
  * here ever deletes an arr-side object it can't verify it created, on the chance the
  * registry and the arr have drifted apart (a user renamed it, adopted it, etc.).
  *
- * Deliberately standalone rather than sharing code with `gcTagRow` — GC's orphan logic
+ * The overall flow here is deliberately standalone from `gcTagRow` — GC's orphan logic
  * (still-pinned-to-a-series checks, grace periods) is interleaved with these same-shape
- * safety checks in a way that extracting a shared helper would only obscure. The two
- * pieces that *do* need to agree — the `warrden-`/`warrden: ` prefixes a live object must
- * carry to be considered "ours" — both import the same constants from `pin.ts`.
+ * safety checks in a way that extracting a shared flow would only obscure. But the actual
+ * ownership predicates — the `warrden-`/`warrden: ` prefixes a live object must carry to be
+ * "ours", and which foreign profiles a tag deletion's cascade would silently strip — are
+ * shared via `./ownership.js`, since those two DO need to agree exactly: a foreign profile
+ * that slips one check but not the other is precisely the drift this module exists to
+ * prevent.
  *
  * If the arr call itself fails unexpectedly (anything other than the notification 404
  * special-case below), the failure is logged as a `managed.delete-failed` warn event and
@@ -94,7 +97,7 @@ async function deleteInArr(ctx: Pick<AppContext, 'events' | 'config'>, arr: ArrA
       const liveProfile = liveProfiles.find((p) => p.id === row.external_id);
       if (!liveProfile) return false; // already gone
 
-      if (!liveProfile.name.startsWith(WARRDEN_PROFILE_PREFIX)) {
+      if (!isWarrdenProfile(liveProfile.name)) {
         ctx.events.append({
           kind: 'managed.delete-skipped',
           level: 'warn',
@@ -115,8 +118,8 @@ async function deleteInArr(ctx: Pick<AppContext, 'events' | 'config'>, arr: ArrA
     // referencing it — a foreign (non-warrden) profile left with an empty `tags` list
     // matches EVERY series, so the tag must survive in the arr even if its own label
     // looks like ours, as long as such a profile still carries it.
-    const carriedByForeignProfile = liveProfiles.some((p) => !p.name.startsWith(WARRDEN_PROFILE_PREFIX) && p.tags.includes(row.external_id));
-    if (carriedByForeignProfile) {
+    const foreignCarriers = foreignProfilesCarryingTag(liveProfiles, row.external_id);
+    if (foreignCarriers.length > 0) {
       ctx.events.append({
         kind: 'managed.delete-skipped',
         level: 'warn',
@@ -129,7 +132,7 @@ async function deleteInArr(ctx: Pick<AppContext, 'events' | 'config'>, arr: ArrA
     const liveTag = liveTags.find((t) => t.id === row.external_id);
     if (!liveTag) return false; // already gone
 
-    if (!liveTag.label.startsWith(WARRDEN_TAG_PREFIX)) {
+    if (!isWarrdenTag(liveTag.label)) {
       ctx.events.append({
         kind: 'managed.delete-skipped',
         level: 'warn',

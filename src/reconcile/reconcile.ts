@@ -4,7 +4,7 @@ import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { SyncState } from '../db/syncState.js';
 import type { TargetKind } from '../jobs/queue.js';
-import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../pipelines/acquire/pin.js';
+import { foreignProfilesCarryingTag, isWarrdenProfile, isWarrdenTag } from '../managed/ownership.js';
 import { errorMessage } from '../util/errors.js';
 
 const RECONCILE_SOURCE = 'reconcile';
@@ -372,7 +372,7 @@ async function gcTagRow(
 
   if (profileRow) {
     if (liveProfile) {
-      if (liveProfile.name.startsWith(WARRDEN_PROFILE_PREFIX)) {
+      if (isWarrdenProfile(liveProfile.name)) {
         // Order matters: deleting the tag first would leave a warrden-owned profile
         // pinned to a now-dead tag id in the arr — a silently inert pin. `profileRow`'s
         // registered id is the same one `liveProfile` was matched on, so it's used here
@@ -398,10 +398,27 @@ async function gcTagRow(
     managedObjects.delete(name, 'release_profile', profileRow.external_id);
   }
 
+  // Widen the guard beyond the ONE group-matched profile above: Sonarr's tag-delete cascade
+  // strips the tag from EVERY profile referencing it, so any OTHER live profile — not just
+  // the one this registry happens to have a row for — that isn't warrden-named and still
+  // carries this tag id must block the arr-side delete the same way, or it silently ends up
+  // with an empty `tags` list (which Sonarr treats as matching every series). Matches the
+  // same all-live-profiles scan `deleteObject.ts`'s `deleteInArr` does for a manual delete.
+  const foreignCarriers = foreignProfilesCarryingTag(liveProfiles, tagRow.external_id);
+  if (!skipTagArrDeletion && foreignCarriers.length > 0) {
+    skipTagArrDeletion = true;
+    ctx.events.append({
+      kind: 'reconcile.gc-skip-tag-foreign-profile',
+      level: 'warn',
+      message: `Skipped deleting tag id ${tagRow.external_id} for group "${group}" on "${name}" — still carried by non-warrden release profile(s) (${foreignCarriers.map((p) => p.name).join(', ')}); deleting it would cascade into stripping it from them, leaving them with no tags (which Sonarr treats as matching every series)`,
+      data: { instance: name, tagId: tagRow.external_id, group, foreignProfileIds: foreignCarriers.map((p) => p.id) },
+    });
+  }
+
   let tagDeleted = false;
   const liveTag = liveTags.find((t) => t.id === tagRow.external_id);
   if (liveTag && !skipTagArrDeletion) {
-    if (liveTag.label.startsWith(WARRDEN_TAG_PREFIX)) {
+    if (isWarrdenTag(liveTag.label)) {
       await client.deleteTag(tagRow.external_id);
       tagDeleted = true;
     } else {

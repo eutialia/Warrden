@@ -221,6 +221,50 @@ describe('reconcile', () => {
     expect(gcEvent!.data).toMatchObject({ deleted: false, profileDeleted: false, tagDeleted: false });
   });
 
+  it('gc widens the tag-deletion guard beyond the one group-matched profile: a foreign profile carrying the tag but NOT group-matched still blocks the arr-side tag delete', async () => {
+    const client = fakeArrClient({ series: [series(1)] }); // untagged, so the pin looks orphaned
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    const tag = client.pushTag('warrden-realgroup');
+    const ownProfile = client.pushProfile({
+      name: 'warrden: [RealGroup]',
+      enabled: true,
+      required: ['RealGroup'],
+      ignored: [],
+      tags: [tag.id],
+      indexerId: 0,
+    });
+    seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'RealGroup', createdAt: wellPastGrace(), tag, profile: ownProfile });
+
+    // A user's OWN profile — never registered by Warrden, and not the group-matched
+    // registry profile above — that independently carries this exact tag id (e.g. added by
+    // hand in Sonarr's own UI). The old guard only ever checked the ONE group-matched
+    // profile's live name, so this foreign carrier slipped past it entirely.
+    const foreignProfile = client.pushProfile({
+      name: 'My Custom Profile',
+      enabled: true,
+      required: [],
+      ignored: [],
+      tags: [tag.id],
+      indexerId: 0,
+    });
+
+    await reconcile(ctx);
+
+    // The warrden-owned, group-matched profile is still deleted as usual.
+    expect(client.profiles.some((p) => p.id === ownProfile.id)).toBe(false);
+    // But the tag itself survives — deleting it would cascade into stripping it from the
+    // foreign profile too, leaving it with an empty tags list (matching every series).
+    expect(client.tags).toHaveLength(1);
+    expect(client.tags[0]!.id).toBe(tag.id);
+    expect(client.profiles.some((p) => p.id === foreignProfile.id)).toBe(true);
+
+    const skipEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.gc-skip-tag-foreign-profile');
+    expect(skipEvents).toHaveLength(1);
+    expect(skipEvents[0]!.level).toBe('warn');
+    expect(skipEvents[0]!.data).toMatchObject({ foreignProfileIds: [foreignProfile.id] });
+  });
+
   it('gc never deletes a tag from the arr whose live label is not warrden-owned — drops the registry row only, with a warn event', async () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the registered tag looks unused
     const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
