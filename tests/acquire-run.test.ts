@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
-import { makeCtx, candidate, seriesResource, FakeGenerator, fakeArrClient, enqueueAndClaim } from './helpers.js';
+import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
   const client = fakeArrClient({
@@ -134,7 +134,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
 
   it('searches a movie with {movieId} and never pins', async () => {
     const client = fakeArrClient({
-      movies: [{ id: 7, title: 'A Movie', year: 2023, tmdbId: 1, added: '', hasFile: false }],
+      movies: [movieResource({ title: 'A Movie', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = makeCtx({
@@ -152,7 +152,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
 
   it('falls back to a listMovies() lookup for the title when the job was enqueued without one', async () => {
     const client = fakeArrClient({
-      movies: [{ id: 7, title: 'Looked Up Title', year: 2023, tmdbId: 1, added: '', hasFile: false }],
+      movies: [movieResource({ title: 'Looked Up Title', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = makeCtx({
@@ -368,7 +368,7 @@ describe('runAcquireJob — candidate cap (I11)', () => {
 describe('runAcquireJob — double-grab guard (I10)', () => {
   it('movie: skips the grab and completes cleanly when a crashed re-run already grabbed a release for this job', async () => {
     const client = fakeArrClient({
-      movies: [{ id: 7, title: 'A Movie', year: 2023, tmdbId: 1, added: '', hasFile: false }],
+      movies: [movieResource({ title: 'A Movie', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
     const llm = new FakeGenerator([]);

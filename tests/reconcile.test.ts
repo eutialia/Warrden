@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { HistoryRecord, MovieResource } from '../src/arr/types.js';
+import type { HistoryRecord } from '../src/arr/types.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { SyncState } from '../src/db/syncState.js';
 import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
 import { reconcile } from '../src/reconcile/reconcile.js';
-import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource } from './helpers.js';
+import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource, movieResource } from './helpers.js';
 
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
-const movie = (id: number): MovieResource => ({ id, title: `M${id}`, year: 2024, tmdbId: id, added: '', hasFile: true });
+const movie = (id: number) => movieResource({ id, title: `M${id}`, year: 2024, tmdbId: id, hasFile: true });
 
 /** A `downloadFolderImported` history record fixture for `ingestBackstop` tests. */
 const historyRecord = (overrides: Partial<HistoryRecord> & { id: number }): HistoryRecord => ({

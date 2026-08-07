@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ManagedObjects } from '../src/db/managedObjects.js';
-import { freshDb } from './helpers.js';
+import { freshDb, withFakeTime } from './helpers.js';
 
 describe('ManagedObjects', () => {
   it('inserts and lists rows, filtered by arrInstance/kind', () => {
@@ -24,8 +24,7 @@ describe('ManagedObjects', () => {
   });
 
   it('re-registering an existing triple refreshes created_at instead of leaving it stale (GC uses it as a grace-period clock)', () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTime(() => {
       const objs = new ManagedObjects(freshDb());
       vi.setSystemTime(1_000);
       objs.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 1, name: 'warrden-group' });
@@ -35,9 +34,7 @@ describe('ManagedObjects', () => {
       objs.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 1, name: 'warrden-group' });
       expect(objs.list()).toHaveLength(1); // still no duplicate row
       expect(objs.list()[0]!.created_at).toBe(2_000); // but its clock restarted
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('gets a row by its internal id, or null for an unknown one', () => {

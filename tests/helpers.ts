@@ -31,6 +31,32 @@ import { BYTES_PER_GB } from '../src/util/bytes.js';
 const createdDirs: string[] = [];
 const openDbs: Database.Database[] = [];
 
+/**
+ * Runs `fn` under `vi.useFakeTimers()`, restoring real timers afterward even if `fn`
+ * throws — the `vi.useFakeTimers(); try { ... } finally { vi.useRealTimers(); }` wrapper
+ * every test needing `vi.setSystemTime` inside a single test body repeats. Returns
+ * whatever `fn` returns, so a test can still assert on it directly. Async-aware: an `fn`
+ * that returns a `Promise` keeps fake timers active until that promise settles (real
+ * timers restored via `.finally`) rather than switching back the instant `fn()` itself
+ * returns — a plain synchronous `finally` would restore real time before an `await`ed
+ * body actually finished running.
+ */
+export function withFakeTime<T>(fn: () => T): T {
+  vi.useFakeTimers();
+  let result: T;
+  try {
+    result = fn();
+  } catch (err) {
+    vi.useRealTimers();
+    throw err;
+  }
+  if (result instanceof Promise) {
+    return result.finally(() => vi.useRealTimers()) as T;
+  }
+  vi.useRealTimers();
+  return result;
+}
+
 /** Creates a fresh temp directory for a test, e.g. as a data dir for config/db files. */
 export function tmpDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'warrden-'));
@@ -380,6 +406,23 @@ export function seriesResource(overrides?: Partial<SeriesResource>): SeriesResou
 }
 
 /**
+ * A `MovieResource` fixture with sane defaults (id 7, unfiled) — override `hasFile` for a
+ * test exercising the movie occupied-slot guards (ingest's rescueMovie, acquire's
+ * double-grab guard).
+ */
+export function movieResource(overrides?: Partial<MovieResource>): MovieResource {
+  return {
+    id: 7,
+    title: 'Perfect Blue',
+    year: 1997,
+    tmdbId: 573,
+    added: '',
+    hasFile: false,
+    ...overrides,
+  };
+}
+
+/**
  * An `EpisodeResource` fixture with sane defaults (series #42, S01E01, has a file on
  * disk) — override any field, most commonly `seasonNumber`/`episodeNumber`/
  * `absoluteEpisodeNumber`, for a test exercising sidecar matching (see
@@ -474,7 +517,7 @@ export function ingestFixture(opts?: {
 
   const client = fakeArrClient({
     series: targetKind === 'series' ? [seriesResource({ id: targetId, title: seriesTitle })] : [],
-    movies: targetKind === 'movie' ? [{ id: targetId, title: seriesTitle, year: 2024, tmdbId: 1, added: '', hasFile: true }] : [],
+    movies: targetKind === 'movie' ? [movieResource({ id: targetId, title: seriesTitle, year: 2024, tmdbId: 1, hasFile: true })] : [],
     seriesHistory: targetKind === 'series' ? history : [],
     movieHistory: targetKind === 'movie' ? history : [],
     episodes: targetKind === 'series' ? episodes : [],

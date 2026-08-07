@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
-import { freshDb } from './helpers.js';
+import { freshDb, withFakeTime } from './helpers.js';
 
 describe('AcquireRecords', () => {
   it('inserts a record and reads it back via listByTarget, newest first', () => {
@@ -36,8 +36,7 @@ describe('AcquireRecords', () => {
   });
 
   it('listByTarget bounds (since/until) scope results to a window, same as outcomeForJob', () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTime(() => {
       const records = new AcquireRecords(freshDb());
       vi.setSystemTime(1_000);
       records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'none-viable' });
@@ -52,9 +51,7 @@ describe('AcquireRecords', () => {
       expect(records.listByTarget('sonarr', 'series', 42, { since: 4_000 })).toMatchObject([{ status: 'grabbed' }]);
       // A window with no records in it at all.
       expect(records.listByTarget('sonarr', 'series', 42, { since: 100, until: 200 })).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('defaults source to null when not given', () => {
@@ -88,8 +85,7 @@ describe('AcquireRecords', () => {
     });
 
     it('an until bound stops a later re-pick from retroactively changing a terminal job outcome', () => {
-      vi.useFakeTimers();
-      try {
+      withFakeTime(() => {
         const records = new AcquireRecords(freshDb());
         vi.setSystemTime(1_000);
         records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'none-viable' });
@@ -100,9 +96,7 @@ describe('AcquireRecords', () => {
         expect(records.outcomeForJob('sonarr', 'series', 42, 500, 2_000)).toBe('none-viable');
         // live job B (created 4000, no bound): sees the grab it just made
         expect(records.outcomeForJob('sonarr', 'series', 42, 4_000)).toBe('grabbed');
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
   });
 });

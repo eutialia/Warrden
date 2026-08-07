@@ -4,7 +4,7 @@ import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { loadConfig } from '../src/config/store.js';
 import type { AppContext } from '../src/context.js';
-import { makeCtx, configWithArrs, arrInstance, fakeArrClient } from './helpers.js';
+import { makeCtx, configWithArrs, arrInstance, fakeArrClient, withFakeTime } from './helpers.js';
 
 describe('dashboard api', () => {
   describe('GET /api/jobs, /api/jobs/:id', () => {
@@ -48,8 +48,7 @@ describe('dashboard api', () => {
     });
 
     it("bounds a terminal job's detail record to its own run window — an older job's detail does not pick up a later re-pick's record, and returns null when its own run produced none", async () => {
-      vi.useFakeTimers();
-      try {
+      await withFakeTime(async () => {
         const ctx = makeCtx();
         const records = new AcquireRecords(ctx.db);
         const app = createApp(ctx);
@@ -75,9 +74,7 @@ describe('dashboard api', () => {
         ctx.queue.complete(ctx.queue.claim()!.id);
         const detailB: any = await (await app.request(`/api/jobs/${jobBId}`)).json();
         expect(detailB.acquireRecord).toMatchObject({ status: 'grabbed', picked_guid: 'g1' });
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
   });
 

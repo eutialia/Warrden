@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PlacedFiles, type UpsertPlacedFileInput } from '../src/db/placedFiles.js';
-import { freshDb } from './helpers.js';
+import { freshDb, withFakeTime } from './helpers.js';
 
 function baseInput(overrides?: Partial<UpsertPlacedFileInput>): UpsertPlacedFileInput {
   return {
@@ -28,8 +28,7 @@ describe('PlacedFiles', () => {
   });
 
   it('upsert refreshes video_path, data, and created_at on re-placement', () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTime(() => {
       const files = new PlacedFiles(freshDb());
       const base = baseInput({ data: { lang: 'zh-Hans' } });
       vi.setSystemTime(1_000);
@@ -48,9 +47,7 @@ describe('PlacedFiles', () => {
         data: { lang: 'zh-Hant' },
         created_at: 2_000,
       });
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('defaults data to {} and jobId to null when not given', () => {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AttentionItems } from '../src/db/attention.js';
-import { freshDb } from './helpers.js';
+import { freshDb, withFakeTime } from './helpers.js';
 
 describe('AttentionItems', () => {
   it('open() inserts and returns the row', () => {
@@ -18,8 +18,7 @@ describe('AttentionItems', () => {
   });
 
   it('a second open() with the same (kind, jobId) while an open row exists refreshes it in place', () => {
-    vi.useFakeTimers();
-    try {
+    withFakeTime(() => {
       const items = new AttentionItems(freshDb());
       vi.setSystemTime(1_000);
       const first = items.open({ kind: 'ingest.no-match', message: 'first', jobId: 1, data: { n: 1 } });
@@ -31,9 +30,7 @@ describe('AttentionItems', () => {
       expect(items.list()).toHaveLength(1);
       const row = items.get(first.id)!;
       expect(row).toMatchObject({ ts: 2_000, message: 'second', data: { n: 2 } });
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it('open() with jobId omitted always creates a new row, even for the same kind', () => {
@@ -68,8 +65,7 @@ describe('AttentionItems', () => {
 
   describe('target-key dedupe (data carries instance/targetKind/targetId)', () => {
     it('collapses cross-job repeat proposals for the same target into one open row, refreshing ts/message/data/job_id to the latest', () => {
-      vi.useFakeTimers();
-      try {
+      withFakeTime(() => {
         const items = new AttentionItems(freshDb());
         vi.setSystemTime(1_000);
         const first = items.open({
@@ -95,9 +91,7 @@ describe('AttentionItems', () => {
           job_id: 11,
           data: { instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a', 'b'], reasoning: 'r2' },
         });
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it('keeps proposals for different targets (series id, instance, or kind) as separate open rows', () => {
@@ -141,17 +135,14 @@ describe('AttentionItems', () => {
 
   describe('setStatus', () => {
     it('transitions an open row and stamps resolved_at', () => {
-      vi.useFakeTimers();
-      try {
+      withFakeTime(() => {
         vi.setSystemTime(1_000);
         const items = new AttentionItems(freshDb());
         const row = items.open({ kind: 'k', message: 'm' });
         vi.setSystemTime(5_000);
         expect(items.setStatus(row.id, 'resolved')).toBe(true);
         expect(items.get(row.id)).toMatchObject({ status: 'resolved', resolved_at: 5_000 });
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it.each(['dismissed', 'resolved'] as const)('returns false when the row is already %s', (status) => {
@@ -180,8 +171,7 @@ describe('AttentionItems', () => {
     });
 
     it('orders newest-first (ts DESC, id DESC)', () => {
-      vi.useFakeTimers();
-      try {
+      withFakeTime(() => {
         const items = new AttentionItems(freshDb());
         vi.setSystemTime(1_000);
         const a = items.open({ kind: 'a', message: 'a' });
@@ -191,9 +181,7 @@ describe('AttentionItems', () => {
         const c = items.open({ kind: 'c', message: 'c' });
 
         expect(items.list().map((r) => r.id)).toEqual([c.id, b.id, a.id]);
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
   });
 
