@@ -227,7 +227,10 @@ interface MovieSourceScanResult {
  * under a shared root — and a child qualifies the moment ANY video under it (`walkFiles` is
  * itself recursive) matches the movie's file size exactly. This is stat-only (via
  * `fileSizeEquals`, so a file vanishing mid-scan is a non-match, not a crash): no file
- * content is ever read, and dot-directories are already pruned by `walkFiles`.
+ * content is ever read, and a dot-prefixed depth-1 entry is skipped before it's ever handed
+ * to `walkFiles` (see the loop below) — `walkFiles` prunes dot-directories it discovers
+ * while recursing, but never re-checks the root it's given, so this function has to do that
+ * check itself for each depth-1 entry it turns into a `walkFiles` root.
  *
  * Stops scanning further roots the moment a root yields ANY match — a real deployment can
  * have hundreds of torrent dirs across a root sitting on SMB, and once one root's already
@@ -248,6 +251,7 @@ function findMovieSourceDirsBySize(downloadRoots: string[], pathMappings: PathMa
     const matched = new Set<string>();
     for (const entry of readdirSync(localRoot, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.')) continue; // see this function's own doc — walkFiles won't prune its own root
       const childDir = join(localRoot, entry.name);
       if (walkFiles(childDir, VIDEO_EXTS).some((video) => fileSizeEquals(video, size))) {
         matched.add(childDir);
@@ -351,10 +355,13 @@ async function resolveTarget(client: ArrApi, job: JobRow): Promise<TargetContext
 }
 
 /**
- * Matches and places every swept sidecar. Deterministic matching runs first (against
- * `hasFile: true` episodes only — a sidecar needs a video already on disk to sit beside);
- * whatever it can't place, for a series target, is batched into a single `sidecar-match`
- * LLM call once the loop finishes (matching `matchSidecarsWithLlm`'s documented contract).
+ * Matches and places every swept sidecar. Deterministic matching runs first, against the
+ * FULL episode list (see the inline comment at its call site for why), accepting a hit
+ * only when it names an episode that's `hasFile: true` — a sidecar needs a video already
+ * on disk to sit beside; whatever it can't place, for a series target, is batched into a
+ * single `sidecar-match` LLM call once the loop finishes, which — unlike the deterministic
+ * pass — IS shown only `hasFile: true` episodes (matching `matchSidecarsWithLlm`'s
+ * documented contract).
  * A sidecar whose source path already has a live provenance row (its video still exists
  * AND the placed file itself is still there) short-circuits straight to a row refresh —
  * no re-matching, no re-copy — which is what keeps a settle-wait's early wake-up cheap to
@@ -372,6 +379,16 @@ async function resolveTarget(client: ArrApi, job: JobRow): Promise<TargetContext
  * than misattached to the main film, which would otherwise caption the wrong video. A
  * sidecar with no sibling video sharing its stem at all (the common case) is unaffected —
  * it attaches to the movie the same way it always has.
+ *
+ * That guard only runs when `identifiedSourceVideo` is actually known — the size match in
+ * `runIngestJob` found a video matching the movie's current file size. When it didn't (no
+ * import history AND no size match — e.g. the movie's file size changed after a quality
+ * upgrade, so nothing in the swept dirs matches it anymore), there's no known-good video to
+ * compare a sidecar's stem against, and applying the guard anyway would misfire on the
+ * common case: the main film's OWN subtitle set, stem-paired with the main film's own video
+ * sitting right next to it, would look exactly like an unrelated extra and get skipped.
+ * With no source video identified, sidecars just attach to the movie's arr-reported file
+ * the way they always did before this guard existed.
  */
 async function sweepSidecars(
   ctx: AppContext,
@@ -403,35 +420,44 @@ async function sweepSidecars(
         continue;
       }
 
-      const siblingVideo = siblingVideosInDir(dirname(sidecarPath)).find(
-        (v) => sidecarStem(basename(v)) === sidecarStem(basename(sidecarPath)),
-      );
-      if (siblingVideo && siblingVideo !== identifiedSourceVideo) {
-        ctx.events.append({
-          kind: 'ingest.skipped-extra',
-          jobId: job.id,
-          message: `Skipped "${basename(sidecarPath)}" — belongs to "${basename(siblingVideo)}", an extra the arr never imported`,
-          data: targetEventData(job, { sidecarPath, videoPath: siblingVideo }),
-        });
-        continue;
+      if (identifiedSourceVideo !== undefined) {
+        const siblingVideo = siblingVideosInDir(dirname(sidecarPath)).find(
+          (v) => sidecarStem(basename(v)) === sidecarStem(basename(sidecarPath)),
+        );
+        if (siblingVideo && siblingVideo !== identifiedSourceVideo) {
+          ctx.events.append({
+            kind: 'ingest.skipped-extra',
+            jobId: job.id,
+            message: `Skipped "${basename(sidecarPath)}" — belongs to "${basename(siblingVideo)}", an extra the arr never imported`,
+            data: targetEventData(job, { sidecarPath, videoPath: siblingVideo }),
+          });
+          continue;
+        }
       }
 
       tryPlace(ctx, job, placedFiles, sidecarPath, video.path, 'deterministic');
       continue;
     }
 
-    const hit = matchSidecarDeterministic(basename(sidecarPath), episodesWithFiles);
-    if (hit) {
+    // Must call matchSidecarDeterministic with the FULL episode list, not the hasFile-only
+    // `episodesWithFiles` — its single-regular-season heuristic ("exactly one regular
+    // season -> match by episodeNumber alone") only works when it can see every season.
+    // Filtering to hasFile:true first can leave exactly one COMPLETE season behind, which
+    // the heuristic then wrongly treats as "the only season" — e.g. S01 complete + S02
+    // missing turns a genuinely ambiguous bare "05" into a false-confident S01E05 when it
+    // was really meant for S02. So: match against everything, then only accept the hit
+    // when it names an episode that actually HAS a file to sit beside (mirrors bundle.ts's
+    // tier-2 match-then-reject, and sidecars.ts's own documented contract for this
+    // function). A hit on a fileless episode is "wait for the file", not "hand this to the
+    // LLM" — the LLM is never shown fileless episodes either (matchSidecarsWithLlm's own
+    // contract) — and a miss falls through to the LLM batch the same as before.
+    const hit = matchSidecarDeterministic(basename(sidecarPath), target.episodes);
+    if (hit && hit.hasFile) {
       placeEpisodeSidecar(ctx, job, placedFiles, target, sidecarPath, hit, 'deterministic');
       continue;
     }
-
-    // A miss against the hasFile-only list can still name a real episode that simply has
-    // no file yet — that's "wait for the file", not "hand this to the LLM", since the LLM
-    // is never shown fileless episodes either (matchSidecarsWithLlm's own contract).
-    const fullHit = matchSidecarDeterministic(basename(sidecarPath), target.episodes);
-    if (fullHit && !fullHit.hasFile) {
-      appendDeferred(ctx, job, sidecarPath, `matched S${fullHit.seasonNumber}E${fullHit.episodeNumber} but it has no file yet`);
+    if (hit && !hit.hasFile) {
+      appendDeferred(ctx, job, sidecarPath, `matched S${hit.seasonNumber}E${hit.episodeNumber} but it has no file yet`);
       continue;
     }
 

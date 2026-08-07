@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, readdirSync, renameSync, unlinkSync, type Dirent } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 
 const TMP_PREFIX = '.warrden-tmp-';
@@ -25,7 +25,22 @@ export function walkFiles(dir: string, exts: readonly string[]): string[] {
   const results: string[] = [];
 
   const visit = (current: string): void => {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch (err) {
+      // A subdirectory listed one level up can vanish (or turn into a file) before we
+      // actually descend into it — an active torrent client on an SMB share renaming or
+      // deleting its own folder mid-sweep, most commonly. ENOENT/ENOTDIR here means "nothing
+      // to walk anymore", the same defensive stance `fileSizeEquals` takes for a file
+      // vanishing mid-stat elsewhere in the ingest pipeline; skip it rather than failing the
+      // whole sweep. Anything else (a permission error, ...) is a real problem and still
+      // throws.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      throw err;
+    }
+    for (const entry of entries) {
       if (entry.name.startsWith('.')) continue; // dotfiles and dot-directories, pruned pre-descent
       const full = join(current, entry.name);
       if (entry.isDirectory()) {

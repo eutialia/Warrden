@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -163,6 +163,32 @@ describe('runIngestJob — sidecar sweep and placement', () => {
 
     const openRows = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((r) => r.kind === 'ingest.unmatched');
     expect(openRows).toHaveLength(2);
+  });
+
+  it('deterministic matching sees the FULL episode list, not just hasFile:true ones — a bare number that would falsely resolve within one "complete" season is deferred instead of misplaced once a second (fileless) season makes it genuinely ambiguous', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        // "Complete" season 1 (hasFile: true) — filtering to hasFile-only episodes before
+        // matching would leave this as the ONLY season, making a bare "05" look falsely
+        // unambiguous and match S01E05 by the single-regular-season heuristic.
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, absoluteEpisodeNumber: 25, episodeFileId: 100, hasFile: true }),
+        // The sidecar's REAL target, by absolute numbering — has no file yet.
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 2, episodeNumber: 5, absoluteEpisodeNumber: 5, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    const sidecarPath = join(fx.torrentDir, 'Show - 05.ass');
+    writeFileSync(sidecarPath, 'sub');
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    // NOT placed beside S01E05 — the full episode list makes two regular seasons visible,
+    // so the bare number resolves by absolute numbering to S02E05 instead, which correctly
+    // defers (no file yet) rather than misplacing beside an unrelated episode.
+    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId)).toHaveLength(0);
+    const deferred = findEvent(fx.ctx.events.list(), 'ingest.deferred');
+    expect(deferred).toBeTruthy();
+    expect(deferred!.message).toContain('S2E5');
   });
 
   it('foreign-file guard: the placement target already exists with no placed_files row -> ingest.skipped-foreign warn, content untouched', async () => {
@@ -634,6 +660,30 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(rows[0]).toMatchObject({ source_path: join(fx.torrentDir, 'Movie.chs.ass') });
   });
 
+  it('movie stem guard is gated on an identified source video: history-derived source dir but NO size match (e.g. a quality upgrade changed the file size) still places the main film\'s own sidecar normally', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    // History is present (ingestFixture's default), but the arr's own movieFile.size no
+    // longer matches anything actually sitting in the swept source dir — simulating a
+    // quality upgrade that changed the file size after history was recorded. There's no
+    // identifiedSourceVideo to compare a sidecar's stem against.
+    fx.client.movieFiles[0]!.size = 999_999;
+
+    const mainVideo = join(fx.torrentDir, 'Movie.mkv');
+    writeFileSync(mainVideo, 'video'); // 5 bytes — deliberately not movieFile.size above
+    writeFileSync(join(fx.torrentDir, 'Movie.chs.ass'), 'main-content');
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    // The stem guard must not fire with no identified source video — the main film's OWN
+    // subtitle, stem-paired with the main film's own video, must never be treated as an
+    // "extra"'s caption.
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.skipped-extra')).toBe(false);
+    expect(readFileSync(join(fx.libraryDir, 'Movie.zh-Hans.ass'), 'utf-8')).toBe('main-content');
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
+    expect(rows).toHaveLength(1);
+  });
+
   it('movie sidecar stem guard: the sibling-video lookup is depth-1 only — a video sharing a root-level sidecar\'s stem from a NESTED subfolder must never count as a sibling', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
     // A torrent client's own "SPs"/specials-style subfolder holds a video that happens to
@@ -674,6 +724,30 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(miss).toBeTruthy();
     expect(miss!.data).toMatchObject({ rootsScanned: 1 });
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7)).toHaveLength(0);
+  });
+
+  it('movie source-fallback: a dot-prefixed depth-1 directory (NAS housekeeping trees like .zfs/.Trashes) is skipped, not walked, even when it contains a size-matching video', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    fx.client.movieHistory = [];
+
+    const dotDir = join(fx.downloadsDir, '.zfs');
+    mkdirSync(dotDir, { recursive: true });
+    writeFileSync(join(dotDir, 'ghost.mkv'), 'video'); // same 5-byte size as the fixture's movieFile.size
+    // chmod 0 makes the directory unreadable: if findMovieSourceDirsBySize ever handed it
+    // to walkFiles instead of skipping it by name first, this would throw EACCES trying to
+    // list it — pruning by name *before* ever touching the directory never triggers that,
+    // same guard as tests/fs.test.ts's own dot-directory pruning test.
+    chmodSync(dotDir, 0o000);
+    try {
+      const job = claimIngestJob(fx);
+      await runIngestJob(fx.ctx, job);
+
+      expect(hasEvent(fx.ctx.events.list(), 'ingest.source-fallback')).toBe(false);
+      expect(findEvent(fx.ctx.events.list(), 'ingest.source-fallback-miss')).toBeTruthy();
+      expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7)).toHaveLength(0);
+    } finally {
+      chmodSync(dotDir, 0o755);
+    }
   });
 });
 

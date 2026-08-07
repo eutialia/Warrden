@@ -7,17 +7,23 @@ import { tmpDir } from './helpers.js';
 
 // walkFiles' sort-order test below needs readdirSync to hand back one specific directory's
 // entries in a deliberately non-lexicographic order — real filesystems can't be coerced
-// into that from a test, so it's mocked instead. `readdirState.reverseDir` is unset (real
-// behavior) for every other test in this file, including the `.zfs` pruning test, which
-// relies on the real EACCES from an unreadable directory. `vi.mock` factories are hoisted
-// above imports, so the mutable state has to come from `vi.hoisted` (a plain `const` here
-// would hit a TDZ error).
-const readdirState = vi.hoisted(() => ({ reverseDir: null as string | null }));
+// into that from a test, so it's mocked instead. Same mock also lets the readdir-fault
+// tests make one specific directory throw on demand (a real vanished-mid-walk race can't
+// be reproduced deterministically either). `readdirState.reverseDir`/`.throwFor` are unset
+// (real behavior) for every other test in this file, including the `.zfs` pruning test,
+// which relies on the real EACCES from an unreadable directory. `vi.mock` factories are
+// hoisted above imports, so the mutable state has to come from `vi.hoisted` (a plain
+// `const` here would hit a TDZ error).
+const readdirState = vi.hoisted(() => ({
+  reverseDir: null as string | null,
+  throwFor: null as { dir: string; err: NodeJS.ErrnoException } | null,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
     readdirSync: ((p: unknown, opts: unknown): unknown => {
+      if (readdirState.throwFor && p === readdirState.throwFor.dir) throw readdirState.throwFor.err;
       const entries = (actual.readdirSync as (p: unknown, opts: unknown) => unknown)(p, opts);
       return p === readdirState.reverseDir && Array.isArray(entries) ? [...entries].reverse() : entries;
     }) as typeof actual.readdirSync,
@@ -121,6 +127,40 @@ describe('walkFiles', () => {
   it('returns an empty array for a missing directory', () => {
     const dir = join(tmpDir(), 'does-not-exist');
     expect(walkFiles(dir, ['.srt'])).toEqual([]);
+  });
+
+  it('treats a subdirectory vanishing between listing and descent (ENOENT) as "nothing to walk there", not a crash — still returns every other match', () => {
+    // Simulates an active torrent client on an SMB share renaming/deleting its own
+    // subfolder mid-sweep: the root's own readdir already listed `sub`, but by the time
+    // walkFiles descends into it, it's gone.
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'sub'));
+    writeFileSync(join(dir, 'visible.srt'), '');
+
+    const err = new Error("ENOENT: no such file or directory, scandir 'sub'") as NodeJS.ErrnoException;
+    err.code = 'ENOENT';
+    const subDir = join(dir, 'sub');
+    readdirState.throwFor = { dir: subDir, err };
+    try {
+      expect(walkFiles(dir, ['.srt'])).toEqual([join(dir, 'visible.srt')]);
+    } finally {
+      readdirState.throwFor = null;
+    }
+  });
+
+  it('still throws for a readdir failure that is not ENOENT/ENOTDIR (e.g. a permission error)', () => {
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'sub'));
+
+    const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+    err.code = 'EACCES';
+    const subDir = join(dir, 'sub');
+    readdirState.throwFor = { dir: subDir, err };
+    try {
+      expect(() => walkFiles(dir, ['.srt'])).toThrow('EACCES');
+    } finally {
+      readdirState.throwFor = null;
+    }
   });
 
   it('returns absolute paths even when given a relative directory', () => {
