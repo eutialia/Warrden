@@ -5,6 +5,7 @@ import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 
 const JOBS_LIMIT = 50;
@@ -15,15 +16,27 @@ export default function Activity() {
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
+  // Guards against an overlapping request clobbering an earlier one — an SSE burst racing
+  // this page's own initial load, or two SSE bursts racing each other — same convention as
+  // Attention/ManagedObjects.
+  const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
+    const isStale = beginFetch();
     fetchJobs(JOBS_LIMIT)
       .then((j) => {
+        if (isStale()) return;
         setJobs(j);
         setError(null);
       })
-      .catch((err: unknown) => setError(apiErrorMessage(err, 'failed to load jobs')))
-      .finally(() => setLoading(false));
-  }, []);
+      .catch((err: unknown) => {
+        if (isStale()) return;
+        setError(apiErrorMessage(err, 'failed to load jobs'));
+      })
+      .finally(() => {
+        if (isStale()) return;
+        setLoading(false);
+      });
+  }, [beginFetch]);
 
   // Any event (job update, acquire result, etc.) can mean the job list changed, so just
   // refetch wholesale on every message rather than trying to reconcile individual rows.

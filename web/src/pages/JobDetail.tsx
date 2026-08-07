@@ -7,6 +7,7 @@ import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 
 // Same idea as ManagedObjects.tsx's own `KIND_LABEL` — a raw `PlacedFileKind` reads fine
@@ -39,16 +40,22 @@ export default function JobDetail() {
     [id],
   );
 
+  // Guards the id-triggered load below against a newer one (a route change to a different
+  // `:id`) landing first — same shared mechanism as Attention/ManagedObjects, in place of a
+  // hand-rolled `let stale` ref. Only the id-effect's own call opts into this guard (as
+  // before); the SSE-triggered call further down deliberately doesn't (see its own comment).
+  const beginFetch = useFetchGeneration();
+
   useEffect(() => {
+    // Called unconditionally, even when the new `id` is falsy — every id change (including
+    // to no id at all) must invalidate whatever fetch a previous id kicked off, the same
+    // way the old `let stale` ref's cleanup ran unconditionally on every effect re-run.
+    const isStale = beginFetch();
     if (!id) return;
-    let stale = false;
     setData(null);
     setError(null);
-    load({ isStale: () => stale });
-    return () => {
-      stale = true; // ignore this effect's fetch if it resolves after `id` changed again
-    };
-  }, [id, load]);
+    load({ isStale });
+  }, [id, load, beginFetch]);
 
   // Any event can mean this job (or its acquire record) changed — refetch wholesale rather
   // than trying to reconcile individual fields. `debounceMs: 0` — unlike Activity/Attention/
