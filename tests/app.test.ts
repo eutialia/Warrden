@@ -8,7 +8,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
 
@@ -38,7 +38,7 @@ describe('app', () => {
 
   describe('webhooks route', () => {
     it('responds 200 with handleWebhook\'s result, even for an unhandled event', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -67,7 +67,7 @@ describe('app', () => {
     });
 
     it('enqueues an acquire job and answers 200 for a SeriesAdd event', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -84,7 +84,7 @@ describe('app', () => {
 
   describe('CSRF protection (hono/csrf on /api/* and /webhooks/*)', () => {
     it('blocks a cross-origin request against /webhooks/* using a "simple" content type that dodges CORS preflight', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -97,7 +97,7 @@ describe('app', () => {
     });
 
     it('blocks the same cross-origin attempt against /api/*', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/api/acquire', {
@@ -110,7 +110,7 @@ describe('app', () => {
     });
 
     it('allows a request with no Origin header at all, like the arr\'s own webhook POST', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/webhooks/sonarr', {
@@ -252,7 +252,7 @@ describe('app', () => {
     });
 
     it('POST /api/attention/:id/retry: 400 with no linked job, 400 when the linked job is gone, otherwise re-enqueues the JOB\'S OWN pipeline with source: retry and marks resolved only after enqueuing', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
 
@@ -302,7 +302,7 @@ describe('app', () => {
     });
 
     it('POST /api/attention/:id/repick: enqueues pipeline "acquire" even when the linked job\'s own pipeline was "ingest" (repick is always a re-pick, never the original pipeline)', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
       const enqueueResult = ctx.queue.enqueue({
@@ -338,7 +338,7 @@ describe('app', () => {
     });
 
     it('POST /api/attention/:id/repick: rejects a hint over 2000 characters with 400', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
       const enqueueResult = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
@@ -355,7 +355,7 @@ describe('app', () => {
     });
 
     it('POST /api/attention/:id/repick: always pipeline acquire, carries the hint, marks resolved', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
 
@@ -388,7 +388,7 @@ describe('app', () => {
     });
 
     it('POST /api/attention/:id/repick works with no hint given', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
 
@@ -411,7 +411,7 @@ describe('app', () => {
 
     it('POST /api/attention/:id/accept: executes the bundle-import with importMode "copy" and marks resolved only after it succeeds', async () => {
       const client = fakeArrClient();
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
 
@@ -433,7 +433,7 @@ describe('app', () => {
     });
 
     it('POST /api/attention/:id/accept: 400 on malformed data (not a bundle-import action)', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
       const item = attentionItems.open({ kind: 'ingest.unmatched', message: 'not acceptable', data: { instance: 'sonarr' } });
@@ -448,7 +448,7 @@ describe('app', () => {
       { name: 'a file missing path', files: [{ movieId: 7 }] },
       { name: 'a file with an empty-string path', files: [{ path: '' }] },
     ])('POST /api/attention/:id/accept: 400 on $name', async ({ files }) => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
       const item = attentionItems.open({
@@ -465,7 +465,7 @@ describe('app', () => {
     it('POST /api/attention/:id/accept: two concurrent requests for the SAME item only execute the import once — one 200, one 409', async () => {
       const client = fakeArrClient();
       client.executeManualImport = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 10)));
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
       const item = attentionItems.open({
@@ -504,7 +504,7 @@ describe('app', () => {
       client.executeManualImport = vi.fn(async () => {
         throw new Error('arr rejected the import');
       });
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       const attentionItems = new AttentionItems(ctx.db);
       const app = createApp(ctx);
       const item = attentionItems.open({
@@ -533,7 +533,7 @@ describe('app', () => {
 
     it('DELETE /api/managed-objects/:id: 404 for an unknown row, otherwise safe-deletes via deleteManagedObject and removes the registry entry', async () => {
       const client = fakeArrClient({ tags: [{ id: 3, label: `${WARRDEN_TAG_PREFIX}group` }] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       managedObjects.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 3, name: `${WARRDEN_TAG_PREFIX}group` });
       const rowId = managedObjects.list()[0]!.id;
@@ -569,7 +569,7 @@ describe('app', () => {
       client.deleteReleaseProfile = vi.fn(async () => {
         throw new Error('arr is down');
       });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       managedObjects.insert({ arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]` });
       const rowId = managedObjects.list()[0]!.id;
@@ -613,7 +613,7 @@ describe('app', () => {
 
   describe('POST /api/acquire hint', () => {
     it('forwards an optional hint into the enqueued job payload', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/api/acquire', {
@@ -627,7 +627,7 @@ describe('app', () => {
     });
 
     it('rejects a hint over 2000 characters with 400', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
 
       const res = await app.request('/api/acquire', {

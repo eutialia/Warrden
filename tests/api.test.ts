@@ -4,7 +4,7 @@ import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { loadConfig } from '../src/config/store.js';
 import type { AppContext } from '../src/context.js';
-import { makeCtx, configWithArrs, arrInstance, fakeArrClient, withFakeTime } from './helpers.js';
+import { makeCtx, configWithArrs, arrInstance, fakeArrClient, withFakeTime, ctxWithClient } from './helpers.js';
 
 describe('dashboard api', () => {
   describe('GET /api/jobs, /api/jobs/:id', () => {
@@ -129,7 +129,7 @@ describe('dashboard api', () => {
     });
 
     it('a PUT immediately updates ctx.config so a later GET sees it, without a restart', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
       const got: any = await (await app.request('/api/config')).json();
       got.reconcileIntervalMinutes = 30;
@@ -163,7 +163,7 @@ describe('dashboard api', () => {
     });
 
     it('removing an arr from config does not retroactively revoke webhook access — ctx.clients (built once at startup) is untouched by a config PUT', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
       const got: any = await (await app.request('/api/config')).json();
 
@@ -309,7 +309,7 @@ describe('dashboard api', () => {
 
   describe('POST /api/acquire', () => {
     it('enqueues a manual acquire job for a known arr instance', async () => {
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient()]]) });
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
       const res = await app.request('/api/acquire', {
         method: 'POST',

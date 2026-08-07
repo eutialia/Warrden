@@ -94,6 +94,20 @@ export function makeCtx(overrides?: Partial<AppContext>): AppContext {
 }
 
 /**
+ * `makeCtx` wired with one `ArrApi` under `name` — the single-instance shape the vast
+ * majority of tests need, instead of hand-building `clients: new Map([[name, client]])`
+ * every time. Deliberately does NOT also wire `config.arrs` for `name` (unlike
+ * `ingestFixture`, which needs both to agree) — several tests rely on `ctx.clients` and
+ * `ctx.config.arrs` disagreeing (or `config.arrs` being empty) to exercise the drift
+ * between them (see e.g. `webhooks.ts`'s and `reconcile.ts`'s own comments on why they
+ * check `ctx.clients`, not `config.arrs`); pass `{ config: configWithArrs(name) }` via
+ * `overrides` for a test that wants both to agree.
+ */
+export function ctxWithClient(name: string, client: ArrApi, overrides?: Partial<AppContext>): AppContext {
+  return makeCtx({ clients: new Map([[name, client]]), ...overrides });
+}
+
+/**
  * Enqueues `input` on `ctx.queue` and immediately claims it — the `enqueue()` → `claim()`
  * pair nearly every acquire pipeline test repeats to get a claimed `JobRow` to hand
  * `runAcquireJob`. Never returns `null`: nothing else could have claimed it first in a

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { registerWebhooks } from '../src/arr/register.js';
-import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
+import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import type { ArrApi } from '../src/arr/types.js';
 
@@ -11,7 +11,7 @@ function managedObjectRows(ctx: ReturnType<typeof makeCtx>) {
 describe('registerWebhooks', () => {
   it('creates the notification and records it in managed_objects when none exists', async () => {
     const client = fakeArrClient();
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
     await registerWebhooks(ctx);
 
@@ -34,7 +34,7 @@ describe('registerWebhooks', () => {
 
   it('skips creation but still records a pre-existing "Warrden" notification already subscribed to import events', async () => {
     const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden', onDownload: true, onUpgrade: true }] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
     await registerWebhooks(ctx);
 
@@ -49,7 +49,7 @@ describe('registerWebhooks', () => {
     { name: 'both absent (Phase 1 registration)', notification: { id: 7, name: 'Warrden' } },
   ])('recreates a stale "Warrden" notification missing import events ($name)', async ({ notification }) => {
     const client = fakeArrClient({ notifications: [notification] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     // Seed the registry with the OLD notification's row up front, as a real Phase 1
     // install would have it — otherwise the `managedObjects.delete` call in the recreate
     // path has nothing to delete and this test can't tell it apart from a no-op.
@@ -91,7 +91,7 @@ describe('registerWebhooks', () => {
       client.notifications.push(committed);
       throw new Error('ETIMEDOUT');
     });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
 
     await registerWebhooks(ctx);
@@ -104,7 +104,7 @@ describe('registerWebhooks', () => {
   it('reports a recreate-failure — not a generic register-failure — when the replacement create fails twice after the old notification was already deleted', async () => {
     const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden' }] });
     client.createNotification = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
 
     await registerWebhooks(ctx);

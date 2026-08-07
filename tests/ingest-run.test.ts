@@ -6,6 +6,7 @@ import { PlacedFiles } from '../src/db/placedFiles.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS, MOUNT_RETRY_MS } from '../src/pipelines/ingest/run.js';
 import {
+  ctxWithClient,
   enqueueAndClaim,
   episodeResource,
   fakeArrClient,
@@ -897,16 +898,13 @@ describe('runIngestJob — mapArrPath boundary', () => {
       episodeFiles: [{ id: 100, seriesId: 42, seasonNumber: 1, relativePath: videoFileName, path: arrVideoPath }],
     });
 
-    const ctx = makeCtx({
-      clients: new Map([['sonarr', client]]),
-      config: ConfigSchema.parse({
+    const ctx = ctxWithClient('sonarr', client, { config: ConfigSchema.parse({
         pathMappings: [
           { from: '/data/dl', to: downloadsDir },
           { from: '/data/tv', to: libraryDir },
         ],
         ingest: { downloadRoots: ['/data/dl'] },
-      }),
-    });
+      }) });
 
     const job = enqueueAndClaim(ctx, { pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });
     await runIngestJob(ctx, job);

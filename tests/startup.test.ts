@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { reclaimAbandonedJobs, scheduleReconcile } from '../src/startup.js';
-import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
+import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
 
 describe('reclaimAbandonedJobs', () => {
   it('reclaim called on boot makes a wedged running job claimable again, and reports it via an event', () => {
@@ -29,7 +29,7 @@ describe('scheduleReconcile', () => {
   it('runs once immediately, then on the configured interval', async () => {
     const client = fakeArrClient({ series: [] });
     client.listSeries = vi.fn(async () => []);
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     ctx.config.reconcileIntervalMinutes = 1;
 
     const stop = scheduleReconcile(ctx);
@@ -54,7 +54,7 @@ describe('scheduleReconcile', () => {
       if (calls === 1) await gate; // the first pass hangs until released
       return [];
     });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     ctx.config.reconcileIntervalMinutes = 1;
 
     const stop = scheduleReconcile(ctx);

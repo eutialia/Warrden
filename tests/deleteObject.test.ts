@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { deleteManagedObject } from '../src/managed/deleteObject.js';
 import { ManagedObjects, type ManagedObjectKind } from '../src/db/managedObjects.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { makeCtx, fakeArrClient, configWithArrs } from './helpers.js';
+import { makeCtx, fakeArrClient, configWithArrs, ctxWithClient } from './helpers.js';
 
 /** Seeds a `managed_objects` row via the real `ManagedObjects.insert` (so it round-trips
  * through the same upsert path production code uses) and reads it straight back — the
@@ -16,7 +16,7 @@ function seedRow(managedObjects: ManagedObjects, opts: { arrInstance: string; ki
 
 describe('deleteManagedObject', () => {
   it('deletes the registry row and appends a managed.deleted info event, regardless of the arr-side outcome', async () => {
-    const ctx = makeCtx({ clients: new Map([['sonarr', fakeArrClient()]]) });
+    const ctx = ctxWithClient('sonarr', fakeArrClient());
     const managedObjects = new ManagedObjects(ctx.db);
     const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'notification', externalId: 5, name: 'warrden-webhook' });
 
@@ -30,7 +30,7 @@ describe('deleteManagedObject', () => {
   describe('notification', () => {
     it('deletes it in the arr and marks deletedInArr true', async () => {
       const client = fakeArrClient({ notifications: [{ id: 5, name: 'warrden-webhook' }] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'notification', externalId: 5, name: 'warrden-webhook' });
 
@@ -47,7 +47,7 @@ describe('deleteManagedObject', () => {
       client.deleteNotification = (async () => {
         throw new ArrApiError('DELETE', '/notification/5', 404, 'gone');
       }) as typeof client.deleteNotification;
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'notification', externalId: 5, name: 'warrden-webhook' });
 
@@ -65,7 +65,7 @@ describe('deleteManagedObject', () => {
       client.deleteNotification = (async () => {
         throw new ArrApiError('DELETE', '/notification/5', 500, 'boom');
       }) as typeof client.deleteNotification;
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'notification', externalId: 5, name: 'warrden-webhook' });
 
@@ -78,7 +78,7 @@ describe('deleteManagedObject', () => {
   describe('release_profile', () => {
     it('deletes a live warrden-named profile in the arr', async () => {
       const client = fakeArrClient({ profiles: [{ id: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]`, enabled: true, required: ['Group'], ignored: [], tags: [1], indexerId: 0 }] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]` });
 
@@ -92,7 +92,7 @@ describe('deleteManagedObject', () => {
 
     it('never deletes a foreign-named live profile — registry-only, plus a warn event', async () => {
       const client = fakeArrClient({ profiles: [{ id: 9, name: 'Some User Profile', enabled: true, required: [], ignored: [], tags: [1], indexerId: 0 }] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: 'Some User Profile' });
 
@@ -111,7 +111,7 @@ describe('deleteManagedObject', () => {
       client.listReleaseProfiles = vi.fn(async () => {
         throw new Error('arr 500');
       });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]` });
 
@@ -127,7 +127,7 @@ describe('deleteManagedObject', () => {
 
     it('an already-absent live profile is dropped from the registry with no arr call and no warn', async () => {
       const client = fakeArrClient({ profiles: [] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'release_profile', externalId: 9, name: `${WARRDEN_PROFILE_PREFIX}[Group]` });
 
@@ -142,7 +142,7 @@ describe('deleteManagedObject', () => {
   describe('tag', () => {
     it('deletes a live warrden-named tag when no foreign profile carries it', async () => {
       const client = fakeArrClient({ tags: [{ id: 3, label: `${WARRDEN_TAG_PREFIX}group` }], profiles: [] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'tag', externalId: 3, name: `${WARRDEN_TAG_PREFIX}group` });
 
@@ -156,7 +156,7 @@ describe('deleteManagedObject', () => {
 
     it('never deletes a foreign-labeled live tag — registry-only, plus a warn event', async () => {
       const client = fakeArrClient({ tags: [{ id: 3, label: 'user-tag' }], profiles: [] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'tag', externalId: 3, name: 'user-tag' });
 
@@ -173,7 +173,7 @@ describe('deleteManagedObject', () => {
         tags: [{ id: 3, label: `${WARRDEN_TAG_PREFIX}group` }],
         profiles: [{ id: 9, name: 'Some User Profile', enabled: true, required: [], ignored: [], tags: [3], indexerId: 0 }],
       });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'tag', externalId: 3, name: `${WARRDEN_TAG_PREFIX}group` });
 
@@ -187,7 +187,7 @@ describe('deleteManagedObject', () => {
 
     it('an already-absent live tag is dropped from the registry with no arr call and no warn', async () => {
       const client = fakeArrClient({ tags: [], profiles: [] });
-      const ctx = makeCtx({ clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client);
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'sonarr', kind: 'tag', externalId: 3, name: `${WARRDEN_TAG_PREFIX}group` });
 
@@ -223,7 +223,7 @@ describe('deleteManagedObject', () => {
         });
         client.listTags = vi.fn(client.listTags);
         client.listReleaseProfiles = vi.fn(client.listReleaseProfiles);
-        const ctx = makeCtx({ config: configWithArrs('radarr'), clients: new Map([['radarr', client]]) });
+        const ctx = ctxWithClient('radarr', client, { config: configWithArrs('radarr') });
         const managedObjects = new ManagedObjects(ctx.db);
         const externalId = kind === 'tag' ? 3 : 9;
         const row = seedRow(managedObjects, { arrInstance: 'radarr', kind, externalId, name: 'whatever' });
@@ -243,7 +243,7 @@ describe('deleteManagedObject', () => {
 
     it('does not guard a notification row on a radarr instance — notifications are not release-group-tagging specific', async () => {
       const client = fakeArrClient({ notifications: [{ id: 5, name: 'warrden-webhook' }] });
-      const ctx = makeCtx({ config: configWithArrs('radarr'), clients: new Map([['radarr', client]]) });
+      const ctx = ctxWithClient('radarr', client, { config: configWithArrs('radarr') });
       const managedObjects = new ManagedObjects(ctx.db);
       const row = seedRow(managedObjects, { arrInstance: 'radarr', kind: 'notification', externalId: 5, name: 'warrden-webhook' });
 

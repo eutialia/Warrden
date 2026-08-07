@@ -5,7 +5,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { SyncState } from '../src/db/syncState.js';
 import { pinReleaseGroup } from '../src/pipelines/acquire/pin.js';
 import { reconcile } from '../src/reconcile/reconcile.js';
-import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource, movieResource } from './helpers.js';
+import { arrInstance, configWithArrs, makeCtx, fakeArrClient, seedManagedPin, seriesResource, movieResource, ctxWithClient } from './helpers.js';
 
 const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
 const movie = (id: number) => movieResource({ id, title: `M${id}`, year: 2024, tmdbId: id, hasFile: true });
@@ -22,7 +22,7 @@ const historyRecord = (overrides: Partial<HistoryRecord> & { id: number }): Hist
 describe('reconcile', () => {
   it('a sonarr-kind instance only fetches series, never movies (Sonarr has no /movie endpoint)', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
     await reconcile(ctx);
 
@@ -30,7 +30,7 @@ describe('reconcile', () => {
   });
 
   it('bootstrap: marks existing library seen without enqueueing', async () => {
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', fakeArrClient({ series: [series(1), series(2)] })]]) });
+    const ctx = ctxWithClient('sonarr', fakeArrClient({ series: [series(1), series(2)] }), { config: configWithArrs('sonarr') });
     await reconcile(ctx);
     expect(ctx.queue.claim()).toBeNull();
     await reconcile(ctx); // second run, nothing changed
@@ -38,7 +38,7 @@ describe('reconcile', () => {
   });
   it('enqueues acquire for series added after bootstrap', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     await reconcile(ctx);
     client.series.push(series(9));
     await reconcile(ctx);
@@ -46,7 +46,7 @@ describe('reconcile', () => {
   });
   it('does not double-enqueue a target that already has an acquire job (e.g. a webhook already ran it) before reconcile ever saw it — just catches `seen` up; a genuinely new target still enqueues', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     await reconcile(ctx); // bootstrap: series(1) already seen
 
     // A webhook adds series(2) and its acquire job runs to completion — all before
@@ -95,7 +95,7 @@ describe('reconcile', () => {
 
   it('a gc() failure that escapes its own per-instance handling is caught as reconcile.gc-failed-global, and reconcile() still resolves', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     const listSpy = vi.spyOn(ManagedObjects.prototype, 'list').mockImplementation(() => {
       throw new Error('managed_objects table is gone');
     });
@@ -121,7 +121,7 @@ describe('reconcile', () => {
 
   it('gc removes orphaned warrden tag + profile from arr and registry', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     const tag = client.pushTag('warrden-deadgroup');
     const prof = client.pushProfile({ name: 'warrden: [DeadGroup]', enabled: true, required: ['DeadGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
     seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'DeadGroup', createdAt: wellPastGrace(), tag, profile: prof });
@@ -137,7 +137,7 @@ describe('reconcile', () => {
     const tag = client.pushTag('warrden-livegroup');
     client.series.push(series(1, [tag.id]));
     const prof = client.pushProfile({ name: 'warrden: [LiveGroup]', enabled: true, required: ['LiveGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'LiveGroup', createdAt: wellPastGrace(), tag, profile: prof });
     await reconcile(ctx);
     expect(client.tags).toHaveLength(1);
@@ -146,7 +146,7 @@ describe('reconcile', () => {
 
   it('gc cleans a registry row whose tag/profile are already gone from the arr, without throwing, and still processes other rows', async () => {
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     const created = wellPastGrace();
 
     // "DeadGroup": registered in managed_objects, but nothing in the arr's live tag/profile
@@ -178,7 +178,7 @@ describe('reconcile', () => {
     // series(1) carries no tags, so this pin would look orphaned against this snapshot —
     // exactly what a concurrent acquire job's pin landing mid-pass would look like too.
     const client = fakeArrClient({ series: [series(1)] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     const tag = client.pushTag('warrden-freshgroup');
     const prof = client.pushProfile({ name: 'warrden: [FreshGroup]', enabled: true, required: ['FreshGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
     // freshly "registered" — well within the grace window
@@ -193,7 +193,7 @@ describe('reconcile', () => {
 
   it('gc never deletes a profile whose live name is not warrden-owned, and leaves its tag alone too (deleting it would cascade into the profile)', async () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the tag looks orphaned
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     const tag = client.pushTag('warrden-adopted');
     // Simulates pinReleaseGroup adopting a *user's* profile by tag membership (see its
     // matching comment) — its name was never "warrden: ...".
@@ -223,7 +223,7 @@ describe('reconcile', () => {
 
   it('gc never deletes a tag from the arr whose live label is not warrden-owned — drops the registry row only, with a warn event', async () => {
     const client = fakeArrClient({ series: [series(1)] }); // untagged, so the registered tag looks unused
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
     const tag = client.pushTag('user-tag'); // not warrden-owned, but somehow ended up registered
     seedManagedPin(ctx.db, { arrInstance: 'sonarr', group: 'Mystery', createdAt: wellPastGrace(), tag });
 
@@ -239,7 +239,7 @@ describe('reconcile', () => {
 
   it('skips tag/profile gc entirely for a radarr-kind instance (pinning is series-only, so its series snapshot is always empty)', async () => {
     const client = fakeArrClient({ movies: [] });
-    const ctx = makeCtx({ config: configWithArrs('radarr'), clients: new Map([['radarr', client]]) });
+    const ctx = ctxWithClient('radarr', client, { config: configWithArrs('radarr') });
     const tag = client.pushTag('warrden-somegroup');
     const prof = client.pushProfile({ name: 'warrden: [SomeGroup]', enabled: true, required: ['SomeGroup'], ignored: [], tags: [tag.id], indexerId: 0 });
     seedManagedPin(ctx.db, { arrInstance: 'radarr', group: 'SomeGroup', createdAt: wellPastGrace(), tag, profile: prof });
@@ -314,7 +314,7 @@ describe('reconcile', () => {
 
   it('re-pinning an old registry row refreshes created_at, so a stale-snapshot race does not gc it out from under a fresh pin', async () => {
     const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 2024 })] });
-    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
     await pinReleaseGroup({ client, db: ctx.db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
     // Backdate as if this pin were 3 days old — well past grace, and normally gc-eligible.
@@ -383,7 +383,7 @@ describe('reconcile', () => {
     it('bootstrap: records the history cursor at the current max id without enqueueing', async () => {
       const client = fakeArrClient({ series: [series(1)] });
       client.listRecentImports = async () => [historyRecord({ id: 9, seriesId: 1 }), historyRecord({ id: 5, seriesId: 1 })];
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
       await reconcile(ctx);
 
@@ -402,7 +402,7 @@ describe('reconcile', () => {
       async ({ kind, field, arrName, seed }) => {
         const client = fakeArrClient();
         seed(client);
-        const ctx = makeCtx({ config: configWithArrs(arrName), clients: new Map([[arrName, client]]) });
+        const ctx = ctxWithClient(arrName, client, { config: configWithArrs(arrName) });
         client.listRecentImports = async () => [historyRecord({ id: 3, [field]: 1 })];
         await reconcile(ctx); // bootstrap: cursor -> 3
 
@@ -432,7 +432,7 @@ describe('reconcile', () => {
 
     it('multiple new records for the same target collapse into a single enqueue', async () => {
       const client = fakeArrClient({ series: [series(1)] });
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
       await reconcile(ctx); // bootstrap: cursor -> 1
 
@@ -449,7 +449,7 @@ describe('reconcile', () => {
 
     it('a record with neither seriesId nor movieId is skipped', async () => {
       const client = fakeArrClient({ series: [series(1)] });
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
       await reconcile(ctx); // bootstrap: cursor -> 1
 
@@ -463,7 +463,7 @@ describe('reconcile', () => {
 
     it('no records above the cursor leaves it unchanged and appends no missed-imports event', async () => {
       const client = fakeArrClient({ series: [series(1)] });
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       client.listRecentImports = async () => [historyRecord({ id: 3, seriesId: 1 })];
       await reconcile(ctx); // bootstrap: cursor -> 3
 
@@ -476,7 +476,7 @@ describe('reconcile', () => {
 
     it('cursor regression (arr history ids restarted, e.g. its database was rebuilt/restored from an old backup): resets the cursor to the new max, warns, and enqueues nothing that pass — then resumes normally', async () => {
       const client = fakeArrClient({ series: [series(1)] });
-      const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
       client.listRecentImports = async () => [historyRecord({ id: 50, seriesId: 1 })];
       await reconcile(ctx); // bootstrap: cursor -> 50
 

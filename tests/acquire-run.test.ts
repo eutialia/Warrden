@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
-import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim } from './helpers.js';
+import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
   const client = fakeArrClient({
     series: [seriesResource({ id: 42, title: 'Frieren' })],
     releases: cands,
   });
-  const ctx = makeCtx({ llm: new FakeGenerator([pick]), clients: new Map([['sonarr', client]]) });
+  const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pick]) });
   const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
   return { ctx, client, job };
 }
@@ -119,10 +119,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       series: [seriesResource({ id: 42, title: 'Frieren' })],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }]),
-      clients: new Map([['sonarr', client]]),
-    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -137,10 +134,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       movies: [movieResource({ title: 'A Movie', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }]),
-      clients: new Map([['sonarr', client]]),
-    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'sonarr', payload: { title: 'X' } });
 
     await runAcquireJob(ctx, job);
@@ -155,10 +149,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       movies: [movieResource({ title: 'Looked Up Title', year: 2023 })],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'n/a' }]),
-      clients: new Map([['sonarr', client]]),
-    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'n/a' }]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'sonarr', payload: {} });
 
     await runAcquireJob(ctx, job);
@@ -172,7 +163,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
       series: [seriesResource({ id: 42, title: 'Looked Up Series' })],
       releases: [],
     });
-    const ctx = makeCtx({ llm: new FakeGenerator([]), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
 
     await runAcquireJob(ctx, job);
@@ -198,13 +189,10 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
       ],
       releases: [candidate({ guid: 'g1' })],
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([
         { decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 1 ok' },
         { decision: 'pick', candidate: 1, releaseGroup: 'OtherGroup', confidence: 'high', reasoning: 'season 2 ok' },
-      ]),
-      clients: new Map([['sonarr', client]]),
-    });
+      ]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -247,10 +235,7 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
       if (params.seasonNumber === 1) return [];
       return [candidate({ guid: 'g1' })];
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches policy' }]),
-      clients: new Map([['sonarr', client]]),
-    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches policy' }]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -286,13 +271,10 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
       if (params.seasonNumber === 1) return [candidate({ guid: 'g1' })];
       return [candidate({ guid: 'g2' })];
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([
         { decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 1' },
         { decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'season 2 has nothing good' },
-      ]),
-      clients: new Map([['sonarr', client]]),
-    });
+      ]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -305,7 +287,7 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
 
   it('records no-candidates and an attention event when a series has no monitored seasons at all', async () => {
     const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'Frieren', seasons: [{ seasonNumber: 1, monitored: false }] })] });
-    const ctx = makeCtx({ llm: new FakeGenerator([]), clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -324,7 +306,7 @@ describe('runAcquireJob — ctx.config.picking actually reaches prefilter (I6b)'
       releases: [candidate({ guid: 'g1', seeders: 5, rejected: false })],
     });
     const llm = new FakeGenerator([]);
-    const ctx = makeCtx({ llm, clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { llm });
     ctx.config.picking.seederFloor = 100; // well above the candidate's 5 seeders
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
@@ -346,7 +328,7 @@ describe('runAcquireJob — candidate cap (I11)', () => {
     const many = Array.from({ length: 35 }, (_, i) => candidate({ guid: `g${i}`, seeders: 100 - i }));
     const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'Frieren' })], releases: many });
     const llm = new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: null, confidence: 'high', reasoning: 'top seeded' }]);
-    const ctx = makeCtx({ llm, clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { llm });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     await runAcquireJob(ctx, job);
@@ -372,7 +354,7 @@ describe('runAcquireJob — double-grab guard (I10)', () => {
       releases: [candidate({ guid: 'g1' })],
     });
     const llm = new FakeGenerator([]);
-    const ctx = makeCtx({ llm, clients: new Map([['sonarr', client]]) });
+    const ctx = ctxWithClient('sonarr', client, { llm });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'sonarr', payload: { title: 'A Movie' } }); // status now 'running'; simulate a crash after grabbing but before completing
 
     new AcquireRecords(ctx.db).insert({
@@ -414,10 +396,7 @@ describe('runAcquireJob — double-grab guard (I10)', () => {
       if (params.seasonNumber === 1) throw new Error('season 1 should never be searched again');
       return [candidate({ guid: 'g2' })];
     });
-    const ctx = makeCtx({
-      llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 2' }]),
-      clients: new Map([['sonarr', client]]),
-    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([{ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'season 2' }]) });
     const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
 
     new AcquireRecords(ctx.db).insert({
