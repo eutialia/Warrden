@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { AttentionItems } from '../src/db/attention.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { startRunner } from '../src/jobs/runner.js';
 import { makeCtx, hasEvent } from './helpers.js';
@@ -60,6 +61,28 @@ describe('startRunner', () => {
       pipeline: 'acquire',
     });
     expect(ctx.queue.get(id!)!.status).toBe('failed');
+  });
+
+  it('two different pipelines failing permanently for the SAME target open two separate attention rows, not one collapsed row (job.attention\'s kind is constant across pipelines, so dedupeKey has to scope by pipeline)', async () => {
+    const ctx = makeCtx();
+    const { id: acquireId } = ctx.queue.enqueue(target);
+    ctx.db.prepare('UPDATE jobs SET attempts = 2 WHERE id = ?').run(acquireId);
+    const { id: ingestId } = ctx.queue.enqueue({ ...target, pipeline: 'ingest' });
+    ctx.db.prepare('UPDATE jobs SET attempts = 2 WHERE id = ?').run(ingestId);
+
+    const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
+    const stop = startRunner(ctx, { acquire: handler, ingest: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(20); // two ticks — one job claimed per tick
+    stop();
+
+    const attentionEvents = ctx.events.list({ level: 'attention' });
+    expect(attentionEvents).toHaveLength(2);
+
+    const openRows = new AttentionItems(ctx.db).list({ status: 'open' }).filter((r) => r.kind === 'job.attention');
+    expect(openRows).toHaveLength(2);
+    expect(ctx.queue.get(acquireId!)!.status).toBe('failed');
+    expect(ctx.queue.get(ingestId!)!.status).toBe('failed');
   });
 
   it('fails a job immediately, with an attention-worthy message, when no handler is registered for its pipeline', async () => {

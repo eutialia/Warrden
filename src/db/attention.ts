@@ -42,22 +42,32 @@ interface TargetKey {
   targetId: unknown;
   /** Optional per-emission discriminator (see `open()`'s doc) — `undefined` when the
    * emitter didn't carry one, which still matches another `undefined` (the plain
-   * per-target behavior every emitter had before `dedupeKey` existed). */
-  dedupeKey?: unknown;
+   * per-target behavior every emitter had before `dedupeKey` existed). Always normalized
+   * to a `string` via `normalizeDedupeKey` — see its own doc for why. */
+  dedupeKey?: string;
+}
+
+/** Normalizes a raw `data.dedupeKey` value to a `string` (via `String(...)`), or
+ * `undefined` when it wasn't set at all (`undefined`/`null` both mean "no dedupeKey").
+ * Applied on BOTH sides of every dedupeKey comparison — `targetKeyOf` (building the new
+ * row's key) AND `sameTarget` (reading an existing row's stored value back out) — so an
+ * emitter that hands a non-string (a `seasonNumber` passed as a bare `number`, say)
+ * dedupes exactly as if it had stringified it itself, instead of the two sides silently
+ * disagreeing on the type and comparing unequal forever (which would look like "this
+ * dedupeKey never matches anything," not a loud failure). */
+function normalizeDedupeKey(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : String(value);
 }
 
 /** Extracts `{ instance, targetKind, targetId, dedupeKey? }` from an attention event's
  * `data` when the first three are present — `open()`'s preferred dedupe key (see its own
  * doc). `null` when any of the first three is missing, so the caller falls back to the
- * older `(kind, jobId)` rule instead. `dedupeKey` is only picked up when it's a string —
- * a convention, not an enforced field, so a caller that never set one leaves it
- * `undefined`. */
+ * older `(kind, jobId)` rule instead. `dedupeKey` is a convention, not an enforced field —
+ * a caller that never set one leaves it `undefined`. */
 function targetKeyOf(data: object | undefined): TargetKey | null {
   const d = (data ?? {}) as Record<string, unknown>;
   if (d.instance === undefined || d.targetKind === undefined || d.targetId === undefined) return null;
-  const key: TargetKey = { instance: d.instance, targetKind: d.targetKind, targetId: d.targetId };
-  if (typeof d.dedupeKey === 'string') key.dedupeKey = d.dedupeKey;
-  return key;
+  return { instance: d.instance, targetKind: d.targetKind, targetId: d.targetId, dedupeKey: normalizeDedupeKey(d.dedupeKey) };
 }
 
 function sameTarget(data: Record<string, unknown>, key: TargetKey): boolean {
@@ -65,7 +75,7 @@ function sameTarget(data: Record<string, unknown>, key: TargetKey): boolean {
     data.instance === key.instance &&
     data.targetKind === key.targetKind &&
     data.targetId === key.targetId &&
-    data.dedupeKey === key.dedupeKey
+    normalizeDedupeKey(data.dedupeKey) === key.dedupeKey
   );
 }
 

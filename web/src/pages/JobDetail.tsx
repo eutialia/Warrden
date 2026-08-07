@@ -51,10 +51,17 @@ export default function JobDetail() {
     // to no id at all) must invalidate whatever fetch a previous id kicked off, the same
     // way the old `let stale` ref's cleanup ran unconditionally on every effect re-run.
     const isStale = beginFetch();
-    if (!id) return;
-    setData(null);
-    setError(null);
-    load({ isStale });
+    if (id) {
+      setData(null);
+      setError(null);
+      load({ isStale });
+    }
+    // On unmount there's no "next effect run" to bump the generation the way an id change
+    // does above — bump it here too, so a fetch that resolves after unmount is still
+    // caught by isStale(), matching the old `stale = true` cleanup exactly.
+    return () => {
+      beginFetch();
+    };
   }, [id, load, beginFetch]);
 
   // Any event can mean this job (or its acquire record) changed — refetch wholesale rather

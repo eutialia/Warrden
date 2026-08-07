@@ -193,6 +193,16 @@ describe('AttentionItems', () => {
 
       expect(items.list()).toHaveLength(2);
     });
+
+    it('a numeric dedupeKey still dedupes (normalized to a string on both sides, not silently ignored)', () => {
+      const items = new AttentionItems(freshDb());
+      const data = { instance: 'sonarr', targetKind: 'series', targetId: 42, dedupeKey: 1 };
+      const first = items.open({ kind: 'job.attention', message: 'first', jobId: 1, data });
+      const second = items.open({ kind: 'job.attention', message: 'second', jobId: 2, data });
+
+      expect(second.id).toBe(first.id);
+      expect(items.list()).toHaveLength(1);
+    });
   });
 
   describe('setStatus', () => {

@@ -180,16 +180,22 @@ export function buildSidecarName(videoFileName: string, s: { lang: string | null
  * (including a `parseEpisodeRef` miss) returns `null` for the LLM call-site to attempt
  * instead. This function trusts whatever `episodes` list it's given and matches purely
  * by season/episode/absolute number, so callers must pass whichever list keeps that
- * matching correct for their use case:
- * - `matchSidecarsWithLlm`'s caller pre-filters `episodes` to `hasFile: true` — a
- *   sidecar needs a video that's already on disk.
- * - Bundle rescue (`planBundleImport` in `bundle.ts`) passes the FULL episode list
- *   instead of pre-filtering: its single-regular-season heuristic below needs to see
- *   every season to tell whether a bare number is genuinely unambiguous, and filtering
- *   out a complete season first can leave exactly one incomplete season behind, making
- *   an actually-ambiguous number look falsely unique. `planBundleImport` rejects the hit
- *   itself when it lands on an episode that already has a file, so a bare-number
- *   leftover file can never displace one.
+ * matching correct for their use case. Both current callers pass the FULL episode list
+ * (never pre-filtered to `hasFile`) and instead reject the hit themselves afterward, for
+ * the same reason: the single-regular-season heuristic below needs to see EVERY season to
+ * tell whether a bare number is genuinely unambiguous, and pre-filtering to `hasFile` first
+ * can leave exactly one season behind (complete or incomplete, depending on the caller),
+ * making an actually-ambiguous number look falsely unique:
+ * - Sidecar rescue (`sweepSidecars` in `run.ts`) only accepts the hit when
+ *   `hit.hasFile` — a sidecar needs a video that's already on disk to sit beside, so a
+ *   hit on a fileless episode is "wait for the file," not a placement. Either a miss or a
+ *   fileless-episode hit falls through to `matchSidecarsWithLlm`'s own separate call,
+ *   which — unlike this function — IS pre-filtered to `hasFile: true` episodes, since
+ *   there's no "wait for it" state to defer to there.
+ * - Bundle rescue (`planBundleImport` in `bundle.ts`) only accepts the hit when
+ *   `!hit.hasFile` — bundle rescue exists to fill in MISSING episodes, so a hit on one
+ *   that already has a file falls through to the LLM tier instead, which can see
+ *   `hasFile` in the episode table and reason about it properly.
  *
  * - An `SxxEyy` ref matches by exact `(seasonNumber, episodeNumber)`.
  * - A bare ref, when the series has exactly one regular (non-special, `seasonNumber >

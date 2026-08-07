@@ -89,13 +89,17 @@ function failJob(ctx: AppContext, job: JobRow, message: string): void {
     // Joins the target-dedupe protocol (`targetEventData`): a `JobRow` always carries the
     // `(arr_instance, target_kind, target_id)` triple, so a target whose job keeps failing
     // permanently across retries collapses into one open attention row instead of piling
-    // up a new one per failed run.
+    // up a new one per failed run. `dedupeKey: job.pipeline` is required, not cosmetic:
+    // `kind` here is the constant `'job.attention'` regardless of which pipeline failed, so
+    // without a per-pipeline discriminator an acquire and an ingest permanent failure for
+    // the SAME target would collapse into one row, silently losing whichever one didn't
+    // write last.
     ctx.events.append({
       kind: 'job.attention',
       level: 'attention',
       jobId: job.id,
       message: `Job #${job.id} (${job.pipeline}) failed permanently: ${message}`,
-      data: targetEventData(job, { pipeline: job.pipeline }),
+      data: targetEventData(job, { pipeline: job.pipeline, dedupeKey: job.pipeline }),
     });
   }
 }
