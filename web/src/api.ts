@@ -43,10 +43,27 @@ export interface AcquireRecord {
   created_at: number;
 }
 
+export type PlacedFileKind = 'audio' | 'subtitle';
+
+export interface PlacedFile {
+  id: number;
+  arr_instance: string;
+  target_kind: TargetKind;
+  target_id: number;
+  kind: PlacedFileKind;
+  placed_path: string;
+  video_path: string;
+  source_path: string;
+  job_id: number | null;
+  data: Record<string, unknown>;
+  created_at: number;
+}
+
 export interface JobDetailResponse {
   job: Job;
   acquireRecord: AcquireRecord | null;
   acquireOutcome: AcquireStatus | null;
+  placedFiles: PlacedFile[];
 }
 
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
@@ -70,11 +87,17 @@ export interface CallsiteModel {
   fallback?: { provider: Provider; model: string };
 }
 
+/** Every LLM call-site Warrden knows about, in the order each phase introduced it —
+ * `llm.profiles` (a raw JSON editor on the Config page) accepts any string key, so this
+ * exists purely as a discoverability hint for what to name one, not a validated list. */
+export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map'] as const;
+
 export interface Config {
   server: { port: number; publicUrl: string };
   arrs: ArrInstance[];
   pathMappings: { from: string; to: string }[];
   picking: { tags: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
+  ingest: { mountMarkers: string[]; downloadRoots: string[] };
   llm: {
     activeProfile: 'dev' | 'prod';
     profiles: Record<string, Record<string, CallsiteModel>>;
@@ -193,5 +216,25 @@ export function repickAttention(id: number, hint?: string): Promise<{ ok: boolea
 
 export function acceptAttention(id: number): Promise<{ ok: boolean }> {
   return fetchJson(`/api/attention/${id}/accept`, { method: 'POST', headers: { 'content-type': 'application/json' } });
+}
+
+export type ManagedObjectKind = 'notification' | 'tag' | 'release_profile';
+
+export interface ManagedObject {
+  id: number;
+  arr_instance: string;
+  kind: ManagedObjectKind;
+  external_id: number;
+  name: string | null;
+  data: Record<string, unknown>;
+  created_at: number;
+}
+
+export function fetchManagedObjects(): Promise<{ objects: ManagedObject[] }> {
+  return fetchJson('/api/managed-objects');
+}
+
+export function deleteManagedObject(id: number): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/managed-objects/${id}`, { method: 'DELETE' });
 }
 

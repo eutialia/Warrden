@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ApiError, fetchJob, postAcquire, type JobDetailResponse } from '@/api';
 import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -84,7 +85,7 @@ export default function JobDetail() {
     );
   }
 
-  const { job, acquireRecord, acquireOutcome } = data;
+  const { job, acquireRecord, acquireOutcome, placedFiles } = data;
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
 
   return (
@@ -116,28 +117,49 @@ export default function JobDetail() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Acquire record</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          {!acquireRecord && <p className="text-muted-foreground">No acquire record for this target yet.</p>}
-          {acquireRecord && (
-            <>
-              <p>Status: {acquireRecord.status ?? '—'}</p>
-              <p>Candidates considered: {candidateCount ?? '—'}</p>
-              <p>Picked GUID: {acquireRecord.picked_guid ?? '—'}</p>
-              <p>Release group: {acquireRecord.release_group ?? '—'}</p>
-              <div>
-                <p className="mb-1 font-medium">Reasoning</p>
-                <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">
-                  {acquireRecord.reasoning ?? '—'}
-                </pre>
+      {job.pipeline === 'ingest' ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Placed files</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {placedFiles.length === 0 && <p className="text-muted-foreground">No files placed for this job.</p>}
+            {placedFiles.map((f) => (
+              <div key={f.id} className="space-y-1 rounded-md border p-3">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">{f.kind}</Badge>
+                  {typeof f.data.matchedBy === 'string' && <Badge variant="secondary">{f.data.matchedBy}</Badge>}
+                </div>
+                <p className="break-all">Placed: {f.placed_path}</p>
+                <p className="break-all text-muted-foreground">Source: {f.source_path}</p>
               </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
+            ))}
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Acquire record</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            {!acquireRecord && <p className="text-muted-foreground">No acquire record for this target yet.</p>}
+            {acquireRecord && (
+              <>
+                <p>Status: {acquireRecord.status ?? '—'}</p>
+                <p>Candidates considered: {candidateCount ?? '—'}</p>
+                <p>Picked GUID: {acquireRecord.picked_guid ?? '—'}</p>
+                <p>Release group: {acquireRecord.release_group ?? '—'}</p>
+                <div>
+                  <p className="mb-1 font-medium">Reasoning</p>
+                  <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">
+                    {acquireRecord.reasoning ?? '—'}
+                  </pre>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

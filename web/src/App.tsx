@@ -6,6 +6,7 @@ import Activity from '@/pages/Activity';
 import Attention from '@/pages/Attention';
 import ConfigPage from '@/pages/Config';
 import JobDetail from '@/pages/JobDetail';
+import ManagedObjects from '@/pages/ManagedObjects';
 import NotFound from '@/pages/NotFound';
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
               <Route path="/" element={<Activity />} />
               <Route path="/attention" element={<Attention />} />
               <Route path="/jobs/:id" element={<JobDetail />} />
+              <Route path="/managed" element={<ManagedObjects />} />
               <Route path="/config" element={<ConfigPage />} />
               <Route path="*" element={<NotFound />} />
             </Routes>

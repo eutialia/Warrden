@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { ApiError, fetchConfig, saveConfig, SECRET_PLACEHOLDER, type ArrInstance, type ArrKind, type Config } from '@/api';
+import { ApiError, CALLSITES, fetchConfig, saveConfig, SECRET_PLACEHOLDER, type ArrInstance, type ArrKind, type Config } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -23,6 +23,41 @@ interface LlmKeyFieldState {
   remove: boolean;
 }
 const EMPTY_KEY_FIELD: LlmKeyFieldState = { text: '', wasSet: false, remove: false };
+
+/** Add/remove editor for a flat string list (`ingest.mountMarkers`, `ingest.downloadRoots`)
+ * — pulled out since both fields need the identical add/edit/remove shape, just with
+ * different labels and helper text. */
+function StringListField({
+  label,
+  helperText,
+  values,
+  onChange,
+}: {
+  label: string;
+  helperText: string;
+  values: string[];
+  onChange: (values: string[]) => void;
+}) {
+  return (
+    <div>
+      <label className="mb-1 block text-sm font-medium">{label}</label>
+      <p className="mb-2 text-xs text-muted-foreground">{helperText}</p>
+      <div className="space-y-2">
+        {values.map((v, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <Input value={v} onChange={(e) => onChange(values.map((existing, idx) => (idx === i ? e.target.value : existing)))} />
+            <Button variant="ghost" size="sm" onClick={() => onChange(values.filter((_, idx) => idx !== i))}>
+              Remove
+            </Button>
+          </div>
+        ))}
+      </div>
+      <Button variant="outline" size="sm" className="mt-2" onClick={() => onChange([...values, ''])}>
+        Add
+      </Button>
+    </div>
+  );
+}
 
 export default function ConfigPage() {
   const [config, setConfig] = useState<Config | null>(null);
@@ -129,6 +164,24 @@ export default function ConfigPage() {
 
   function removeArr(index: number): void {
     setConfig((prev) => (prev ? { ...prev, arrs: prev.arrs.filter((_, i) => i !== index) } : prev));
+  }
+
+  function updatePathMapping(index: number, patch: Partial<Config['pathMappings'][number]>): void {
+    setConfig((prev) =>
+      prev ? { ...prev, pathMappings: prev.pathMappings.map((m, i) => (i === index ? { ...m, ...patch } : m)) } : prev,
+    );
+  }
+
+  function addPathMapping(): void {
+    setConfig((prev) => (prev ? { ...prev, pathMappings: [...prev.pathMappings, { from: '', to: '' }] } : prev));
+  }
+
+  function removePathMapping(index: number): void {
+    setConfig((prev) => (prev ? { ...prev, pathMappings: prev.pathMappings.filter((_, i) => i !== index) } : prev));
+  }
+
+  function updateIngest(patch: Partial<Config['ingest']>): void {
+    setConfig((prev) => (prev ? { ...prev, ingest: { ...prev.ingest, ...patch } } : prev));
   }
 
   /** Parses one of the picking number fields, rejecting blank/non-numeric text outright —
@@ -251,6 +304,51 @@ export default function ConfigPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Path mappings</CardTitle>
+          <CardDescription>
+            Translates a path the arr reports into Warrden's own filesystem view — needed whenever Warrden and the
+            arr see the same files under different mount points (e.g. a NAS share mounted at a different path on
+            each side).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {config.pathMappings.map((m, i) => (
+            <div key={i} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2">
+              <Input placeholder="from (arr-side)" value={m.from} onChange={(e) => updatePathMapping(i, { from: e.target.value })} />
+              <Input placeholder="to (Warrden-side)" value={m.to} onChange={(e) => updatePathMapping(i, { to: e.target.value })} />
+              <Button variant="ghost" size="sm" onClick={() => removePathMapping(i)}>
+                Remove
+              </Button>
+            </div>
+          ))}
+          <Button variant="outline" size="sm" onClick={addPathMapping}>
+            Add mapping
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Ingest</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <StringListField
+            label="Mount markers"
+            helperText="Warrden-local paths that must exist before ingest touches the filesystem — e.g. a canary file at the root of each NAS mount. Empty means no mount verification."
+            values={config.ingest.mountMarkers}
+            onChange={(mountMarkers) => updateIngest({ mountMarkers })}
+          />
+          <StringListField
+            label="Download roots"
+            helperText="Arr-side paths of the torrent clients' download roots — used to find each torrent's own folder for bundle rescue."
+            values={config.ingest.downloadRoots}
+            onChange={(downloadRoots) => updateIngest({ downloadRoots })}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Picking</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -300,6 +398,11 @@ export default function ConfigPage() {
       <Card>
         <CardHeader>
           <CardTitle>LLM</CardTitle>
+          <CardDescription>
+            Call-sites: {CALLSITES.join(', ')}. Each profile below must map every call-site it's used for to a
+            provider/model (with an optional fallback) — a call-site missing from the active profile fails outright
+            when it's invoked.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div>
