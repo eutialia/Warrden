@@ -543,9 +543,23 @@ describe('app', () => {
 
       const res = await app.request(`/api/managed-objects/${rowId}`, { method: 'DELETE', headers: jsonHeaders });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true });
+      // `deletedInArr` round-trips deleteManagedObject's own computed result — the caller
+      // needs to tell "the live Sonarr/Radarr object is gone too" from "registry-only".
+      expect(await res.json()).toEqual({ ok: true, deletedInArr: true });
       expect(client.deleteTag).toHaveBeenCalledWith(3);
       expect(managedObjects.list()).toHaveLength(0);
+    });
+
+    it('DELETE /api/managed-objects/:id: deletedInArr is false when there is no live client for the instance — registry-only removal', async () => {
+      const ctx = makeCtx({ clients: new Map() });
+      const managedObjects = new ManagedObjects(ctx.db);
+      managedObjects.insert({ arrInstance: 'sonarr', kind: 'tag', externalId: 3, name: `${WARRDEN_TAG_PREFIX}group` });
+      const rowId = managedObjects.list()[0]!.id;
+      const app = createApp(ctx);
+
+      const res = await app.request(`/api/managed-objects/${rowId}`, { method: 'DELETE', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, deletedInArr: false });
     });
 
     it('DELETE /api/managed-objects/:id: a non-404 arr failure surfaces as 500, appends a managed.delete-failed warn event, and leaves the registry row in place', async () => {

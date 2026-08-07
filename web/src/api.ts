@@ -234,7 +234,7 @@ export function fetchManagedObjects(): Promise<{ objects: ManagedObject[] }> {
   return fetchJson('/api/managed-objects');
 }
 
-export function deleteManagedObject(id: number): Promise<{ ok: boolean }> {
+export function deleteManagedObject(id: number): Promise<{ ok: boolean; deletedInArr: boolean }> {
   return fetchJson(`/api/managed-objects/${id}`, { method: 'DELETE' });
 }
 

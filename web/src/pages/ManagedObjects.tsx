@@ -70,11 +70,11 @@ export default function ManagedObjects() {
 
   useEffect(refetch, [refetch]);
 
-  async function handleDelete(id: number): Promise<void> {
+  async function handleDelete(id: number, arrInstance: string): Promise<void> {
     setPendingIds((prev) => new Set(prev).add(id));
     try {
-      await deleteManagedObject(id);
-      toast.success('Deleted');
+      const { deletedInArr } = await deleteManagedObject(id);
+      toast.success(deletedInArr ? `Deleted from ${arrInstance}` : 'Removed from registry (arr object left in place)');
       setConfirmId(null);
       refetch();
     } catch (err) {
@@ -144,18 +144,23 @@ export default function ManagedObjects() {
                         <TableCell>{new Date(row.created_at).toLocaleString()}</TableCell>
                         <TableCell className="text-right">
                           {confirming ? (
-                            <div className="flex justify-end gap-1.5">
-                              <Button variant="outline" size="sm" disabled={pending} onClick={() => setConfirmId(null)}>
-                                Cancel
-                              </Button>
-                              <Button
-                                variant="destructive"
-                                size="sm"
-                                disabled={pending}
-                                onClick={() => void handleDelete(row.id)}
-                              >
-                                {pending ? 'Deleting…' : 'Confirm?'}
-                              </Button>
+                            <div className="flex flex-col items-end gap-1">
+                              <p className="text-xs text-muted-foreground">
+                                Deletes the live {KIND_LABEL[row.kind].toLowerCase()} in {arrInstance} too, not just this registry entry.
+                              </p>
+                              <div className="flex justify-end gap-1.5">
+                                <Button variant="outline" size="sm" disabled={pending} onClick={() => setConfirmId(null)}>
+                                  Cancel
+                                </Button>
+                                <Button
+                                  variant="destructive"
+                                  size="sm"
+                                  disabled={pending}
+                                  onClick={() => void handleDelete(row.id, arrInstance)}
+                                >
+                                  {pending ? 'Deleting…' : 'Confirm?'}
+                                </Button>
+                              </div>
                             </div>
                           ) : (
                             <Button variant="outline" size="sm" onClick={() => setConfirmId(row.id)}>

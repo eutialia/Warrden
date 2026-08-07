@@ -486,8 +486,12 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // `requireConfig(ctx)` (not a value captured at mount time) so a config reloaded via
       // `PUT /api/config` — e.g. an arr instance's `kind` correcting a typo — is honored on
       // the very next delete, same as every other config-reading route in this file.
-      await deleteManagedObject({ db, clients, events, config: requireConfig(ctx) }, row);
-      return c.json({ ok: true });
+      const { deletedInArr } = await deleteManagedObject({ db, clients, events, config: requireConfig(ctx) }, row);
+      // The dashboard needs to tell the operator whether the live Sonarr/Radarr object is
+      // actually gone, or just this row's own bookkeeping — see `deleteManagedObject`'s doc
+      // for the cases where it's the latter (no client configured, a foreign-named live
+      // object, a tag still carried by another profile, ...).
+      return c.json({ ok: true, deletedInArr });
     });
   }
 

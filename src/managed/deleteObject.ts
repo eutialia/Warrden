@@ -32,7 +32,7 @@ import { errorMessage } from '../util/errors.js';
 export async function deleteManagedObject(
   ctx: Pick<AppContext, 'db' | 'clients' | 'events' | 'config'>,
   row: ManagedObjectRow,
-): Promise<void> {
+): Promise<{ deletedInArr: boolean }> {
   const managedObjects = new ManagedObjects(ctx.db);
   const client = ctx.clients.get(row.arr_instance);
 
@@ -48,6 +48,12 @@ export async function deleteManagedObject(
     message: `Deleted ${row.kind} ${row.external_id} on "${row.arr_instance}" from the registry${deletedInArr ? ' and the arr' : ''}`,
     data: { instance: row.arr_instance, kind: row.kind, externalId: row.external_id, deletedInArr },
   });
+
+  // The caller (the DELETE route) needs this to tell the operator apart "the live
+  // Sonarr/Radarr object is gone too" from "only the registry bookkeeping was removed" —
+  // the event above already carries it, but a route response shouldn't require re-parsing
+  // the event log to answer its own request.
+  return { deletedInArr };
 }
 
 function skippedNoClient(ctx: Pick<AppContext, 'events'>, row: ManagedObjectRow): false {
