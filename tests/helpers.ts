@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
@@ -527,7 +527,10 @@ export function ingestFixture(opts?: {
     episodeResource({ id: 1, seriesId: targetId, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
   ];
   const episodeFiles = opts?.episodeFiles ?? [{ id: 100, seriesId: targetId, seasonNumber: 1, relativePath: videoFileName, path: videoPath }];
-  const movieFiles = opts?.movieFiles ?? [{ id: 200, movieId: targetId, relativePath: videoFileName, path: videoPath }];
+  // `size` mirrors the actual on-disk video's byte length (not a made-up constant) so the
+  // movie branch's size-match fallback/stem guard (src/pipelines/ingest/run.ts) sees a real
+  // match against `statSync(videoPath)` the same way it would against a real Radarr movie.
+  const movieFiles = opts?.movieFiles ?? [{ id: 200, movieId: targetId, relativePath: videoFileName, path: videoPath, size: statSync(videoPath).size }];
 
   const history: HistoryRecord[] = [
     {

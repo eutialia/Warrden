@@ -5,6 +5,10 @@ import type { EpisodeResource } from '../../arr/types.js';
  * fansub groups shipping multi-audio/multi-sub releases as separate files. */
 export const SIDECAR_EXTS: readonly string[] = ['.mka', '.srt', '.ass'];
 
+/** Video file extensions the movie branch recognizes when re-deriving a torrent folder by
+ * size match, or when looking for the sibling video a sidecar's filename actually names. */
+export const VIDEO_EXTS: readonly string[] = ['.mkv', '.mp4', '.avi'];
+
 export type SidecarKind = 'audio' | 'subtitle';
 
 /** `.mka` (case-insensitive) is an external audio track; every other sidecar
@@ -139,6 +143,24 @@ export function parseLangTag(filename: string): string | null {
     if (resolved !== null) return resolved;
   }
   return null;
+}
+
+/**
+ * Strips a filename down to the stem it shares with its sibling video: the extension,
+ * then one trailing dot-token IF it (lowercased) is a known language tag — reusing
+ * `LANG_TOKENS` rather than duplicating it, so a new tag added there is picked up here for
+ * free. `'[X] Promare [x265_flac].chs.ass'` and `'[X] Promare [x265_flac].mka'` both reduce
+ * to `'[X] Promare [x265_flac]'`; a video's own filename passes through unchanged minus its
+ * extension, since it never carries a lang-tag dot-token in this position. Used by the
+ * movie branch's sidecar stem guard (`run.ts`) to tell which of several sibling videos in
+ * the same torrent folder a sidecar actually belongs to, rather than assuming 1:1.
+ */
+export function sidecarStem(filename: string): string {
+  const noExt = filename.replace(/\.[^.]+$/, '');
+  const lastDot = noExt.lastIndexOf('.');
+  if (lastDot === -1) return noExt;
+  const token = noExt.slice(lastDot + 1).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(LANG_TOKENS, token) ? noExt.slice(0, lastDot) : noExt;
 }
 
 /**

@@ -1,13 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import {
   SIDECAR_EXTS,
+  VIDEO_EXTS,
   sidecarKindForExt,
   parseEpisodeRef,
   parseLangTag,
   buildSidecarName,
   matchSidecarDeterministic,
+  sidecarStem,
 } from '../src/pipelines/ingest/sidecars.js';
 import { episodeResource } from './helpers.js';
+
+describe('VIDEO_EXTS', () => {
+  it('lists the video extensions the movie branch recognizes for size-match/stem-guard purposes', () => {
+    expect(VIDEO_EXTS).toEqual(['.mkv', '.mp4', '.avi']);
+  });
+});
 
 describe('SIDECAR_EXTS / sidecarKindForExt', () => {
   it('lists the sidecar extensions Warrden recognizes', () => {
@@ -199,5 +207,33 @@ describe('matchSidecarDeterministic', () => {
   it('no parseable ref -> null regardless of episode list', () => {
     const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, absoluteEpisodeNumber: 1080 })];
     expect(matchSidecarDeterministic('[Group] Title [1080].ass', episodes)).toBeNull();
+  });
+});
+
+describe('sidecarStem', () => {
+  it.each([
+    // A trailing dot-token that's a known language tag is stripped along with the extension.
+    ['[X] Promare [x265_flac].chs.ass', '[X] Promare [x265_flac]'],
+    ['[X] Promare [x265_flac].cht.ass', '[X] Promare [x265_flac]'],
+    // .mka carries no lang token here — its own extension strip alone already lands on
+    // the same stem as the .ass sidecars above, which is the whole point of the guard:
+    // a bare-audio sidecar and a lang-tagged subtitle both resolve to their shared video.
+    ['[X] Promare [x265_flac].mka', '[X] Promare [x265_flac]'],
+    // Token lookup is case-insensitive, same as parseLangTag's own LANG_TOKENS lookup.
+    ['[X] Promare [x265_flac].CHS.ass', '[X] Promare [x265_flac]'],
+    // A trailing dot-token that ISN'T a language tag is left alone — only a genuine
+    // LANG_TOKENS hit is ever stripped.
+    ['Show.S01E05.1080p.ass', 'Show.S01E05.1080p'],
+    // No dot at all before the extension -> nothing further to strip.
+    ['AAA - 05.srt', 'AAA - 05'],
+    // A video's own filename passes through unchanged minus its extension.
+    ['main.mkv', 'main'],
+    ['Promare SIDE Galo.mkv', 'Promare SIDE Galo'],
+    // 'constructor' is inherited from Object.prototype, not an own LANG_TOKENS key — same
+    // guard as parseLangTag's resolveGroup, pinned here too since sidecarStem does its own
+    // lookup rather than delegating to resolveGroup.
+    ['Video.constructor.ass', 'Video.constructor'],
+  ])('sidecarStem(%s) -> %s', (filename, expected) => {
+    expect(sidecarStem(filename)).toBe(expected);
   });
 });

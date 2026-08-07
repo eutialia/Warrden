@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -500,7 +500,7 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId)).toHaveLength(0);
   });
 
-  it('movie: sidecars map to the single listMovieFiles file with no episode matching and no LLM', async () => {
+  it('movie: sidecars map to the single listMovieFiles file with no episode matching and no LLM (bare sidecar, no sibling video in the source dir — the stem guard never engages)', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
     writeFileSync(join(fx.torrentDir, 'Movie.zh-Hans.ass'), 'sub');
     const llm = new FakeGenerator([]);
@@ -515,6 +515,93 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ data: { matchedBy: 'deterministic' } });
+  });
+
+  it('movie size-match source fallback + sidecar stem guard (Promare-shaped): no import history at all, but the torrent folder (found via exact size match under a configured downloadRoot) ships a main film plus a side-story extra — only the main film\'s sidecars are placed', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    // Radarr's own downloadFolderImported history record is gone (a pre-Warrden import) —
+    // droppedPath/originalFilePath/sceneName all null in the real case; here that's an
+    // empty history array, same net effect on `sourceDirsArr`.
+    fx.client.movieHistory = [];
+
+    // A second, unrelated download-root child dir that must NEVER be matched — proves the
+    // fallback is gated on an exact size match, not "any dir with any video in it".
+    const unrelatedDir = join(fx.downloadsDir, 'Unrelated Torrent');
+    mkdirSync(unrelatedDir, { recursive: true });
+    writeFileSync(join(unrelatedDir, 'unrelated.mkv'), Buffer.alloc(9999));
+
+    // Main film: bracket-prefixed fansub name, sized to exactly match the fixture's own
+    // movieFile.size (5 bytes, same length as the 'video' content ingestFixture writes).
+    const mainVideo = join(fx.torrentDir, '[X] Promare [x265_flac].mkv');
+    writeFileSync(mainVideo, 'abcde');
+    writeFileSync(join(fx.torrentDir, '[X] Promare [x265_flac].chs.ass'), 'main-chs');
+    writeFileSync(join(fx.torrentDir, '[X] Promare [x265_flac].cht.ass'), 'main-cht');
+    writeFileSync(join(fx.torrentDir, '[X] Promare [x265_flac].mka'), 'main-audio');
+
+    // Side-story extra: deliberately a different size, and named so it sorts BEFORE the
+    // bracket-prefixed main file ('P' < '[') — reproducing the real ordering that let a
+    // side-story sub get placed as the main film's before this fix.
+    const sideVideo = join(fx.torrentDir, 'Promare SIDE Galo.mkv');
+    writeFileSync(sideVideo, 'xy');
+    writeFileSync(join(fx.torrentDir, 'Promare SIDE Galo.chs.ass'), 'side-chs');
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    // Fix 1: the fallback fired and matched exactly the real torrent dir, not the unrelated one.
+    const fallback = findEvent(fx.ctx.events.list(), 'ingest.source-fallback');
+    expect(fallback).toBeTruthy();
+    expect(fallback!.data.matchedDirs).toEqual([fx.torrentDir]);
+
+    // Fix 2: the main film's sidecars landed with their correct content — never the side
+    // story's, even though its sidecar sorts first.
+    expect(readFileSync(join(fx.libraryDir, 'Movie.zh-Hans.ass'), 'utf-8')).toBe('main-chs');
+    expect(readFileSync(join(fx.libraryDir, 'Movie.zh-Hant.ass'), 'utf-8')).toBe('main-cht');
+    expect(readFileSync(join(fx.libraryDir, 'Movie.mka'), 'utf-8')).toBe('main-audio');
+
+    // The side story's own subtitle was never placed anywhere.
+    expect(existsSync(join(fx.libraryDir, 'Movie.zh-Hans.ass'))).toBe(true);
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
+    expect(rows).toHaveLength(3);
+    expect(rows.some((r) => r.source_path.includes('SIDE'))).toBe(false);
+
+    const skipped = fx.ctx.events.list().filter((e) => e.kind === 'ingest.skipped-extra');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.data).toMatchObject({
+      sidecarPath: join(fx.torrentDir, 'Promare SIDE Galo.chs.ass'),
+      videoPath: sideVideo,
+    });
+    expect(hasEvent(fx.ctx.events.list({ level: 'warn' }), 'ingest.skipped-collision')).toBe(false);
+  });
+
+  it('movie sidecar stem guard also applies to a history-derived source dir (not just the size-match fallback): an extra video sharing a sidecar\'s stem is skipped unless it\'s the identified imported source', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    // History is present (ingestFixture's default) — this exercises the stem guard on the
+    // ordinary, non-fallback path.
+    const mainVideo = join(fx.torrentDir, 'Movie.mkv');
+    writeFileSync(mainVideo, 'video'); // 5 bytes — matches the fixture's default movieFile.size
+    const extraVideo = join(fx.torrentDir, 'Movie Extra.mkv');
+    writeFileSync(extraVideo, Buffer.alloc(9999)); // different size — never the identified source
+    writeFileSync(join(fx.torrentDir, 'Movie.chs.ass'), 'main-content');
+    writeFileSync(join(fx.torrentDir, 'Movie Extra.chs.ass'), 'extra-content');
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.source-fallback')).toBe(false); // history-derived, not the fallback
+
+    expect(readFileSync(join(fx.libraryDir, 'Movie.zh-Hans.ass'), 'utf-8')).toBe('main-content');
+
+    const skipped = fx.ctx.events.list().filter((e) => e.kind === 'ingest.skipped-extra');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.data).toMatchObject({
+      sidecarPath: join(fx.torrentDir, 'Movie Extra.chs.ass'),
+      videoPath: extraVideo,
+    });
+
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ source_path: join(fx.torrentDir, 'Movie.chs.ass') });
   });
 });
 
@@ -840,7 +927,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     // The import landed: the movie now has a file. The arr's queue record for the same
     // download lingers (it hasn't cleared it yet), so the next run sees it as stuck again.
-    fx.client.movieFiles.push({ id: 200, movieId: 7, relativePath: 'Movie.mkv', path: fx.videoPath });
+    fx.client.movieFiles.push({ id: 200, movieId: 7, relativePath: 'Movie.mkv', path: fx.videoPath, size: statSync(fx.videoPath).size });
     const job2 = claimIngestJob(fx);
     await runIngestJob(fx.ctx, job2);
 

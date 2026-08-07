@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import type {
   ArrApi,
@@ -13,7 +13,7 @@ import type { AppContext } from '../../context.js';
 import { PlacedFiles, type PlacedFileRow } from '../../db/placedFiles.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy, ensureMounts, MountError, walkFiles } from '../../fs/files.js';
-import { mapArrPath } from '../../fs/paths.js';
+import { mapArrPath, type PathMapping } from '../../fs/paths.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolveTargetTitle } from '../targetTitle.js';
@@ -21,7 +21,7 @@ import { errorMessage } from '../../util/errors.js';
 import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
-import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, SIDECAR_EXTS } from './sidecars.js';
+import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, sidecarStem, SIDECAR_EXTS, VIDEO_EXTS } from './sidecars.js';
 import { resolveSourceDirsDetailed } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
@@ -112,14 +112,48 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // rescue stage's narrower, root-derived-only set (`rootDerived`) — see
   // resolveSourceDirsDetailed's own doc for why the rescue stage needs the narrower one.
   const { all: sourceDirsArr, rootDerived: bundleFolders } = resolveSourceDirsDetailed(droppedPaths, ctx.config.ingest.downloadRoots);
-  const sourceDirsLocal = sourceDirsArr.map((d) => mapArrPath(ctx.config.pathMappings, d)).filter((d) => existsSync(d));
+  let sourceDirsLocal = sourceDirsArr.map((d) => mapArrPath(ctx.config.pathMappings, d)).filter((d) => existsSync(d));
+
+  // Hoisted once so the fallback derivation and the source-video identification below both
+  // read the same value without re-narrowing `target` (a series/movie union) inside a
+  // nested closure.
+  const movieFile = target.kind === 'movie' ? target.movieFiles[0] : undefined;
+
+  // Movie-only fallback: Radarr's own downloadFolderImported history record (and with it
+  // originalFilePath/sceneName) only exists for imports Radarr made itself — a movie
+  // imported before Warrden existed, or old enough to have aged out of history retention,
+  // leaves `sourceDirsArr` genuinely empty with nothing to sweep. Copy-mode imports are
+  // byte-identical to their source, so an exact size match between the movie's current file
+  // and a video sitting under a configured torrent-client root re-derives that torrent's own
+  // folder with no history needed at all.
+  if (sourceDirsArr.length === 0 && movieFile) {
+    const fallbackDirs = findMovieSourceDirsBySize(ctx.config.ingest.downloadRoots, ctx.config.pathMappings, movieFile.size);
+    if (fallbackDirs.length > 0) {
+      sourceDirsLocal = fallbackDirs;
+      ctx.events.append({
+        kind: 'ingest.source-fallback',
+        jobId: job.id,
+        message: `No import history for this movie — matched its source folder by exact file size instead`,
+        data: targetEventData(job, { matchedDirs: fallbackDirs }),
+      });
+    }
+  }
 
   // Deduped: nested source dirs (e.g. a configured-root miss falling back to two different
   // dropped files' own dirnames, one inside the other) would otherwise have `walkFiles`
   // — itself recursive — walk the same physical file more than once, double-placing it and
   // double-listing it in the LLM batch below.
   const sidecarPaths = [...new Set(sourceDirsLocal.flatMap((d) => walkFiles(d, SIDECAR_EXTS)))];
-  await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths);
+
+  // The specific video Radarr actually imported, identified by exact size match across
+  // every swept dir's videos — works whether those dirs came from history or the fallback
+  // above, so the movie branch's sidecar stem guard (in sweepSidecars) has one source of
+  // truth instead of two paths that could disagree.
+  const identifiedSourceVideo = movieFile
+    ? sourceDirsLocal.flatMap((d) => walkFiles(d, VIDEO_EXTS)).find((v) => statSync(v).size === movieFile.size)
+    : undefined;
+
+  await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths, identifiedSourceVideo);
 
   await rescueStuckImports(ctx, job, client, target, assessment, bundleFolders);
 }
@@ -142,6 +176,45 @@ function assertMounted(ctx: AppContext, job: JobRow): void {
     });
     throw new RescheduleError('mount marker(s) missing', MOUNT_RETRY_MS);
   }
+}
+
+/**
+ * Movie-only fallback source-dir derivation used when a movie's history has nothing to say
+ * about where its torrent folder is (see `runIngestJob`'s call site). For each configured
+ * download root that exists locally, only depth-1 child directories are considered — one
+ * recursion per torrent dir, mirroring how a torrent client actually lays its downloads out
+ * under a shared root — and a child qualifies the moment ANY video under it (`walkFiles` is
+ * itself recursive) matches the movie's file size exactly. This is stat-only: no file
+ * content is ever read, and dot-directories are already pruned by `walkFiles`. Returns every
+ * matching child dir (sorted, deduped across roots) rather than stopping at the first — a
+ * false-positive size collision across two different torrent folders is rare enough that
+ * surfacing both for the sidecar sweep to try is safer than guessing which one is real.
+ */
+function findMovieSourceDirsBySize(downloadRoots: string[], pathMappings: PathMapping[], size: number): string[] {
+  const matched = new Set<string>();
+  for (const arrRoot of downloadRoots) {
+    const localRoot = mapArrPath(pathMappings, arrRoot);
+    if (!existsSync(localRoot)) continue;
+    for (const entry of readdirSync(localRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const childDir = join(localRoot, entry.name);
+      if (walkFiles(childDir, VIDEO_EXTS).some((video) => statSync(video).size === size)) {
+        matched.add(childDir);
+      }
+    }
+  }
+  return [...matched].sort();
+}
+
+/** Videos sitting directly in `dir` (no recursion into subfolders) — used by the movie
+ * branch's sidecar stem guard to find the specific sibling video a sidecar's filename
+ * names, without also picking up a video from some unrelated nested folder. */
+function siblingVideosInDir(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const wanted = new Set(VIDEO_EXTS.map((e) => e.toLowerCase()));
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && wanted.has(extname(e.name).toLowerCase()))
+    .map((e) => join(dir, e.name));
 }
 
 /** Deletes provenance (and the placed file itself) for any sidecar whose video has
@@ -235,8 +308,24 @@ async function resolveTarget(client: ArrApi, job: JobRow): Promise<TargetContext
  * source instead — cheap and correct without paying for a second matching pass (or, for
  * an LLM-matched file, a second LLM call), and it also clears the "phantom row" that would
  * otherwise block the collision guard forever for a target that's actually free again.
+ *
+ * The movie branch additionally guards against a torrent folder that ships MORE than one
+ * video (a main film plus side-story/extra videos, each with its own same-named subtitle
+ * set): a sidecar only 1:1-matches the movie's actual file when the video its filename
+ * names (`sidecarStem`) is `identifiedSourceVideo` — the one Radarr actually imported. A
+ * sidecar naming some OTHER sibling video is an extra's own caption and is skipped rather
+ * than misattached to the main film, which would otherwise caption the wrong video. A
+ * sidecar with no sibling video sharing its stem at all (the common case) is unaffected —
+ * it attaches to the movie the same way it always has.
  */
-async function sweepSidecars(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, target: TargetContext, sidecarPaths: string[]): Promise<void> {
+async function sweepSidecars(
+  ctx: AppContext,
+  job: JobRow,
+  placedFiles: PlacedFiles,
+  target: TargetContext,
+  sidecarPaths: string[],
+  identifiedSourceVideo?: string,
+): Promise<void> {
   const existingPlaced = placedFiles.listByTarget(job.arr_instance, job.target_kind, job.target_id);
   const episodesWithFiles = target.kind === 'series' ? target.episodes.filter((e) => e.hasFile) : [];
   const llmBatch: string[] = [];
@@ -258,6 +347,20 @@ async function sweepSidecars(ctx: AppContext, job: JobRow, placedFiles: PlacedFi
         appendDeferred(ctx, job, sidecarPath, 'no movie file is on disk yet');
         continue;
       }
+
+      const siblingVideo = siblingVideosInDir(dirname(sidecarPath)).find(
+        (v) => sidecarStem(basename(v)) === sidecarStem(basename(sidecarPath)),
+      );
+      if (siblingVideo && siblingVideo !== identifiedSourceVideo) {
+        ctx.events.append({
+          kind: 'ingest.skipped-extra',
+          jobId: job.id,
+          message: `Skipped "${basename(sidecarPath)}" — belongs to "${basename(siblingVideo)}", an extra the arr never imported`,
+          data: targetEventData(job, { sidecarPath, videoPath: siblingVideo }),
+        });
+        continue;
+      }
+
       tryPlace(ctx, job, placedFiles, sidecarPath, video.path, 'deterministic');
       continue;
     }

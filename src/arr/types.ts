@@ -107,6 +107,7 @@ export interface MovieFileResource {
   movieId: number;
   relativePath: string;
   path: string;
+  size: number;
 }
 
 /** One row from GET /manualimport — quality/languages are opaque blobs we round-trip
