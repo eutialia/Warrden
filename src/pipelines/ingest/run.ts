@@ -149,6 +149,18 @@ function assertMounted(ctx: AppContext, job: JobRow): void {
  * job's target owns are considered, and only `placed_files`-recorded paths are ever
  * touched, per the destruction limit: Warrden never deletes a file it didn't place.
  *
+ * A missing `video_path` is ambiguous on its own: it can mean the video genuinely vanished
+ * (re-imported/upgraded/deleted — real stale), or it can mean the video's whole share isn't
+ * mounted right now (`ingest.mountMarkers` defaults to `[]`, so an unmounted NAS share can
+ * slip past `assertMounted` entirely). Only the parent folder's own reachability tells the
+ * two apart: `existsSync(dirname(row.video_path))` true means the folder is there and the
+ * video specifically is gone (real stale, safe to clean); false means the whole folder is
+ * unreachable, so nothing here can tell deletion from an outage — the row is skipped rather
+ * than cleaned, because provenance for an unavailable mount must survive the outage, not be
+ * read as "the file is gone" and destroyed. Every skipped row for this run is folded into
+ * one `ingest.stale-clean-deferred` warn event rather than one per row, so a whole
+ * unreachable share doesn't flood the event log.
+ *
  * One row's `rmSync` failure (a permission error, the path being a directory, ...) is
  * contained per-row (same shape as `tryPlace`'s containment) rather than aborting the rest
  * of the cleanup pass — and the row is deliberately kept, not deleted, on failure: the file
@@ -156,8 +168,13 @@ function assertMounted(ctx: AppContext, job: JobRow): void {
  * reality and drop it from being retried next run. */
 function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles): void {
   const rows = placedFiles.listByTarget(job.arr_instance, job.target_kind, job.target_id);
+  let deferredCount = 0;
   for (const row of rows) {
     if (existsSync(row.video_path)) continue;
+    if (!existsSync(dirname(row.video_path))) {
+      deferredCount++;
+      continue;
+    }
     try {
       rmSync(row.placed_path, { force: true });
     } catch (err) {
@@ -188,6 +205,16 @@ function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: Place
         placedPath: row.placed_path,
         videoPath: row.video_path,
       },
+    });
+  }
+
+  if (deferredCount > 0) {
+    ctx.events.append({
+      kind: 'ingest.stale-clean-deferred',
+      level: 'warn',
+      jobId: job.id,
+      message: `Deferred stale-cleanup for ${deferredCount} row(s) — their video's parent folder is unreachable (mount likely unavailable), not just the video itself`,
+      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, count: deferredCount },
     });
   }
 }
@@ -395,10 +422,12 @@ function tryPlace(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sideca
  * - **Foreign-file guard**: something already sits at the target path with no
  *   `placed_files` row for it — not ours to overwrite.
  * - **Collision guard**: a `placed_files` row already claims the target path from a
- *   DIFFERENT still-existing source (two sidecars — e.g. two lang-null subs — resolving
- *   to the same filename). Re-placement from the SAME source is always allowed (that's
- *   the idempotent-refresh path); a claim from a source that's since vanished no longer
- *   contests the slot either.
+ *   DIFFERENT source (two sidecars — e.g. two lang-null subs — resolving to the same
+ *   filename). Re-placement from the SAME source is always allowed (that's the
+ *   idempotent-refresh path). A claim from a source that's since vanished still blocks the
+ *   slot too — once the old source is gone, nothing here can re-derive what's actually
+ *   sitting at the target to decide whether overwriting it is safe, and the file may well
+ *   be human-edited; deleting the file is the human path to freeing the slot back up.
  */
 function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPath: string, videoArrPath: string, matchedBy: MatchedBy): void {
   const videoLocal = mapArrPath(ctx.config.pathMappings, videoArrPath);
@@ -420,7 +449,7 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
     return;
   }
 
-  if (existingAtTarget && existingAtTarget.source_path !== sidecarPath && existsSync(existingAtTarget.source_path)) {
+  if (existingAtTarget && existingAtTarget.source_path !== sidecarPath) {
     ctx.events.append({
       kind: 'ingest.skipped-collision',
       level: 'warn',
@@ -589,6 +618,15 @@ async function rescueSeries(
  * dedupe result that was already empty (nothing to filter at all) stays silent, same as
  * the "nothing leftover" case elsewhere in this stage.
  *
+ * Exactly one survivor maps 1:1 onto `job.target_id` and executes unattended, as above.
+ * MORE than one survivor is never executed, even though every one of them individually
+ * looks safe: with no episode numbers to disambiguate by (unlike the series branch's
+ * per-episode mapping), picking which single file actually belongs to this one movie slot
+ * is a human decision — mirrors the series branch's duplicate-target guard (an occupied
+ * episode also proposes rather than executes). Proposed via the same `ingest.rescue-proposed`
+ * attention shape the occupied-movie guard below uses, with `reasoning` naming the multi-file
+ * situation instead of "already has a file on disk".
+ *
  * If the movie already has a file on disk (`target.movieFiles`, fetched once up front in
  * `resolveTarget` — the movie equivalent of the series occupied-episode cap), replacing it
  * is always a human decision: the command is proposed as an `attention` item instead of
@@ -630,6 +668,24 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
   }));
 
   const movieTitle = await resolveTargetTitle(client, job);
+
+  if (items.length > 1) {
+    ctx.events.append({
+      kind: 'ingest.rescue-proposed',
+      level: 'attention',
+      jobId: job.id,
+      message: `Movie rescue for "${movieTitle}" needs review — ${items.length} unresolved files all claim this one movie slot`,
+      data: {
+        action: 'bundle-import',
+        instance: job.arr_instance,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        files,
+        reasoning: `${items.length} files survived filtering with no episode numbers to disambiguate them — picking which one actually belongs is a human decision`,
+      },
+    });
+    return;
+  }
 
   if (target.movieFiles.length > 0) {
     ctx.events.append({

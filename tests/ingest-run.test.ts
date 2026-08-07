@@ -165,6 +165,35 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.skipped-collision')).toHaveLength(1);
   });
 
+  it('collision guard is conservative even once the old claimant source has vanished: a second sidecar targeting the same slot is still skipped, not allowed to overwrite it', async () => {
+    const fx = ingestFixture();
+    const placedFiles = new PlacedFiles(fx.ctx.db);
+    const targetPath = join(fx.libraryDir, 'Show - S01E05.srt');
+    const vanishedSource = join(fx.torrentDir, 'vanished-source.srt'); // deliberately never written to disk
+    writeFileSync(targetPath, 'human-edited-or-prior-content');
+    placedFiles.upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: fx.targetKind,
+      targetId: fx.targetId,
+      kind: 'subtitle',
+      placedPath: targetPath,
+      videoPath: fx.videoPath,
+      sourcePath: vanishedSource, // its own source no longer exists
+    });
+
+    const newSource = join(fx.torrentDir, 'New Source - 05.srt');
+    writeFileSync(newSource, 'new-content');
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    // Nothing was overwritten, and the row still claims the old (now-vanished) source —
+    // we can no longer re-derive what we'd be replacing, so we never touch the slot.
+    expect(readFileSync(targetPath, 'utf-8')).toBe('human-edited-or-prior-content');
+    expect(placedFiles.findByPlacedPath(targetPath)).toMatchObject({ source_path: vanishedSource });
+    expect(fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.skipped-collision')).toHaveLength(1);
+  });
+
   it('restore: a placed file removed from the library (video intact) is restored from its recorded source WITHOUT re-matching — no second LLM call — and the row is refreshed', async () => {
     const fx = ingestFixture();
     // Deterministically-unmatchable on purpose: this must go through the LLM on the first
@@ -258,6 +287,62 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(placedFiles.findByPlacedPath(staleTarget)).toBeNull();
 
     expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(1);
+  });
+
+  it('stale cleanup mount discriminator: a video whose PARENT FOLDER is also missing (unmounted share) is deferred, not cleaned — the row and its placed file both survive', async () => {
+    const fx = ingestFixture();
+    const placedFiles = new PlacedFiles(fx.ctx.db);
+
+    // The video's parent directory itself doesn't exist — indistinguishable from "the whole
+    // NAS share isn't mounted right now" from cleanupStaleProvenance's point of view, so it
+    // must never be read as "the video was deleted".
+    const unmountedVideoPath = join(fx.libraryDir, 'unmounted-share', 'Ghost Episode.mkv');
+    const placedUnderUnmounted = join(fx.libraryDir, 'unmounted-share', 'Ghost Episode.ass');
+    placedFiles.upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: fx.targetKind,
+      targetId: fx.targetId,
+      kind: 'subtitle',
+      placedPath: placedUnderUnmounted,
+      videoPath: unmountedVideoPath,
+      sourcePath: join(fx.torrentDir, 'ghost-source.ass'),
+    });
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    // Row survives untouched — nothing was deleted, nothing was even attempted.
+    expect(placedFiles.findByPlacedPath(placedUnderUnmounted)).not.toBeNull();
+    expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(0);
+    expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-clean-failed')).toHaveLength(0);
+
+    const deferred = fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.stale-clean-deferred');
+    expect(deferred).toHaveLength(1);
+    expect(deferred[0]!.data).toMatchObject({ instance: fx.arrInstance, targetKind: fx.targetKind, targetId: fx.targetId, count: 1 });
+  });
+
+  it('stale cleanup mount discriminator: several deferred rows in one run collapse into a single ingest.stale-clean-deferred event naming the count', async () => {
+    const fx = ingestFixture();
+    const placedFiles = new PlacedFiles(fx.ctx.db);
+
+    for (let i = 0; i < 3; i++) {
+      placedFiles.upsert({
+        arrInstance: fx.arrInstance,
+        targetKind: fx.targetKind,
+        targetId: fx.targetId,
+        kind: 'subtitle',
+        placedPath: join(fx.libraryDir, 'unmounted-share', `Ghost ${i}.ass`),
+        videoPath: join(fx.libraryDir, 'unmounted-share', `Ghost ${i}.mkv`),
+        sourcePath: join(fx.torrentDir, `ghost-source-${i}.ass`),
+      });
+    }
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    const deferred = fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.stale-clean-deferred');
+    expect(deferred).toHaveLength(1);
+    expect(deferred[0]!.data).toMatchObject({ count: 3 });
   });
 
   it('stale cleanup containment: one row failing to rmSync (EISDIR, not ENOENT) warns and keeps that row, but still cleans the next stale row', async () => {
@@ -664,6 +749,34 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(skippedEvents[0]!.level).toBe('info');
     expect(skippedEvents[0]!.data.skipped).toEqual(expect.arrayContaining([rejected.path, otherMovie.path]));
     expect((skippedEvents[0]!.data.skipped as string[]).length).toBe(2);
+  });
+
+  it('movie rescue multi-survivor guard: more than one item survives filtering -> proposes an ingest.rescue-proposed attention item instead of executing any of them', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    const itemA = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    const itemB = manualImportItem({ path: '/downloads/Movie/Movie.Alt.mkv', folderName: 'Movie Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [itemA, itemB];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).not.toHaveBeenCalled();
+    expect(fx.ctx.events.list().some((e) => e.kind === 'ingest.rescued')).toBe(false);
+
+    const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0]!.data).toEqual({
+      action: 'bundle-import',
+      instance: fx.arrInstance,
+      targetKind: 'movie',
+      targetId: 7,
+      files: [
+        expect.objectContaining({ path: itemA.path }),
+        expect.objectContaining({ path: itemB.path }),
+      ],
+      reasoning: expect.any(String),
+    });
   });
 
   it('movie occupied-guard: a movie that already has a file on disk proposes an attention item instead of executing', async () => {
