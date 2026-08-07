@@ -74,16 +74,30 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
         // has *no* Warrden webhook right now. Retry once immediately (cheap — every
         // startup retries anyway) before reporting that explicitly.
         if (recreatedFromId === undefined) throw err;
-        try {
-          created = await client.createNotification(body);
-        } catch (retryErr) {
-          ctx.events.append({
-            kind: 'webhook.recreate-failed',
-            level: 'warn',
-            message: `Removed the stale "${NOTIFICATION_NAME}" webhook on "${arr.name}" but failed to recreate it — the instance currently has no Warrden webhook: ${errorMessage(retryErr)}`,
-            data: { instance: arr.name, oldId: recreatedFromId },
-          });
-          continue;
+
+        // The create call can fail on our end (timeout, dropped connection) AFTER the arr
+        // already committed it server-side — a blind retry in that case would create a
+        // genuine duplicate on top of it. Re-list by name first: if "Warrden" is already
+        // there, that's the create that just failed to tell us it succeeded; record it
+        // instead of creating a second one. A re-list failure here is treated the same as
+        // "nothing found" — it falls through to the blind retry below, same as before this
+        // check existed.
+        const relisted = await client.listNotifications().catch(() => []);
+        const alreadyCommitted = relisted.find((n) => n.name === NOTIFICATION_NAME);
+        if (alreadyCommitted) {
+          created = alreadyCommitted;
+        } else {
+          try {
+            created = await client.createNotification(body);
+          } catch (retryErr) {
+            ctx.events.append({
+              kind: 'webhook.recreate-failed',
+              level: 'warn',
+              message: `Removed the stale "${NOTIFICATION_NAME}" webhook on "${arr.name}" but failed to recreate it — the instance currently has no Warrden webhook: ${errorMessage(retryErr)}`,
+              data: { instance: arr.name, oldId: recreatedFromId },
+            });
+            continue;
+          }
         }
       }
 

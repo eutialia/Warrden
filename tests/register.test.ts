@@ -80,6 +80,27 @@ describe('registerWebhooks', () => {
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 1, name: 'Warrden' }]);
   });
 
+  it('a create that fails on our end but actually committed server-side is detected via re-list — no duplicate create call, the found row is recorded', async () => {
+    const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden' }] }); // stale -> triggers the recreate path
+    let createCalls = 0;
+    client.createNotification = vi.fn(async () => {
+      createCalls++;
+      // Simulates a response lost after the arr committed the write: the store gains the
+      // row, but this call still throws to its own caller.
+      const committed = { id: 99, name: 'Warrden', onDownload: true, onUpgrade: true };
+      client.notifications.push(committed);
+      throw new Error('ETIMEDOUT');
+    });
+    const ctx = makeCtx({ config: configWithArrs('sonarr'), clients: new Map([['sonarr', client]]) });
+    new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
+
+    await registerWebhooks(ctx);
+
+    expect(createCalls).toBe(1); // no blind second create — the re-list found the committed row
+    expect(ctx.events.list({ level: 'warn' })).toHaveLength(0);
+    expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 99, name: 'Warrden' }]);
+  });
+
   it('reports a recreate-failure — not a generic register-failure — when the replacement create fails twice after the old notification was already deleted', async () => {
     const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden' }] });
     client.createNotification = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
