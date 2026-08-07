@@ -55,12 +55,16 @@ Every config save requires a container restart to fully take effect (the save
 confirmation says so) — some fields are read live, but arr connections and the LLM
 provider/keys are only wired up at startup.
 
-**Tested against:** Acquire (Phase 1) is live-verified against Sonarr v4. Radarr support is
-implemented against the same v3 API shape but not yet live-verified against a real Radarr
-instance. The release-profile API shape Warrden relies on for pinning assumes Sonarr v4 or
-newer. Ingest (Phase 2) is covered by unit and integration tests against mocked arr/LLM/
-filesystem behavior, but live verification against a running Sonarr/Radarr and torrent
-client is still pending.
+**Tested against:** Acquire (Phase 1) is live-verified against Sonarr v4. The
+release-profile API shape Warrden relies on for pinning assumes Sonarr v4 or newer.
+Ingest's movie path is live-verified against a real Radarr v5 over SMB mounts: sidecar
+sweep with deterministic language tagging, the size-match source fallback for a movie
+with no import history, the extra-video stem guard (side-story subs refused), the
+foreign-file guard (a hand-placed sidecar left untouched), the stuck-import rescue
+filters (22 real leftover videos, all correctly refused), and idempotent re-runs. The
+series ingest path, LLM sidecar/bundle matching, and bundle-rescue execution are covered
+by unit and integration tests against mocked arr/LLM/filesystem behavior but not yet
+live-verified.
 
 ## Ingest
 
