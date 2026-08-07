@@ -184,6 +184,25 @@ export default function ConfigPage() {
     setConfig((prev) => (prev ? { ...prev, ingest: { ...prev.ingest, ...patch } } : prev));
   }
 
+  /** Trims and drops blank entries from a `StringListField`-backed array — same intent as
+   * the picking-tags split/trim/filter below, pulled out since `ingest.mountMarkers` and
+   * `ingest.downloadRoots` both need it. Without this, a row left blank after an "Add"
+   * click (or never filled in) would save as `''`, which the server schema now rejects
+   * outright (`.min(1)` per entry) — filtering here means an accidental blank row is
+   * silently dropped instead of blocking the whole save. */
+  function trimAndDropBlank(values: string[]): string[] {
+    return values.map((v) => v.trim()).filter((v) => v.length > 0);
+  }
+
+  /** Same idea as `trimAndDropBlank`, but a `pathMappings` row has two sides — a row is
+   * kept only when both `from` and `to` are non-blank after trimming; either side left
+   * blank drops the whole row rather than saving a mapping that can never match anything. */
+  function trimAndDropBlankMappings(mappings: Config['pathMappings']): Config['pathMappings'] {
+    return mappings
+      .map((m) => ({ from: m.from.trim(), to: m.to.trim() }))
+      .filter((m) => m.from.length > 0 && m.to.length > 0);
+  }
+
   /** Parses one of the picking number fields, rejecting blank/non-numeric text outright —
    * `Number('')` is `0`, so without this a field the user cleared mid-edit would silently
    * save as zero instead of blocking the save like the LLM-profiles JSON check does. Has
@@ -236,7 +255,12 @@ export default function ConfigPage() {
     // (see `buildLlmKeys`) and the server merges sentinel values back to the stored secret.
     const payload: Config = {
       ...config,
+      pathMappings: trimAndDropBlankMappings(config.pathMappings),
       picking: { tags, seederFloor, minSizeMB, maxSizeMB },
+      ingest: {
+        mountMarkers: trimAndDropBlank(config.ingest.mountMarkers),
+        downloadRoots: trimAndDropBlank(config.ingest.downloadRoots),
+      },
       llm: { ...config.llm, profiles, keys: buildLlmKeys() },
     };
 

@@ -43,7 +43,10 @@ export const ConfigSchema = z
       })
       .prefault({}),
     arrs: z.array(ArrInstanceSchema).default(() => []),
-    pathMappings: z.array(z.object({ from: z.string(), to: z.string() })).default(() => []),
+    // `.min(1)` on both sides: a blank `from`/`to` can never map anything and would silently
+    // no-op `mapArrPath` for every path it's checked against — reject it rather than let a
+    // half-filled row (e.g. one left over from a UI "Add" click) save as valid.
+    pathMappings: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) })).default(() => []),
     picking: z
       .object({
         tags: z.array(z.string()).default(() => []),
@@ -67,12 +70,15 @@ export const ConfigSchema = z
     ingest: z
       .object({
         // Local (mapped) paths that must exist before any filesystem work — e.g. a marker
-        // file at the root of each NAS mount. Empty list = no mount verification.
-        mountMarkers: z.array(z.string()).default(() => []),
+        // file at the root of each NAS mount. Empty list = no mount verification. `.min(1)`
+        // per entry: a blank marker would trivially "exist" as a no-op check, defeating the
+        // point of listing it at all.
+        mountMarkers: z.array(z.string().min(1)).default(() => []),
         // ARR-side paths of the torrent clients' download roots. Used to derive a torrent's
         // root folder from an imported file's path, and as a hard "never sweep this dir
-        // itself" guard.
-        downloadRoots: z.array(z.string()).default(() => []),
+        // itself" guard. `.min(1)` per entry: a blank root would match every path's
+        // longest-prefix check in `resolveSourceDirsDetailed`, corrupting bundle rescue.
+        downloadRoots: z.array(z.string().min(1)).default(() => []),
       })
       .prefault({}),
     llm: z

@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { useSseRefetch } from '@/hooks/useSseRefetch';
 
 // Same reasoning as Activity.tsx: SSE fires per-event, and a busy pipeline can raise
 // several attention items (or resolve several) in quick succession — coalesce to one
@@ -64,27 +65,27 @@ export default function Attention() {
   const [items, setItems] = useState<AttentionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [disconnected, setDisconnected] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<number>>(new Set());
   const [repickOpenId, setRepickOpenId] = useState<number | null>(null);
   const [repickHint, setRepickHint] = useState('');
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // `refetch` reads the status through this ref rather than closing over the `status`
-  // state, so its own identity stays stable across tab switches and the SSE effect below
-  // can depend on it normally instead of reconnecting the stream on every toggle.
+  // state, so its own identity stays stable across tab switches and `useSseRefetch`'s own
+  // connection isn't torn down and reopened on every toggle.
   const statusRef = useRef(status);
   statusRef.current = status;
 
-  // Bumped on every refetch; a response is only applied if it's still the most recent
-  // request by the time it lands. Same idea as JobDetail's `isStale`, generalized to cover
-  // any overlapping requests (an SSE burst, a tab switch, a post-action refetch), not just
-  // an unmounted effect.
-  const requestIdRef = useRef(0);
+  // `useSseRefetch` needs `refetch`'s identity to call it, but `refetch` itself needs
+  // `beginFetch` from `useSseRefetch`'s return — a genuine circular reference broken via
+  // this ref indirection (`useSseRefetch` doesn't need its `onEvent` argument to be stable;
+  // it's read through its own ref internally, same idea as this one).
+  const refetchRef = useRef<() => void>(() => {});
+  // Guards against any overlapping request clobbering an earlier one — an SSE burst, a tab
+  // switch, a post-action refetch — not just an unmounted effect.
+  const { disconnected, beginFetch } = useSseRefetch(() => refetchRef.current(), REFETCH_DEBOUNCE_MS);
 
   const refetch = useCallback(() => {
-    const requestId = ++requestIdRef.current;
-    const isStale = () => requestIdRef.current !== requestId;
+    const isStale = beginFetch();
     fetchAttention(statusRef.current)
       .then((res) => {
         if (isStale()) return;
@@ -99,40 +100,16 @@ export default function Attention() {
         if (isStale()) return;
         setLoading(false);
       });
-  }, []);
-
-  const refetchDebounced = useCallback(() => {
-    if (debounceRef.current !== null) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(refetch, REFETCH_DEBOUNCE_MS);
-  }, [refetch]);
+  }, [beginFetch]);
+  refetchRef.current = refetch;
 
   useEffect(() => {
-    // A debounced refetch queued by the previous tab must not land after this tab's rows
-    // are cleared and re-requested below — drop it before starting the new load.
-    if (debounceRef.current !== null) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
     setItems([]); // don't show the previous tab's rows under the new tab's spinner
     setLoading(true);
     setRepickOpenId(null);
     setRepickHint('');
     refetch();
   }, [status, refetch]);
-
-  useEffect(() => {
-    const source = new EventSource('/api/events/stream');
-    source.onmessage = () => refetchDebounced();
-    source.onopen = () => {
-      setDisconnected(false);
-      refetch(); // reconnected — catch up on anything missed while the stream was down
-    };
-    source.onerror = () => setDisconnected(true);
-    return () => {
-      source.close();
-      if (debounceRef.current !== null) clearTimeout(debounceRef.current);
-    };
-  }, [refetch, refetchDebounced]);
 
   const runAction = useCallback(
     async (id: number, action: () => Promise<unknown>, successMsg: string, failMsg: string): Promise<boolean> => {

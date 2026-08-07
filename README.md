@@ -35,17 +35,19 @@ directory needs to be pre-owned by uid/gid `1000` for the same reason.
 On first start, Warrden writes a default `config.json` into the data volume and serves a
 dashboard at `http://<host>:9797`. Before adding any arr instance, set `server.publicUrl`
 on the **Config** page to a URL your Sonarr/Radarr instances can reach the container at —
-this is the address Warrden registers as its own webhook. Registration runs on every
-startup and is by name (`"Warrden"`), not one-time: an instance with no Warrden webhook
-gets one created; an instance whose webhook is already subscribed to download/upgrade
-events (import events, needed for Ingest) is left as-is. The one exception is a webhook
-left over from Phase 1, before it subscribed to those events — that one is deleted and
-recreated exactly once, at the then-current `publicUrl`, to pick up import events; from
-then on it's treated the same as any other fully-subscribed webhook. Either way, changing
-`publicUrl` after an instance's webhook is already fully subscribed does not re-point
+this is the address Warrden registers as its own webhook. Registration is by name
+(`"Warrden"`) and re-checked on every startup, not a one-time thing: whenever the
+Warrden-named webhook on an instance isn't subscribed to both On Download and On Upgrade
+(no webhook at all yet; a Phase 1-vintage one that predates those events; or one a human
+unticked "On Import" on by hand in the arr's own settings), it's deleted and recreated at
+the *then-current* `publicUrl`, and this check runs again every startup — so fixing it is
+just a container restart away, however it got into that state. A webhook already
+subscribed to both is left alone; changing `publicUrl` afterward does **not** re-point
 it — delete the "Warrden" webhook in the arr's own settings first if you need to move it.
-Then add your arr instances (name, kind, base URL, API key), set picking and ingest
-preferences, and choose an LLM provider.
+If the recreate itself fails partway (the delete lands but the create doesn't, even after
+one immediate retry), the instance is left with no Warrden webhook at all until the next
+startup tries again. Then add your arr instances (name, kind, base URL, API key), set
+picking and ingest preferences, and choose an LLM provider.
 
 Every config save requires a container restart to fully take effect (the save
 confirmation says so) — some fields are read live, but arr connections and the LLM
@@ -60,24 +62,36 @@ client is still pending.
 
 ## Ingest
 
-Ingest runs once per import (on-download/on-upgrade webhook, plus a reconciliation-loop
-backstop for anything a webhook missed) and rescues what the arr's own import leaves
-behind:
+Ingest runs once per target per import burst (an on-download/on-upgrade webhook enqueues
+it; the job queue coalesces anything else that lands for the same target while that run is
+still pending or in progress into the same run, rather than piling up one job per webhook;
+a reconciliation-loop backstop covers anything a webhook missed entirely) and rescues what
+the arr's own import leaves behind:
 
 - **Sidecar rescue** — sweeps the torrent's own source folder(s) for `.mka` audio and
-  `.srt`/`.ass` subtitle files the arr doesn't import on its own, matches each one to the
-  episode or movie it belongs to (filename matching first, one batched LLM call — the
-  `sidecar-match` call-site — for anything cryptic), and copies (never moves — the torrent
-  keeps seeding) it into place beside the video, renamed to the arr's own convention.
-- **Bundle rescue** — a season-pack or multi-movie torrent the arr only partially imports
-  leaves whole leftover video files behind; these are mapped to series/season/episode
+  `.srt`/`.ass` subtitle files the arr doesn't import on its own, and copies (never moves —
+  the torrent keeps seeding) each one into place beside its video, renamed to the arr's own
+  convention. For a series, each sidecar is matched to the episode it belongs to —
+  filename matching first, one batched LLM call (the `sidecar-match` call-site) for
+  anything cryptic. A movie has only ever one file to attach to, so there's no matching
+  step for movies at all: any sidecar found just attaches 1:1 to the movie's own file.
+- **Bundle rescue (series only)** — a season-pack torrent the arr only partially imports
+  leaves whole leftover episode files behind; these are mapped to season/episode
   (deterministic parsing first, an LLM call — the `bundle-map` call-site — plus the arr's
   own episode list for absolute numbering and specials) and pushed through the arr's
   manual-import API in copy mode. A high/medium-confidence mapping imports immediately; a
   low-confidence one is proposed as an **Attention** item instead, and only runs once a
-  human accepts it.
-- **Stuck-import rescue** — anything the arr's own manual-import queue gave up on gets the
-  same mapping treatment as bundle rescue.
+  human accepts it. Movies have no equivalent stage — a leftover video in a movie's own
+  torrent folder is always treated as an extra (trailer, behind-the-scenes, ...) and is
+  never auto-imported as the movie itself.
+- **Stuck-import rescue** — retries anything the arr's own manual-import queue gave up on.
+  For a series, this is folded into bundle rescue's own mapping pass above. For a movie,
+  it's simpler and LLM-free: each stuck item (after dropping anything the arr already
+  rejected, or that names a different movie) maps 1:1 onto the job's own movie — there's
+  only one file to map to, so there's nothing to pick between. Either way, a movie that
+  already has a file on disk gets the same treatment as bundle rescue's low-confidence
+  case: proposed as an **Attention** item instead of executed, since replacing an existing
+  file is a human decision.
 - **Upgrade cleanup** — when an episode or movie's video file disappears (a re-import, an
   upgrade, a manual delete), any sidecar Warrden placed for it is removed too, since a
   sidecar with no video beside it is just clutter. This is provenance-driven (it reacts to
@@ -91,9 +105,10 @@ every 2 minutes while the arr is still busy, up to 24 hours, after which it give
 raises an Attention item rather than waiting forever.
 
 **Mount safety:** before touching the filesystem, ingest checks that every path in
-`ingest.mountMarkers` exists (see the configuration reference below); a missing marker
-pauses that job with an Attention item and a retry, rather than silently treating an
-unmounted NAS share as "nothing to sweep."
+`ingest.mountMarkers` exists (see the configuration reference below). A missing marker
+raises an Attention item and reschedules the job — same uncounted-reschedule shape as the
+settle gate above, not a counted retry — every 5 minutes until every marker is back,
+rather than silently treating an unmounted NAS share as "nothing to sweep."
 
 **Destruction limits:** Warrden never deletes or overwrites a file it didn't place itself.
 Concretely: it only ever removes a sidecar that has its own `placed_files` provenance row;

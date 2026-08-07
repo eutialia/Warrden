@@ -149,6 +149,44 @@ describe('config store', () => {
         return () => saveConfig(dir, { ...cfg, picking: { ...cfg.picking, minSizeMB: 100, maxSizeMB: 50 } });
       },
     },
+    {
+      // A blank `from` can never match any real path — `mapArrPath` would treat it the same
+      // as `resolveSourceDirsDetailed`'s blank-root case below, silently matching everything.
+      scenario: 'pathMappings[].from left blank',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        cfg.pathMappings.push({ from: '', to: '/mnt/media' });
+        return () => saveConfig(dir, cfg);
+      },
+    },
+    {
+      scenario: 'pathMappings[].to left blank',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        cfg.pathMappings.push({ from: '/data', to: '' });
+        return () => saveConfig(dir, cfg);
+      },
+    },
+    {
+      // A blank marker would trivially "exist" as a no-op `existsSync` check, defeating the
+      // point of configuring mount verification at all.
+      scenario: 'ingest.mountMarkers[] entry left blank',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        cfg.ingest.mountMarkers.push('');
+        return () => saveConfig(dir, cfg);
+      },
+    },
+    {
+      // A blank root's longest-prefix check in `resolveSourceDirsDetailed` matches every
+      // absolute path (`p.startsWith('/')`), corrupting bundle rescue's folder derivation.
+      scenario: 'ingest.downloadRoots[] entry left blank',
+      setup: (dir: string) => {
+        const cfg = loadConfig(dir);
+        cfg.ingest.downloadRoots.push('');
+        return () => saveConfig(dir, cfg);
+      },
+    },
   ])('rejects invalid config with ConfigError: $scenario', ({ setup }) => {
     const dir = tmp();
     const run = setup(dir);

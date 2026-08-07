@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { ApiError, fetchJob, postAcquire, type JobDetailResponse } from '@/api';
+import { ApiError, fetchJob, postAcquire, type JobDetailResponse, type PlacedFileKind } from '@/api';
 import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useSseRefetch } from '@/hooks/useSseRefetch';
+
+// Same idea as ManagedObjects.tsx's own `KIND_LABEL` — a raw `PlacedFileKind` reads fine
+// in a log line but not as dashboard copy.
+const PLACED_FILE_KIND_LABEL: Record<PlacedFileKind, string> = {
+  audio: 'Audio',
+  subtitle: 'Subtitle',
+};
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -41,14 +49,13 @@ export default function JobDetail() {
     };
   }, [id, load]);
 
-  useEffect(() => {
-    if (!id) return;
-    // Any event can mean this job (or its acquire record) changed — refetch wholesale
-    // rather than trying to reconcile individual fields.
-    const source = new EventSource('/api/events/stream');
-    source.onmessage = () => load();
-    return () => source.close();
-  }, [id, load]);
+  // Any event can mean this job (or its acquire record) changed — refetch wholesale rather
+  // than trying to reconcile individual fields. `debounceMs: 0` — unlike Activity/Attention/
+  // ManagedObjects's own lists, SSE traffic about one job is never a "burst" worth
+  // coalescing. `load()` is called with no staleness guard here, same as before this was
+  // pulled into the shared hook: the per-`id` guard above is what actually matters, and a
+  // late-resolving SSE-triggered load for the *same* `id` is harmless to apply.
+  useSseRefetch(() => load(), 0);
 
   async function handleRepick(): Promise<void> {
     if (!data) return;
@@ -127,7 +134,7 @@ export default function JobDetail() {
             {placedFiles.map((f) => (
               <div key={f.id} className="space-y-1 rounded-md border p-3">
                 <div className="flex items-center gap-2">
-                  <Badge variant="outline">{f.kind}</Badge>
+                  <Badge variant="outline">{PLACED_FILE_KIND_LABEL[f.kind]}</Badge>
                   {typeof f.data.matchedBy === 'string' && <Badge variant="secondary">{f.data.matchedBy}</Badge>}
                 </div>
                 <p className="break-all">Placed: {f.placed_path}</p>
