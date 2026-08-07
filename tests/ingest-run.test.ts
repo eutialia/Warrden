@@ -521,7 +521,8 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
     // Radarr's own downloadFolderImported history record is gone (a pre-Warrden import) —
     // droppedPath/originalFilePath/sceneName all null in the real case; here that's an
-    // empty history array, same net effect on `sourceDirsArr`.
+    // empty history array, same net effect on `sourceDirsLocal` (nothing to derive a source
+    // dir from at all).
     fx.client.movieHistory = [];
 
     // A second, unrelated download-root child dir that must NEVER be matched — proves the
@@ -559,8 +560,8 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(readFileSync(join(fx.libraryDir, 'Movie.zh-Hant.ass'), 'utf-8')).toBe('main-cht');
     expect(readFileSync(join(fx.libraryDir, 'Movie.mka'), 'utf-8')).toBe('main-audio');
 
-    // The side story's own subtitle was never placed anywhere.
-    expect(existsSync(join(fx.libraryDir, 'Movie.zh-Hans.ass'))).toBe(true);
+    // The side story's own subtitle was never placed anywhere — exactly the 3 main-stem
+    // sidecars have provenance rows, none of them sourced from the SIDE file.
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
     expect(rows).toHaveLength(3);
     expect(rows.some((r) => r.source_path.includes('SIDE'))).toBe(false);
@@ -602,6 +603,48 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ source_path: join(fx.torrentDir, 'Movie.chs.ass') });
+  });
+
+  it('movie sidecar stem guard: the sibling-video lookup is depth-1 only — a video sharing a root-level sidecar\'s stem from a NESTED subfolder must never count as a sibling', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    // A torrent client's own "SPs"/specials-style subfolder holds a video that happens to
+    // share the root-level sidecar's stem by coincidence — but it's in a DIFFERENT
+    // directory. A recursive lookup (e.g. swapping siblingVideosInDir for a walkFiles call)
+    // would wrongly treat it as the sidecar's sibling; the real, depth-1 lookup must not.
+    const nestedDir = join(fx.torrentDir, 'SPs');
+    mkdirSync(nestedDir, { recursive: true });
+    // Deliberately NOT movieFile.size (5 bytes) — if a recursive lookup wrongly picked this
+    // up as a "sibling", it would also fail to be the identified source, which is exactly
+    // what would trip the (wrong) skip this test guards against.
+    writeFileSync(join(nestedDir, 'extra.mkv'), Buffer.alloc(999));
+    // No video at all directly in torrentDir — this is the "bare sidecar" shape, which must
+    // attach normally regardless of what's buried in a subfolder.
+    writeFileSync(join(fx.torrentDir, 'extra.chs.ass'), 'root-content');
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.skipped-extra')).toBe(false);
+    expect(readFileSync(join(fx.libraryDir, 'Movie.zh-Hans.ass'), 'utf-8')).toBe('root-content');
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
+    expect(rows).toHaveLength(1);
+  });
+
+  it('movie source-fallback miss: no history AND no download-root video matches the movie\'s size -> an info ingest.source-fallback-miss event names how many roots were scanned, instead of going silent', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    fx.client.movieHistory = [];
+    // The one configured download root exists and has a child dir, but nothing in it is
+    // anywhere close to the movie's file size — a genuine "never found it" case.
+    writeFileSync(join(fx.torrentDir, 'unrelated.mkv'), Buffer.alloc(123456));
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.source-fallback')).toBe(false);
+    const miss = findEvent(fx.ctx.events.list(), 'ingest.source-fallback-miss');
+    expect(miss).toBeTruthy();
+    expect(miss!.data).toMatchObject({ rootsScanned: 1 });
+    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7)).toHaveLength(0);
   });
 });
 

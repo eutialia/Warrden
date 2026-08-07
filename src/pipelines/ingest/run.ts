@@ -122,12 +122,19 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // Movie-only fallback: Radarr's own downloadFolderImported history record (and with it
   // originalFilePath/sceneName) only exists for imports Radarr made itself — a movie
   // imported before Warrden existed, or old enough to have aged out of history retention,
-  // leaves `sourceDirsArr` genuinely empty with nothing to sweep. Copy-mode imports are
-  // byte-identical to their source, so an exact size match between the movie's current file
-  // and a video sitting under a configured torrent-client root re-derives that torrent's own
-  // folder with no history needed at all.
-  if (sourceDirsArr.length === 0 && movieFile) {
-    const fallbackDirs = findMovieSourceDirsBySize(ctx.config.ingest.downloadRoots, ctx.config.pathMappings, movieFile.size);
+  // leaves nothing to derive a source dir from. Gated on `sourceDirsLocal` (post-mapping,
+  // post-existsSync), not `sourceDirsArr`: history whose droppedPath maps to a dir that's
+  // since vanished locally deserves the same fallback — that's the exact symptom this
+  // exists for, not just "no history at all". Copy-mode imports are byte-identical to their
+  // source, so an exact size match between the movie's current file and a video sitting
+  // under a configured torrent-client root re-derives that torrent's own folder with no
+  // history needed at all.
+  if (sourceDirsLocal.length === 0 && movieFile) {
+    const { dirs: fallbackDirs, rootsScanned } = findMovieSourceDirsBySize(
+      ctx.config.ingest.downloadRoots,
+      ctx.config.pathMappings,
+      movieFile.size,
+    );
     if (fallbackDirs.length > 0) {
       sourceDirsLocal = fallbackDirs;
       ctx.events.append({
@@ -135,6 +142,16 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
         jobId: job.id,
         message: `No import history for this movie — matched its source folder by exact file size instead`,
         data: targetEventData(job, { matchedDirs: fallbackDirs }),
+      });
+    } else {
+      // Visible rather than silent: a history-less movie that never matches anything would
+      // otherwise re-run this scan (fruitlessly) on every future ingest job with no trace of
+      // it ever having tried.
+      ctx.events.append({
+        kind: 'ingest.source-fallback-miss',
+        jobId: job.id,
+        message: `No import history for this movie, and no source folder matched its file size across ${rootsScanned} download root(s)`,
+        data: targetEventData(job, { rootsScanned }),
       });
     }
   }
@@ -150,7 +167,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // above, so the movie branch's sidecar stem guard (in sweepSidecars) has one source of
   // truth instead of two paths that could disagree.
   const identifiedSourceVideo = movieFile
-    ? sourceDirsLocal.flatMap((d) => walkFiles(d, VIDEO_EXTS)).find((v) => statSync(v).size === movieFile.size)
+    ? sourceDirsLocal.flatMap((d) => walkFiles(d, VIDEO_EXTS)).find((v) => fileSizeEquals(v, movieFile.size))
     : undefined;
 
   await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths, identifiedSourceVideo);
@@ -178,37 +195,75 @@ function assertMounted(ctx: AppContext, job: JobRow): void {
   }
 }
 
+/** Whether the file at `path` is exactly `size` bytes — `false` on ANY stat failure
+ * (ENOENT, EACCES, ...) rather than throwing. The movie branch's size-match logic runs
+ * against a live, often SMB-mounted, download share that an active torrent client can be
+ * moving or deleting files on at the same time — a file `walkFiles`/`readdirSync` just
+ * listed can be gone by the time this actually stats it, and that race must never fail the
+ * whole ingest job, same as every other filesystem touchpoint in this file being defensive
+ * about a source vanishing mid-run (see `cleanupStaleProvenance`, `tryPlace`, ...). */
+function fileSizeEquals(path: string, size: number): boolean {
+  try {
+    return statSync(path).size === size;
+  } catch {
+    return false;
+  }
+}
+
+/** `findMovieSourceDirsBySize`'s result: the matched dirs (empty when nothing matched), plus
+ * how many configured download roots were actually scanned (existed locally and got
+ * `readdirSync`'d) — surfaced in `ingest.source-fallback-miss` so a history-less movie that
+ * never matches anything is visible instead of silently re-scanning forever. */
+interface MovieSourceScanResult {
+  dirs: string[];
+  rootsScanned: number;
+}
+
 /**
  * Movie-only fallback source-dir derivation used when a movie's history has nothing to say
  * about where its torrent folder is (see `runIngestJob`'s call site). For each configured
  * download root that exists locally, only depth-1 child directories are considered — one
  * recursion per torrent dir, mirroring how a torrent client actually lays its downloads out
  * under a shared root — and a child qualifies the moment ANY video under it (`walkFiles` is
- * itself recursive) matches the movie's file size exactly. This is stat-only: no file
- * content is ever read, and dot-directories are already pruned by `walkFiles`. Returns every
- * matching child dir (sorted, deduped across roots) rather than stopping at the first — a
- * false-positive size collision across two different torrent folders is rare enough that
- * surfacing both for the sidecar sweep to try is safer than guessing which one is real.
+ * itself recursive) matches the movie's file size exactly. This is stat-only (via
+ * `fileSizeEquals`, so a file vanishing mid-scan is a non-match, not a crash): no file
+ * content is ever read, and dot-directories are already pruned by `walkFiles`.
+ *
+ * Stops scanning further roots the moment a root yields ANY match — a real deployment can
+ * have hundreds of torrent dirs across a root sitting on SMB, and once one root's already
+ * proven itself to be where this movie's download lives, walking every other configured
+ * root too is pure wasted latency against a shared, possibly slow, filesystem. Every
+ * matching child dir WITHIN that one winning root is still collected (not just the first) —
+ * a false-positive size collision between two folders in the same root is rare enough that
+ * surfacing both for the sidecar sweep to try is safer than guessing which one is real; it's
+ * scanning OTHER roots after a hit that's skipped, not sibling collision detection.
  */
-function findMovieSourceDirsBySize(downloadRoots: string[], pathMappings: PathMapping[], size: number): string[] {
-  const matched = new Set<string>();
+function findMovieSourceDirsBySize(downloadRoots: string[], pathMappings: PathMapping[], size: number): MovieSourceScanResult {
+  let rootsScanned = 0;
   for (const arrRoot of downloadRoots) {
     const localRoot = mapArrPath(pathMappings, arrRoot);
     if (!existsSync(localRoot)) continue;
+    rootsScanned++;
+
+    const matched = new Set<string>();
     for (const entry of readdirSync(localRoot, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const childDir = join(localRoot, entry.name);
-      if (walkFiles(childDir, VIDEO_EXTS).some((video) => statSync(video).size === size)) {
+      if (walkFiles(childDir, VIDEO_EXTS).some((video) => fileSizeEquals(video, size))) {
         matched.add(childDir);
       }
     }
+    if (matched.size > 0) {
+      return { dirs: [...matched].sort(), rootsScanned };
+    }
   }
-  return [...matched].sort();
+  return { dirs: [], rootsScanned };
 }
 
 /** Videos sitting directly in `dir` (no recursion into subfolders) — used by the movie
  * branch's sidecar stem guard to find the specific sibling video a sidecar's filename
- * names, without also picking up a video from some unrelated nested folder. */
+ * names, without also picking up a video from some unrelated nested folder (e.g. a torrent
+ * client's own "SPs"/specials subfolder). */
 function siblingVideosInDir(dir: string): string[] {
   if (!existsSync(dir)) return [];
   const wanted = new Set(VIDEO_EXTS.map((e) => e.toLowerCase()));
