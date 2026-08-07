@@ -140,7 +140,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
       ctx.events.append({
         kind: 'ingest.source-fallback',
         jobId: job.id,
-        message: `No import history for this movie — matched its source folder by exact file size instead`,
+        message: `No usable local source folder (no import history, or its recorded folder no longer exists) — matched its source folder by exact file size instead`,
         data: targetEventData(job, { matchedDirs: fallbackDirs }),
       });
     } else {
@@ -150,7 +150,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
       ctx.events.append({
         kind: 'ingest.source-fallback-miss',
         jobId: job.id,
-        message: `No import history for this movie, and no source folder matched its file size across ${rootsScanned} download root(s)`,
+        message: `No usable local source folder (no import history, or its recorded folder no longer exists), and no source folder matched its file size across ${rootsScanned} download root(s)`,
         data: targetEventData(job, { rootsScanned }),
       });
     }
@@ -176,7 +176,8 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
 }
 
 /** Verifies every configured mount marker is present, translating a `MountError` into an
- * attention event plus a bounded reschedule — filesystem work (the sweep below) against an
+ * attention event plus an uncounted, fixed-delay reschedule (no deadline — a missing mount
+ * pauses ingest until every marker is back) — filesystem work (the sweep below) against an
  * unmounted NAS share would otherwise look like "nothing to do" instead of "not actually
  * mounted", silently pruning provenance for files that are really just unreachable. */
 function assertMounted(ctx: AppContext, job: JobRow): void {
@@ -368,8 +369,9 @@ async function resolveTarget(client: ArrApi, job: JobRow): Promise<TargetContext
  * re-enter. When the video is intact but the placed file itself was removed (by hand, or
  * by something outside Warrden), it's restored directly from the row's own recorded
  * source instead — cheap and correct without paying for a second matching pass (or, for
- * an LLM-matched file, a second LLM call), and it also clears the "phantom row" that would
- * otherwise block the collision guard forever for a target that's actually free again.
+ * an LLM-matched file, a second LLM call). See `place`'s own doc for what actually governs
+ * how long a `placed_files` row keeps claiming its target slot — restoring a file here
+ * re-copies it and refreshes the row in place; it doesn't change that claim's lifetime.
  *
  * The movie branch additionally guards against a torrent folder that ships MORE than one
  * video (a main film plus side-story/extra videos, each with its own same-named subtitle

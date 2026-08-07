@@ -79,8 +79,16 @@ anything a webhook missed entirely) and rescues what the arr's own import leaves
   the torrent keeps seeding) each one into place beside its video, renamed to the arr's own
   convention. For a series, each sidecar is matched to the episode it belongs to —
   filename matching first, one batched LLM call (the `sidecar-match` call-site) for
-  anything cryptic. A movie has only ever one file to attach to, so there's no matching
-  step for movies at all: any sidecar found just attaches 1:1 to the movie's own file.
+  anything cryptic. A movie has only ever one file to attach to, so there's no LLM
+  matching step for movies — but a torrent folder shipping more than one video (a main
+  film plus a side-story/extra, each with its own same-named subtitle set) still gets a
+  deterministic check: a sidecar attaches to the movie's file unless a sibling video in
+  the same folder shares its filename stem and isn't the video the arr actually imported,
+  in which case it's skipped as that extra's own caption instead. For a movie with no
+  import history to find its torrent folder from (imported before Warrden existed, or old
+  enough to have aged out of arr history), the source folder is instead re-derived by an
+  exact file-size match against the movie's current file — see `ingest.downloadRoots`
+  below.
 - **Bundle rescue (series only)** — a season-pack torrent the arr only partially imports
   leaves whole leftover episode files behind; these are mapped to season/episode
   (deterministic parsing first, an LLM call — the `bundle-map` call-site — plus the arr's
@@ -125,14 +133,18 @@ target video both still exist — is simply re-copied back into place on the nex
 for that target (the next webhook, or the next reconciliation pass); it isn't a permanent
 deletion, just an undone one.
 
-**Bundle rescue requires `ingest.downloadRoots`:** the leftover-video sweep only runs for a
-torrent's own source folder once that folder resolves through a configured
-`ingest.downloadRoots` entry — a folder Warrden can't place under a configured root falls
-back to a narrower, dirname-only guess that's excluded from bundle rescue on purpose (it
-can be a download client's shared "completed" folder, not something scoped to just this
-torrent). Without a matching entry, bundle rescue for that torrent is a no-op; sidecar
-rescue and stuck-import-by-`downloadId` rescue are unaffected. `ingest.downloadRoots` is
-therefore effectively required for bundle rescue to do anything. See the example below.
+**`ingest.downloadRoots` is required for more than just bundle rescue:** the leftover-video
+sweep only runs for a torrent's own source folder once that folder resolves through a
+configured `ingest.downloadRoots` entry — a folder Warrden can't place under a configured
+root falls back to a narrower, dirname-only guess that's excluded from bundle rescue on
+purpose (it can be a download client's shared "completed" folder, not something scoped to
+just this torrent). Without a matching entry, bundle rescue for that torrent is a no-op;
+sidecar rescue and stuck-import-by-`downloadId` rescue are unaffected — but only as long as
+import history exists for the target AND its recorded folder still exists locally. For a
+movie missing either (no history at all, or a folder that's since vanished), ingest instead
+re-derives the source folder by an exact file-size match scanned across
+`ingest.downloadRoots` itself, so for that case `downloadRoots` is required for sidecar
+rescue to find anything too, not just bundle rescue. See the example below.
 
 ## Configuration reference
 
@@ -149,7 +161,7 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `arrs[].apiKey` | — | API key for the arr instance. |
 | `pathMappings[].from` / `.to` | `[]` | Translates a path the arr reports (`.from`) into Warrden's own filesystem view (`.to`) — needed whenever Ingest's filesystem work sees the same files under a different mount point than the arr does. Not used by Acquire, which never touches files directly. |
 | `ingest.mountMarkers` | `[]` | Warrden-local paths that must exist before Ingest touches the filesystem — typically a canary file at the root of each mounted share. Empty means no mount verification. |
-| `ingest.downloadRoots` | `[]` | Arr-side paths of the torrent clients' download roots, used to find each torrent's own folder. Effectively required for bundle rescue (see [Ingest](#ingest) above) — without it, bundle rescue never fires. |
+| `ingest.downloadRoots` | `[]` | Arr-side paths of the torrent clients' download roots, used to find each torrent's own folder. Effectively required for bundle rescue (see [Ingest](#ingest) above) — without it, bundle rescue never fires. Also required for the movie no-import-history size-match fallback: without it, a history-less (or history-folder-vanished) movie's sidecar rescue never fires either. |
 | `picking.tags` | `[]` | Freeform tags describing release preferences, folded into the LLM's picking policy. |
 | `picking.seederFloor` | `3` | Minimum seeders a candidate must have to be considered. |
 | `picking.minSizeMB` | `50` | Minimum release size, in MB, to filter out sample/junk releases. |

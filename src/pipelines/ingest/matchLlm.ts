@@ -42,10 +42,13 @@ export function renderEpisodeLine(e: EpisodeResource): string {
 /**
  * Asks the LLM to map a batch of cryptic sidecar filenames (audio tracks/subtitles that
  * `matchSidecarDeterministic` in `sidecars.ts` couldn't place unambiguously) to the arr
- * episode they belong to. The LLM only ever sees a numbered file list and an episode
- * table — never the raw episode id list the way it might invent one — so it answers
- * with each file's 1-based number, same convention as `pickRelease`'s numbered
- * candidates.
+ * episode they belong to. Files and episodes are referenced two different ways in the
+ * answer, deliberately: files have no stable identifier of their own, so they're numbered
+ * positionally (1-based, per the numbered list shown in the prompt) — same convention as
+ * `pickRelease`'s numbered candidates. Episodes, by contrast, already have a real arr id,
+ * and the episode table spells it out explicitly (`id=N`, see `renderEpisodeLine`) — so the
+ * LLM echoes that real id straight back rather than inventing its own numbering scheme for
+ * something that's already got one.
  *
  * Two failure shapes from the LLM are handled very differently, deliberately mirroring
  * the difference in what's at stake:
