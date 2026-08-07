@@ -409,7 +409,11 @@ function tryPlace(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sideca
  *   idempotent-refresh path). A claim from a source that's since vanished still blocks the
  *   slot too — once the old source is gone, nothing here can re-derive what's actually
  *   sitting at the target to decide whether overwriting it is safe, and the file may well
- *   be human-edited; deleting the file is the human path to freeing the slot back up.
+ *   be human-edited. Note the block is deliberately durable: the claiming row is only ever
+ *   removed by stale cleanup (which triggers on the VIDEO going away, not the sidecar), so
+ *   freeing the slot for a different source means removing or renaming the episode's video
+ *   (a re-grab/upgrade does exactly that) — deleting just the placed sidecar leaves the
+ *   claim in place.
  */
 function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPath: string, videoArrPath: string, matchedBy: MatchedBy): void {
   const videoLocal = mapArrPath(ctx.config.pathMappings, videoArrPath);

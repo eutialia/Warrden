@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface SseRefetch {
   /** True while the `/api/events/stream` connection is down; clears itself the moment it
-   * reconnects (which also fires `onEvent` once, per below, to catch up on anything missed
-   * while it was down). Render a "reconnecting…" hint off this, or ignore it entirely. */
+   * reconnects (a RE-connect also fires `onEvent` once to catch up on anything missed while
+   * it was down — the first open of a fresh mount doesn't, the page's own initial load
+   * covers that). Render a "reconnecting…" hint off this, or ignore it entirely. */
   disconnected: boolean;
   /**
    * Tears down the current `EventSource` (if any) and opens a fresh one. Needed because a
