@@ -11,6 +11,7 @@ import type {
 } from '../../arr/types.js';
 import type { AppContext } from '../../context.js';
 import { PlacedFiles, type PlacedFileRow } from '../../db/placedFiles.js';
+import { targetEventData } from '../../events/target.js';
 import { atomicCopy, ensureMounts, MountError, walkFiles } from '../../fs/files.js';
 import { mapArrPath } from '../../fs/paths.js';
 import { RescheduleError } from '../../jobs/errors.js';
@@ -94,7 +95,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
         level: 'attention',
         jobId: job.id,
         message: `Gave up waiting for the arr to finish importing (still busy after ${Math.round(SETTLE_DEADLINE_MS / 3_600_000)}h)`,
-        data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
+        data: targetEventData(job),
       });
       return;
     }
@@ -137,7 +138,7 @@ function assertMounted(ctx: AppContext, job: JobRow): void {
       level: 'attention',
       jobId: job.id,
       message: `Ingest paused — missing mount marker(s): ${err.missing.join(', ')}`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, missing: err.missing },
+      data: targetEventData(job, { missing: err.missing }),
     });
     throw new RescheduleError('mount marker(s) missing', MOUNT_RETRY_MS);
   }
@@ -183,13 +184,7 @@ function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: Place
         level: 'warn',
         jobId: job.id,
         message: `Failed to remove stale "${row.placed_path}": ${errorMessage(err)}`,
-        data: {
-          instance: job.arr_instance,
-          targetKind: job.target_kind,
-          targetId: job.target_id,
-          placedPath: row.placed_path,
-          videoPath: row.video_path,
-        },
+        data: targetEventData(job, { placedPath: row.placed_path, videoPath: row.video_path }),
       });
       continue;
     }
@@ -198,13 +193,7 @@ function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: Place
       kind: 'ingest.stale-cleaned',
       jobId: job.id,
       message: `Removed "${row.placed_path}" — its video no longer exists`,
-      data: {
-        instance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
-        placedPath: row.placed_path,
-        videoPath: row.video_path,
-      },
+      data: targetEventData(job, { placedPath: row.placed_path, videoPath: row.video_path }),
     });
   }
 
@@ -214,7 +203,7 @@ function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: Place
       level: 'warn',
       jobId: job.id,
       message: `Deferred stale-cleanup for ${deferredCount} row(s) — their video's parent folder is unreachable (mount likely unavailable), not just the video itself`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, count: deferredCount },
+      data: targetEventData(job, { count: deferredCount }),
     });
   }
 }
@@ -309,7 +298,7 @@ async function sweepSidecars(ctx: AppContext, job: JobRow, placedFiles: PlacedFi
         level: 'attention',
         jobId: job.id,
         message: `Could not match "${basename(sidecarPath)}" to any episode of "${target.seriesTitle}"`,
-        data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath },
+        data: targetEventData(job, { sidecarPath }),
       });
       return;
     }
@@ -347,14 +336,7 @@ function tryRestore(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, row:
       kind: 'ingest.placed',
       jobId: job.id,
       message: `Restored "${basename(row.placed_path)}" — it had gone missing from the library`,
-      data: {
-        instance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
-        sidecarPath: row.source_path,
-        placedPath: row.placed_path,
-        matchedBy: row.data.matchedBy,
-      },
+      data: targetEventData(job, { sidecarPath: row.source_path, placedPath: row.placed_path, matchedBy: row.data.matchedBy }),
     });
   } catch (err) {
     ctx.events.append({
@@ -362,7 +344,7 @@ function tryRestore(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, row:
       level: 'warn',
       jobId: job.id,
       message: `Failed to restore "${basename(row.placed_path)}": ${errorMessage(err)}`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath: row.source_path },
+      data: targetEventData(job, { sidecarPath: row.source_path }),
     });
   }
 }
@@ -372,7 +354,7 @@ function appendDeferred(ctx: AppContext, job: JobRow, sidecarPath: string, reaso
     kind: 'ingest.deferred',
     jobId: job.id,
     message: `Deferred "${basename(sidecarPath)}" — ${reason}`,
-    data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath },
+    data: targetEventData(job, { sidecarPath }),
   });
 }
 
@@ -409,7 +391,7 @@ function tryPlace(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sideca
       level: 'warn',
       jobId: job.id,
       message: `Failed to place "${basename(sidecarPath)}": ${errorMessage(err)}`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath },
+      data: targetEventData(job, { sidecarPath }),
     });
   }
 }
@@ -444,7 +426,7 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
       level: 'warn',
       jobId: job.id,
       message: `Skipped "${basename(sidecarPath)}" — "${targetName}" already exists and wasn't placed by Warrden`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath, targetPath },
+      data: targetEventData(job, { sidecarPath, targetPath }),
     });
     return;
   }
@@ -455,7 +437,7 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
       level: 'warn',
       jobId: job.id,
       message: `Skipped "${basename(sidecarPath)}" — "${targetName}" is already claimed by "${existingAtTarget.source_path}"`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath, targetPath },
+      data: targetEventData(job, { sidecarPath, targetPath }),
     });
     return;
   }
@@ -476,7 +458,7 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
     kind: 'ingest.placed',
     jobId: job.id,
     message: `Placed "${targetName}" beside "${basename(videoLocal)}"`,
-    data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, sidecarPath, placedPath: targetPath, matchedBy },
+    data: targetEventData(job, { sidecarPath, placedPath: targetPath, matchedBy }),
   });
 }
 
@@ -509,7 +491,7 @@ async function rescueStuckImports(
       level: 'warn',
       jobId: job.id,
       message: `Rescue stage failed: ${errorMessage(err)}`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
+      data: targetEventData(job),
     });
   }
 }
@@ -564,14 +546,7 @@ async function rescueSeries(
       kind: 'ingest.rescued',
       jobId: job.id,
       message: `Rescued ${plan.files.length} file(s) for "${target.seriesTitle}" via manual import`,
-      data: {
-        instance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
-        files: plan.files,
-        skipped: plan.skipped,
-        reasoning: plan.reasoning,
-      },
+      data: targetEventData(job, { files: plan.files, skipped: plan.skipped, reasoning: plan.reasoning }),
     });
     return;
   }
@@ -581,14 +556,7 @@ async function rescueSeries(
     level: 'attention',
     jobId: job.id,
     message: `Low-confidence bundle rescue for "${target.seriesTitle}" needs review before importing`,
-    data: {
-      action: 'bundle-import',
-      instance: job.arr_instance,
-      targetKind: job.target_kind,
-      targetId: job.target_id,
-      files: plan.files,
-      reasoning: plan.reasoning,
-    },
+    data: targetEventData(job, { action: 'bundle-import', files: plan.files, reasoning: plan.reasoning }),
   });
 }
 
@@ -653,7 +621,7 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       kind: 'ingest.rescue-skipped',
       jobId: job.id,
       message: `Rescue found ${skipped.length} leftover file(s) for movie #${job.target_id}, but none were safe to import (rejected, or a different movie)`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, skipped },
+      data: targetEventData(job, { skipped }),
     });
     return;
   }
@@ -675,14 +643,11 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       level: 'attention',
       jobId: job.id,
       message: `Movie rescue for "${movieTitle}" needs review — ${items.length} unresolved files all claim this one movie slot`,
-      data: {
+      data: targetEventData(job, {
         action: 'bundle-import',
-        instance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
         files,
         reasoning: `${items.length} files survived filtering with no episode numbers to disambiguate them — picking which one actually belongs is a human decision`,
-      },
+      }),
     });
     return;
   }
@@ -693,14 +658,11 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       level: 'attention',
       jobId: job.id,
       message: `Movie rescue for "${movieTitle}" needs review — it already has a file on disk`,
-      data: {
+      data: targetEventData(job, {
         action: 'bundle-import',
-        instance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
         files,
         reasoning: `"${movieTitle}" already has a file on disk; replacing it is a human decision`,
-      },
+      }),
     });
     return;
   }
@@ -710,13 +672,6 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
     kind: 'ingest.rescued',
     jobId: job.id,
     message: `Rescued ${files.length} file(s) for "${movieTitle}" via manual import`,
-    data: {
-      instance: job.arr_instance,
-      targetKind: job.target_kind,
-      targetId: job.target_id,
-      files,
-      skipped,
-      reasoning: `stuck download(s) mapped 1:1 onto "${movieTitle}"`,
-    },
+    data: targetEventData(job, { files, skipped, reasoning: `stuck download(s) mapped 1:1 onto "${movieTitle}"` }),
   });
 }

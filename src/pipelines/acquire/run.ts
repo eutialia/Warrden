@@ -1,6 +1,7 @@
 import type { ArrApi, ReleaseCandidate } from '../../arr/types.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
+import { targetEventData } from '../../events/target.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolvePayloadTitle, resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
@@ -93,7 +94,7 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
       kind: 'acquire.skip-already-grabbed',
       jobId: job.id,
       message: `Skipped re-grab for "${title}" — a previous run of this job already grabbed a release`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
+      data: targetEventData(job),
     });
     return;
   }
@@ -123,13 +124,7 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
       kind: 'acquire.grabbed',
       jobId: job.id,
       message: `Grabbed "${result.pickedTitle}" for "${title}"`,
-      data: {
-        instance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
-        guid: result.pickedGuid,
-        releaseGroup: result.releaseGroup,
-      },
+      data: targetEventData(job, { guid: result.pickedGuid, releaseGroup: result.releaseGroup }),
     });
   } catch (err) {
     appendRecordFailedEvent(ctx, job, title, result.pickedTitle, err);
@@ -152,7 +147,7 @@ async function runSeriesAcquire(
       level: 'attention',
       jobId: job.id,
       message: `No monitored seasons for "${title}"`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
+      data: targetEventData(job),
     });
     return;
   }
@@ -166,7 +161,7 @@ async function runSeriesAcquire(
         kind: 'acquire.skip-already-grabbed',
         jobId: job.id,
         message: `Skipped re-grab for "${title}" Season ${season.seasonNumber} — a previous run of this job already grabbed a release for it`,
-        data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, seasonNumber: season.seasonNumber },
+        data: targetEventData(job, { seasonNumber: season.seasonNumber }),
       });
       continue;
     }
@@ -204,7 +199,7 @@ async function runSeriesAcquire(
           level: 'warn',
           jobId: job.id,
           message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${errorMessage(err)}`,
-          data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, releaseGroup: result.releaseGroup },
+          data: targetEventData(job, { releaseGroup: result.releaseGroup }),
         });
       }
     }
@@ -221,14 +216,7 @@ async function runSeriesAcquire(
         kind: 'acquire.grabbed',
         jobId: job.id,
         message: `Grabbed "${result.pickedTitle}" for "${seasonLabel}"`,
-        data: {
-          instance: job.arr_instance,
-          targetKind: job.target_kind,
-          targetId: job.target_id,
-          seasonNumber: season.seasonNumber,
-          guid: result.pickedGuid,
-          releaseGroup: result.releaseGroup,
-        },
+        data: targetEventData(job, { seasonNumber: season.seasonNumber, guid: result.pickedGuid, releaseGroup: result.releaseGroup }),
       });
     } catch (err) {
       appendRecordFailedEvent(ctx, job, seasonLabel, result.pickedTitle, err);
@@ -314,7 +302,7 @@ function appendNonGrabAttentionEvent(
       level: 'attention',
       jobId: job.id,
       message: `No candidates survived prefilter for "${label}"`,
-      data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, ...data },
+      data: targetEventData(job, { ...data }),
     });
     return;
   }
@@ -323,7 +311,7 @@ function appendNonGrabAttentionEvent(
     level: 'attention',
     jobId: job.id,
     message: `No candidate judged viable for "${label}": ${result.reasoning}`,
-    data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id, ...data },
+    data: targetEventData(job, { ...data }),
   });
 }
 
@@ -335,7 +323,7 @@ function appendRecordFailedEvent(ctx: AppContext, job: JobRow, label: string, pi
     level: 'warn',
     jobId: job.id,
     message: `Grabbed "${pickedTitle}" for "${label}" but failed to record the outcome: ${errorMessage(err)}`,
-    data: { instance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id },
+    data: targetEventData(job),
   });
 }
 
