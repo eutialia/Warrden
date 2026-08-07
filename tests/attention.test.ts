@@ -133,6 +133,68 @@ describe('AttentionItems', () => {
     });
   });
 
+  describe('target-key dedupe with a per-emission discriminator (dedupeKey)', () => {
+    it('two emissions for the same target but different dedupeKeys stay separate open rows', () => {
+      const items = new AttentionItems(freshDb());
+      items.open({
+        kind: 'ingest.unmatched',
+        message: 'sidecar A',
+        jobId: 1,
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 42, sidecarPath: '/a.ass', dedupeKey: '/a.ass' },
+      });
+      items.open({
+        kind: 'ingest.unmatched',
+        message: 'sidecar B',
+        jobId: 1,
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 42, sidecarPath: '/b.ass', dedupeKey: '/b.ass' },
+      });
+
+      expect(items.list()).toHaveLength(2);
+    });
+
+    it('two emissions for the same target and the same dedupeKey still collapse (refresh, not duplicate)', () => {
+      withFakeTime(() => {
+        const items = new AttentionItems(freshDb());
+        vi.setSystemTime(1_000);
+        const first = items.open({
+          kind: 'acquire.none-viable',
+          message: 'season 1 first',
+          jobId: 1,
+          data: { instance: 'sonarr', targetKind: 'series', targetId: 42, seasonNumber: 1, dedupeKey: '1' },
+        });
+
+        vi.setSystemTime(2_000);
+        const second = items.open({
+          kind: 'acquire.none-viable',
+          message: 'season 1 retried',
+          jobId: 2,
+          data: { instance: 'sonarr', targetKind: 'series', targetId: 42, seasonNumber: 1, dedupeKey: '1' },
+        });
+
+        expect(second.id).toBe(first.id);
+        expect(items.list()).toHaveLength(1);
+      });
+    });
+
+    it('a dedupeKey-carrying emission does not collapse against a plain target-keyed row (undefined dedupeKey is its own bucket)', () => {
+      const items = new AttentionItems(freshDb());
+      items.open({
+        kind: 'ingest.mount-missing',
+        message: 'mount missing',
+        jobId: 1,
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 42 },
+      });
+      items.open({
+        kind: 'ingest.mount-missing',
+        message: 'sub-target failure',
+        jobId: 2,
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 42, dedupeKey: 'x' },
+      });
+
+      expect(items.list()).toHaveLength(2);
+    });
+  });
+
   describe('setStatus', () => {
     it('transitions an open row and stamps resolved_at', () => {
       withFakeTime(() => {

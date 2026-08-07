@@ -182,7 +182,7 @@ async function runSeriesAcquire(
         reasoning: result.reasoning,
         candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
       });
-      appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, { seasonNumber: season.seasonNumber });
+      appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
       continue;
     }
 
@@ -289,20 +289,21 @@ async function attempt(
   };
 }
 
-function appendNonGrabAttentionEvent(
-  ctx: AppContext,
-  job: JobRow,
-  label: string,
-  result: AttemptResult,
-  data?: Record<string, unknown>,
-): void {
+/** `seasonNumber`, when given, is folded into the event's `data` AND doubles as a
+ * `dedupeKey` (`String(seasonNumber)`): each failed season is its own sub-target failure,
+ * not a repeat of "this series has a failed season" — without it, several seasons failing
+ * no-candidates/none-viable in the same run would collapse into one attention row naming
+ * only the last season. The movie call site (no `seasonNumber`) keeps the plain
+ * per-target behavior, which is correct there — a movie has only one target to fail. */
+function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string, result: AttemptResult, seasonNumber?: number): void {
+  const extra = seasonNumber !== undefined ? { seasonNumber, dedupeKey: String(seasonNumber) } : {};
   if (result.status === 'no-candidates') {
     ctx.events.append({
       kind: 'acquire.no-candidates',
       level: 'attention',
       jobId: job.id,
       message: `No candidates survived prefilter for "${label}"`,
-      data: targetEventData(job, { ...data }),
+      data: targetEventData(job, extra),
     });
     return;
   }
@@ -311,7 +312,7 @@ function appendNonGrabAttentionEvent(
     level: 'attention',
     jobId: job.id,
     message: `No candidate judged viable for "${label}": ${result.reasoning}`,
-    data: targetEventData(job, { ...data }),
+    data: targetEventData(job, extra),
   });
 }
 

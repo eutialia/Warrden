@@ -49,7 +49,16 @@ describe('startRunner', () => {
     await vi.advanceTimersByTimeAsync(10);
     stop();
 
-    expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
+    const attentionEvents = ctx.events.list({ level: 'attention' });
+    expect(attentionEvents).toHaveLength(1);
+    // Joins the target-dedupe protocol (targetEventData) — a JobRow always carries the
+    // triple, so a target whose job keeps failing permanently collapses into one open row.
+    expect(attentionEvents[0]!.data).toMatchObject({
+      instance: 'sonarr',
+      targetKind: 'series',
+      targetId: 1,
+      pipeline: 'acquire',
+    });
     expect(ctx.queue.get(id!)!.status).toBe('failed');
   });
 

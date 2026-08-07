@@ -1,4 +1,5 @@
 import type { AppContext } from '../context.js';
+import { targetEventData } from '../events/target.js';
 import { errorMessage } from '../util/errors.js';
 import { RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
@@ -85,12 +86,16 @@ function failJob(ctx: AppContext, job: JobRow, message: string): void {
     data: { pipeline: job.pipeline, retried },
   });
   if (!retried) {
+    // Joins the target-dedupe protocol (`targetEventData`): a `JobRow` always carries the
+    // `(arr_instance, target_kind, target_id)` triple, so a target whose job keeps failing
+    // permanently across retries collapses into one open attention row instead of piling
+    // up a new one per failed run.
     ctx.events.append({
       kind: 'job.attention',
       level: 'attention',
       jobId: job.id,
       message: `Job #${job.id} (${job.pipeline}) failed permanently: ${message}`,
-      data: { pipeline: job.pipeline },
+      data: targetEventData(job, { pipeline: job.pipeline }),
     });
   }
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
+import { AttentionItems } from '../src/db/attention.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
 import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
 
@@ -252,6 +253,39 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
     // outcomeForJob aggregates: no season grabbed, but a none-viable exists, so that wins
     // over the plainer no-candidates.
     expect(new AcquireRecords(ctx.db).outcomeForJob('sonarr', 'series', 42, job.created_at)).toBe('none-viable');
+  });
+
+  it('two seasons failing with the SAME outcome kind open two separate attention rows, not one collapsed row naming only the last season', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'Frieren',
+          seasons: [
+            { seasonNumber: 1, monitored: true }, // none-viable
+            { seasonNumber: 2, monitored: true }, // none-viable
+          ],
+        }),
+      ],
+      releases: [candidate({ guid: 'g1' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([
+        pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'season 1 has nothing' }),
+        pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'season 2 has nothing' }),
+      ]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
+
+    await runAcquireJob(ctx, job);
+
+    const attentionEvents = ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'acquire.none-viable');
+    expect(attentionEvents).toHaveLength(2);
+
+    const openRows = new AttentionItems(ctx.db).list({ status: 'open' }).filter((r) => r.kind === 'acquire.none-viable');
+    expect(openRows).toHaveLength(2);
+    expect(openRows.some((r) => r.message.includes('Season 1'))).toBe(true);
+    expect(openRows.some((r) => r.message.includes('Season 2'))).toBe(true);
   });
 
   it('outcomeForJob reports "grabbed" for the job as soon as ANY season grabbed, even if a later season in the same run did not', async () => {

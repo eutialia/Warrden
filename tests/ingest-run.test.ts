@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSyn
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { ConfigSchema } from '../src/config/schema.js';
+import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS, MOUNT_RETRY_MS } from '../src/pipelines/ingest/run.js';
@@ -134,6 +135,34 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(rows[0]).toMatchObject({ source_path: matchedPath, data: { matchedBy: 'llm' } });
 
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.unmatched')).toBe(true);
+  });
+
+  it('two sidecars that both fail to match open two separate ingest.unmatched attention rows, not one collapsed row naming the last', async () => {
+    const fx = ingestFixture();
+    const firstUnmatched = join(fx.torrentDir, 'First Unmatched - ABC.srt');
+    const secondUnmatched = join(fx.torrentDir, 'Second Unmatched - XYZ.srt');
+    writeFileSync(firstUnmatched, 'sub');
+    writeFileSync(secondUnmatched, 'sub');
+    // Both files land in the same batched LLM call; both come back with a null episodeId
+    // (genuinely unmatchable), so both should raise their own attention item.
+    fx.ctx.llm = new FakeGenerator([
+      {
+        assignments: [
+          { file: 1, episodeId: null },
+          { file: 2, episodeId: null },
+        ],
+        reasoning: 'neither matches',
+      },
+    ]);
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    const unmatchedAttention = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.unmatched');
+    expect(unmatchedAttention).toHaveLength(2);
+
+    const openRows = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((r) => r.kind === 'ingest.unmatched');
+    expect(openRows).toHaveLength(2);
   });
 
   it('foreign-file guard: the placement target already exists with no placed_files row -> ingest.skipped-foreign warn, content untouched', async () => {

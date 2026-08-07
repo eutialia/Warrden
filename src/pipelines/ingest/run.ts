@@ -456,7 +456,10 @@ async function sweepSidecars(
         level: 'attention',
         jobId: job.id,
         message: `Could not match "${basename(sidecarPath)}" to any episode of "${target.seriesTitle}"`,
-        data: targetEventData(job, { sidecarPath }),
+        // `dedupeKey: sidecarPath` — each unmatched sidecar is its own sub-target failure,
+        // not a repeat of "this series has an unmatched sidecar"; without it, several
+        // sidecars failing in the same run would collapse into one row naming only the last.
+        data: targetEventData(job, { sidecarPath, dedupeKey: sidecarPath }),
       });
       return;
     }

@@ -40,19 +40,33 @@ interface TargetKey {
   instance: unknown;
   targetKind: unknown;
   targetId: unknown;
+  /** Optional per-emission discriminator (see `open()`'s doc) — `undefined` when the
+   * emitter didn't carry one, which still matches another `undefined` (the plain
+   * per-target behavior every emitter had before `dedupeKey` existed). */
+  dedupeKey?: unknown;
 }
 
-/** Extracts `{ instance, targetKind, targetId }` from an attention event's `data` when all
- * three are present — `open()`'s preferred dedupe key (see its own doc). `null` when any
- * is missing, so the caller falls back to the older `(kind, jobId)` rule instead. */
+/** Extracts `{ instance, targetKind, targetId, dedupeKey? }` from an attention event's
+ * `data` when the first three are present — `open()`'s preferred dedupe key (see its own
+ * doc). `null` when any of the first three is missing, so the caller falls back to the
+ * older `(kind, jobId)` rule instead. `dedupeKey` is only picked up when it's a string —
+ * a convention, not an enforced field, so a caller that never set one leaves it
+ * `undefined`. */
 function targetKeyOf(data: object | undefined): TargetKey | null {
   const d = (data ?? {}) as Record<string, unknown>;
   if (d.instance === undefined || d.targetKind === undefined || d.targetId === undefined) return null;
-  return { instance: d.instance, targetKind: d.targetKind, targetId: d.targetId };
+  const key: TargetKey = { instance: d.instance, targetKind: d.targetKind, targetId: d.targetId };
+  if (typeof d.dedupeKey === 'string') key.dedupeKey = d.dedupeKey;
+  return key;
 }
 
 function sameTarget(data: Record<string, unknown>, key: TargetKey): boolean {
-  return data.instance === key.instance && data.targetKind === key.targetKind && data.targetId === key.targetId;
+  return (
+    data.instance === key.instance &&
+    data.targetKind === key.targetKind &&
+    data.targetId === key.targetId &&
+    data.dedupeKey === key.dedupeKey
+  );
 }
 
 /**
@@ -72,11 +86,23 @@ export class AttentionItems {
    *   the same target dedupes regardless of which job produced it — a stuck download that
    *   lingers across several job runs, or a repeated acquire attention for the same
    *   series, collapses into ONE open item that always carries the latest executable
-   *   payload, instead of piling up a new row per run.
+   *   payload, instead of piling up a new row per run. A recurring condition on the WHOLE
+   *   target (a stuck download, a settle timeout, a missing mount) is meant to collapse
+   *   this way. But a target can fail at a finer grain than "the whole target" — five
+   *   sidecars each failing to match a different episode, or four different seasons each
+   *   coming back with no viable release — and those are distinct failures, not repeats
+   *   of one condition; collapsing them into a single row would silently keep only the
+   *   last one, hiding the other four. `data.dedupeKey` (a string) is the escape hatch: an
+   *   emitter that carries one narrows the target key to `(instance, targetKind, targetId,
+   *   dedupeKey)`, so only re-emissions for that SAME sub-target (the same sidecar path,
+   *   the same season number, ...) collapse into each other. An emitter that carries no
+   *   `dedupeKey` still gets the plain per-target behavior described above (an `undefined`
+   *   `dedupeKey` matches another `undefined` one).
    * - **`(kind, jobId)`** (fallback): used when `data` doesn't carry a full target key.
-   *   A `jobId` of `undefined` never dedupes either way: without a job to scope it, two
-   *   unrelated occurrences of the same `kind` (e.g. two different files failing to
-   *   match) would otherwise collapse into one, silently dropping the first.
+   *   Under this fallback rule specifically, a `jobId` of `undefined` never dedupes:
+   *   without a job to scope it, two unrelated occurrences of the same `kind` (e.g. two
+   *   different files failing to match) would otherwise collapse into one, silently
+   *   dropping the first.
    *
    * Either way, only an `'open'` row is ever matched — a `dismissed`/`resolved` one is
    * done, not a duplicate to refresh.

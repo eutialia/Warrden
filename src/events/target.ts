@@ -25,6 +25,16 @@ export interface TargetEventData {
  * differently-cased field) would silently fall back to the weaker `(kind, jobId)` dedupe
  * rule instead of failing loudly, so every emitter builds it through here rather than by
  * hand.
+ *
+ * `extra.dedupeKey`, when present, is a second convention `AttentionItems.open` looks
+ * for: a string identifying WHICH sub-target this particular emission is about, for a
+ * `kind` that can fail at a finer grain than "the whole target" in one job run. A
+ * per-target condition (a stuck download, a settle timeout, a missing mount) should keep
+ * recurring into one open row and must NOT pass a `dedupeKey` — only an emitter whose
+ * failures are genuinely per-sub-target (one row per failed sidecar, one row per failed
+ * season, ...) should pass one (e.g. the sidecar's own path, or `String(seasonNumber)`),
+ * so that five sidecars failing in the same run open five rows instead of collapsing into
+ * whichever one happened to run last.
  */
 export function targetEventData<T extends Record<string, unknown> = Record<string, never>>(
   job: EventTarget,
