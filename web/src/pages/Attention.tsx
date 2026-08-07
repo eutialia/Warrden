@@ -27,6 +27,17 @@ const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
   { value: 'resolved', label: 'Resolved' },
 ];
 
+const EMPTY_MESSAGE: Record<AttentionStatus, string> = {
+  open: 'Nothing needs attention',
+  dismissed: 'No dismissed items',
+  resolved: 'No resolved items',
+};
+
+// Mirrors the server's own cap (`HINT_MAX_LENGTH` in `src/server/app.ts`) — without it the
+// input happily accepts more than the server will, and the resulting 400 gives no useful
+// explanation of why the submit just failed.
+const HINT_MAX_LENGTH = 2000;
+
 interface BundleImportData {
   reasoning?: string;
   files: { path: string }[];
@@ -59,48 +70,69 @@ export default function Attention() {
   const [repickHint, setRepickHint] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // `refetch` reads the status through this ref rather than closing over the `status`
+  // state, so its own identity stays stable across tab switches and the SSE effect below
+  // can depend on it normally instead of reconnecting the stream on every toggle.
+  const statusRef = useRef(status);
+  statusRef.current = status;
+
+  // Bumped on every refetch; a response is only applied if it's still the most recent
+  // request by the time it lands. Same idea as JobDetail's `isStale`, generalized to cover
+  // any overlapping requests (an SSE burst, a tab switch, a post-action refetch), not just
+  // an unmounted effect.
+  const requestIdRef = useRef(0);
+
   const refetch = useCallback(() => {
-    fetchAttention(status)
+    const requestId = ++requestIdRef.current;
+    const isStale = () => requestIdRef.current !== requestId;
+    fetchAttention(statusRef.current)
       .then((res) => {
+        if (isStale()) return;
         setItems(res.items);
         setError(null);
       })
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : 'failed to load attention items'))
-      .finally(() => setLoading(false));
-  }, [status]);
+      .catch((err: unknown) => {
+        if (isStale()) return;
+        setError(err instanceof ApiError ? err.message : 'failed to load attention items');
+      })
+      .finally(() => {
+        if (isStale()) return;
+        setLoading(false);
+      });
+  }, []);
 
   const refetchDebounced = useCallback(() => {
     if (debounceRef.current !== null) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(refetch, REFETCH_DEBOUNCE_MS);
   }, [refetch]);
 
-  // Kept as refs rather than effect deps: the SSE connection below must survive a status
-  // tab switch (reconnecting on every toggle would be wasteful and would flash the
-  // "disconnected" indicator), so it always calls whatever the latest refetch is instead
-  // of being re-created when `status` (and therefore `refetch`'s identity) changes.
-  const refetchRef = useRef(refetch);
-  refetchRef.current = refetch;
-  const refetchDebouncedRef = useRef(refetchDebounced);
-  refetchDebouncedRef.current = refetchDebounced;
-
   useEffect(() => {
+    // A debounced refetch queued by the previous tab must not land after this tab's rows
+    // are cleared and re-requested below — drop it before starting the new load.
+    if (debounceRef.current !== null) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    setItems([]); // don't show the previous tab's rows under the new tab's spinner
     setLoading(true);
+    setRepickOpenId(null);
+    setRepickHint('');
     refetch();
-  }, [refetch]);
+  }, [status, refetch]);
 
   useEffect(() => {
     const source = new EventSource('/api/events/stream');
-    source.onmessage = () => refetchDebouncedRef.current();
+    source.onmessage = () => refetchDebounced();
     source.onopen = () => {
       setDisconnected(false);
-      refetchRef.current(); // reconnected — catch up on anything missed while the stream was down
+      refetch(); // reconnected — catch up on anything missed while the stream was down
     };
     source.onerror = () => setDisconnected(true);
     return () => {
       source.close();
       if (debounceRef.current !== null) clearTimeout(debounceRef.current);
     };
-  }, []);
+  }, [refetch, refetchDebounced]);
 
   const runAction = useCallback(
     async (id: number, action: () => Promise<unknown>, successMsg: string, failMsg: string): Promise<boolean> => {
@@ -167,7 +199,7 @@ export default function Attention() {
       <CardContent className="space-y-3">
         {disconnected && <p className="text-sm text-muted-foreground">Live updates disconnected — retrying…</p>}
         {error && <p className="text-sm text-destructive">{error}</p>}
-        {items.length === 0 && !loading && <p className="text-center text-muted-foreground">Nothing needs attention</p>}
+        {items.length === 0 && !loading && <p className="text-center text-muted-foreground">{EMPTY_MESSAGE[status]}</p>}
         {items.map((item) => {
           const pending = pendingIds.has(item.id);
           const canRetry = item.job_id !== null;
@@ -235,12 +267,13 @@ export default function Attention() {
                   </div>
                 )}
 
-                {repickOpen && (
+                {item.status === 'open' && repickOpen && (
                   <div className="flex items-center gap-1.5 pt-1">
                     <Input
                       autoFocus
                       placeholder="Hint for the re-pick (optional)…"
                       value={repickHint}
+                      maxLength={HINT_MAX_LENGTH}
                       disabled={pending}
                       onChange={(e) => setRepickHint(e.target.value)}
                       onKeyDown={(e) => {

@@ -176,11 +176,11 @@ export function fetchAttention(status: string): Promise<{ items: AttentionItem[]
 }
 
 export function dismissAttention(id: number): Promise<{ ok: boolean }> {
-  return fetchJson(`/api/attention/${id}/dismiss`, { method: 'POST' });
+  return fetchJson(`/api/attention/${id}/dismiss`, { method: 'POST', headers: { 'content-type': 'application/json' } });
 }
 
 export function retryAttention(id: number): Promise<{ ok: boolean }> {
-  return fetchJson(`/api/attention/${id}/retry`, { method: 'POST' });
+  return fetchJson(`/api/attention/${id}/retry`, { method: 'POST', headers: { 'content-type': 'application/json' } });
 }
 
 export function repickAttention(id: number, hint?: string): Promise<{ ok: boolean }> {
@@ -192,6 +192,6 @@ export function repickAttention(id: number, hint?: string): Promise<{ ok: boolea
 }
 
 export function acceptAttention(id: number): Promise<{ ok: boolean }> {
-  return fetchJson(`/api/attention/${id}/accept`, { method: 'POST' });
+  return fetchJson(`/api/attention/${id}/accept`, { method: 'POST', headers: { 'content-type': 'application/json' } });
 }
 
