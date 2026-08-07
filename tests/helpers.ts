@@ -22,10 +22,12 @@ import type {
 import type { AppContext } from '../src/context.js';
 import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
+import { AttentionItems, type AttentionRow } from '../src/db/attention.js';
 import { openDb } from '../src/db/db.js';
 import { EventLog, type EventRow } from '../src/events/log.js';
-import { JobQueue, type EnqueueInput, type JobRow, type TargetKind } from '../src/jobs/queue.js';
+import { JobQueue, type EnqueueInput, type JobRow, type PipelineName, type TargetKind } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
+import { createApp } from '../src/server/app.js';
 import { BYTES_PER_GB } from '../src/util/bytes.js';
 
 const createdDirs: string[] = [];
@@ -131,6 +133,45 @@ export function enqueueAndClaim(ctx: AppContext, input: EnqueueInput): JobRow {
   const job = ctx.queue.claim();
   if (!job) throw new Error('enqueueAndClaim: claim() unexpectedly returned null right after enqueue()');
   return job;
+}
+
+/**
+ * Sets up the "an attention item links back to an already-completed job" shape several
+ * `app.test.ts` attention-action tests (`repick` in particular) need: enqueue a job, claim
+ * it, complete it (so a fresh enqueue triggered by the route under test is a NEW job, not a
+ * coalesce into the still-pending one), then open an attention item linked to it via
+ * `jobId`. Returns everything a test typically asserts against afterward, so it doesn't
+ * have to re-derive `app`/`attentionItems`/the job id by hand.
+ */
+export function openAttentionForJob(
+  ctx: AppContext,
+  opts?: {
+    pipeline?: PipelineName;
+    targetKind?: TargetKind;
+    targetId?: number;
+    arrInstance?: string;
+    payload?: Record<string, unknown>;
+    kind?: string;
+    message?: string;
+  },
+): { app: ReturnType<typeof createApp>; attentionItems: AttentionItems; item: AttentionRow; jobId: number } {
+  const attentionItems = new AttentionItems(ctx.db);
+  const app = createApp(ctx);
+
+  const enqueueResult = ctx.queue.enqueue({
+    pipeline: opts?.pipeline ?? 'acquire',
+    targetKind: opts?.targetKind ?? 'series',
+    targetId: opts?.targetId ?? 42,
+    arrInstance: opts?.arrInstance ?? 'sonarr',
+    payload: opts?.payload ?? {},
+  });
+  const jobId = enqueueResult.id!;
+  ctx.queue.claim();
+  ctx.queue.complete(jobId);
+
+  const item = attentionItems.open({ kind: opts?.kind ?? 'acquire.none-viable', message: opts?.message ?? 'x', jobId });
+
+  return { app, attentionItems, item, jobId };
 }
 
 /** A default `Config` (schema defaults only) for tests that build their own `llm.profiles` entries. */
@@ -467,6 +508,24 @@ export function episodeResource(overrides?: Partial<EpisodeResource>): EpisodeRe
   };
 }
 
+/** A `QueueRecord` fixture (base: `queueState.test.ts`'s own former `record()` helper) —
+ * override `seriesId`/`movieId`/`status`/`trackedDownloadState`/`trackedDownloadStatus`/
+ * `downloadId` for the case under test. Used by `queueState.test.ts`'s `assessQueue` tests
+ * and by `ingest-run.test.ts` to seed `fakeArrClient.queue` for its settle-gate/rescue
+ * tests. */
+export function queueRecord(overrides?: Partial<QueueRecord>): QueueRecord {
+  return { id: 1, seriesId: 42, status: 'downloading', title: 'x', ...overrides };
+}
+
+/** A `downloadFolderImported` `HistoryRecord` fixture (base: `reconcile.test.ts`'s own
+ * former inline builder) — `id` is required (there's no sane default for it since tests
+ * usually care about ordering/dedupe across several records), everything else has a
+ * generic default. Used by `reconcile.test.ts`'s `ingestBackstop` tests, `ingestFixture`'s
+ * own single history record, and `ingest-run.test.ts`'s multi-history-record tests. */
+export function historyRecord(overrides: Partial<HistoryRecord> & { id: number }): HistoryRecord {
+  return { eventType: 'downloadFolderImported', date: new Date().toISOString(), sourceTitle: 'Test Release', data: {}, ...overrides };
+}
+
 export interface IngestFixture {
   ctx: AppContext;
   client: FakeArrClient;
@@ -488,7 +547,7 @@ export interface IngestFixture {
  * already-imported video, and a `fakeArrClient` wired so `listEpisodes`/`listEpisodeFiles`/
  * `listSeriesHistory` (or the movie equivalents) agree with that layout — one
  * `downloadFolderImported` history record whose `droppedPath` points into the torrent
- * folder, which is what `resolveSourceDirs` needs to find it. `pathMappings` are identity
+ * folder, which is what `resolveSourceDirsDetailed` needs to find it. `pathMappings` are identity
  * (`from === to`) so a test exercises ingest's own logic without also exercising
  * `mapArrPath`'s translation. Doesn't enqueue or claim a job itself — call
  * `enqueueAndClaim(ctx, { pipeline: 'ingest', targetKind, targetId, arrInstance, ... })`
@@ -519,7 +578,7 @@ export function ingestFixture(opts?: {
 
   const videoPath = join(libraryDir, videoFileName);
   writeFileSync(videoPath, 'video');
-  // Doesn't need to exist on disk itself — resolveSourceDirs only parses the string to
+  // Doesn't need to exist on disk itself — resolveSourceDirsDetailed only parses the string to
   // locate the torrent's own root folder under downloadsDir.
   const droppedPath = join(torrentDir, videoFileName);
 
@@ -533,15 +592,13 @@ export function ingestFixture(opts?: {
   const movieFiles = opts?.movieFiles ?? [{ id: 200, movieId: targetId, relativePath: videoFileName, path: videoPath, size: statSync(videoPath).size }];
 
   const history: HistoryRecord[] = [
-    {
+    historyRecord({
       id: 1,
       seriesId: targetKind === 'series' ? targetId : undefined,
       movieId: targetKind === 'movie' ? targetId : undefined,
-      eventType: 'downloadFolderImported',
-      date: new Date().toISOString(),
       sourceTitle: torrentName,
       data: { droppedPath },
-    },
+    }),
   ];
 
   const client = fakeArrClient({

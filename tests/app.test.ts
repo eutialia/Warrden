@@ -8,7 +8,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent, bundleImportPayload } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent, bundleImportPayload, openAttentionForJob } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
 
@@ -303,18 +303,11 @@ describe('app', () => {
 
     it('POST /api/attention/:id/repick: enqueues pipeline "acquire" even when the linked job\'s own pipeline was "ingest" (repick is always a re-pick, never the original pipeline)', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
-      const attentionItems = new AttentionItems(ctx.db);
-      const app = createApp(ctx);
-      const enqueueResult = ctx.queue.enqueue({
+      const { app, item } = openAttentionForJob(ctx, {
         pipeline: 'ingest',
-        targetKind: 'series',
-        targetId: 42,
-        arrInstance: 'sonarr',
         payload: { downloadId: 'dl-1' },
+        kind: 'ingest.rescue-proposed',
       });
-      ctx.queue.claim();
-      ctx.queue.complete(enqueueResult.id!);
-      const item = attentionItems.open({ kind: 'ingest.rescue-proposed', message: 'x', jobId: enqueueResult.id! });
 
       const res = await app.request(`/api/attention/${item.id}/repick`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) });
       expect(res.status).toBe(200);
@@ -325,12 +318,7 @@ describe('app', () => {
 
     it('POST /api/attention/:id/repick: 400 when the linked job\'s arr instance has no registered client', async () => {
       const ctx = makeCtx(); // no clients registered at all
-      const attentionItems = new AttentionItems(ctx.db);
-      const app = createApp(ctx);
-      const enqueueResult = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
-      ctx.queue.claim();
-      ctx.queue.complete(enqueueResult.id!);
-      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', jobId: enqueueResult.id! });
+      const { app, attentionItems, item } = openAttentionForJob(ctx);
 
       const res = await app.request(`/api/attention/${item.id}/repick`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) });
       expect(res.status).toBe(400);
@@ -339,12 +327,7 @@ describe('app', () => {
 
     it('POST /api/attention/:id/repick: rejects a hint over 2000 characters with 400', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
-      const attentionItems = new AttentionItems(ctx.db);
-      const app = createApp(ctx);
-      const enqueueResult = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
-      ctx.queue.claim();
-      ctx.queue.complete(enqueueResult.id!);
-      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', jobId: enqueueResult.id! });
+      const { app, item } = openAttentionForJob(ctx);
 
       const res = await app.request(`/api/attention/${item.id}/repick`, {
         method: 'POST',
@@ -356,19 +339,10 @@ describe('app', () => {
 
     it('POST /api/attention/:id/repick: always pipeline acquire, carries the hint, marks resolved', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
-      const attentionItems = new AttentionItems(ctx.db);
-      const app = createApp(ctx);
-
-      const enqueueResult = ctx.queue.enqueue({
-        pipeline: 'acquire',
-        targetKind: 'series',
-        targetId: 42,
-        arrInstance: 'sonarr',
+      const { app, attentionItems, item, jobId } = openAttentionForJob(ctx, {
         payload: { title: 'Frieren' },
+        message: 'needs a hint',
       });
-      ctx.queue.claim(); // move to running, then complete, so a fresh enqueue below is a NEW job
-      ctx.queue.complete(enqueueResult.id!);
-      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'needs a hint', jobId: enqueueResult.id! });
 
       const res = await app.request(`/api/attention/${item.id}/repick`, {
         method: 'POST',
@@ -384,24 +358,12 @@ describe('app', () => {
       expect(repicked.payload).toEqual({ title: 'Frieren', source: 'repick', hint: 'prefer the 10bit encode' });
 
       const repickedEvent = findEvent(ctx.events.list(), 'attention.repicked');
-      expect(repickedEvent).toMatchObject({ data: { id: item.id, jobId: enqueueResult.id, hasHint: true } });
+      expect(repickedEvent).toMatchObject({ data: { id: item.id, jobId, hasHint: true } });
     });
 
     it('POST /api/attention/:id/repick works with no hint given', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
-      const attentionItems = new AttentionItems(ctx.db);
-      const app = createApp(ctx);
-
-      const enqueueResult = ctx.queue.enqueue({
-        pipeline: 'acquire',
-        targetKind: 'series',
-        targetId: 42,
-        arrInstance: 'sonarr',
-        payload: { title: 'Frieren' },
-      });
-      ctx.queue.claim();
-      ctx.queue.complete(enqueueResult.id!);
-      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', jobId: enqueueResult.id! });
+      const { app, item } = openAttentionForJob(ctx, { payload: { title: 'Frieren' } });
 
       const res = await app.request(`/api/attention/${item.id}/repick`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) });
       expect(res.status).toBe(200);

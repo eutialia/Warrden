@@ -17,9 +17,11 @@ import {
   FakeGenerator,
   findEvent,
   hasEvent,
+  historyRecord,
   ingestFixture,
   makeCtx,
   manualImportItem,
+  queueRecord,
   seriesResource,
   tmpDir,
   type IngestFixture,
@@ -37,7 +39,7 @@ function claimIngestJob(fx: IngestFixture) {
 describe('runIngestJob — settle gate', () => {
   it('settle-wait: the target is importing -> RescheduleError(SETTLE_RETRY_MS), nothing swept', async () => {
     const fx = ingestFixture();
-    fx.client.queue = [{ id: 1, seriesId: fx.targetId, status: 'completed', trackedDownloadState: 'importing', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, status: 'completed', trackedDownloadState: 'importing' })];
     writeFileSync(join(fx.torrentDir, 'Show - 05 [JPSC].ass'), 'sub');
     const job = claimIngestJob(fx);
 
@@ -51,7 +53,7 @@ describe('runIngestJob — settle gate', () => {
 
   it('settle deadline: created_at older than SETTLE_DEADLINE_MS -> completes with an ingest.settle-timeout attention event, nothing swept', async () => {
     const fx = ingestFixture();
-    fx.client.queue = [{ id: 1, seriesId: fx.targetId, status: 'completed', trackedDownloadState: 'importing', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, status: 'completed', trackedDownloadState: 'importing' })];
     writeFileSync(join(fx.torrentDir, 'Show - 05 [JPSC].ass'), 'sub');
     const job = claimIngestJob(fx);
     fx.ctx.db.prepare('UPDATE jobs SET created_at = ? WHERE id = ?').run(Date.now() - SETTLE_DEADLINE_MS - 1_000, job.id);
@@ -505,22 +507,10 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     writeFileSync(crypticPath, 'sub');
 
     fx.client.seriesHistory = [
-      {
-        id: 1,
-        seriesId: fx.targetId,
-        eventType: 'downloadFolderImported',
-        date: '',
-        sourceTitle: 'x',
-        data: { droppedPath: join(fx.torrentDir, 'e1.mkv') }, // dirname -> fx.torrentDir
-      },
-      {
-        id: 2,
-        seriesId: fx.targetId,
-        eventType: 'downloadFolderImported',
-        date: '',
-        sourceTitle: 'x',
-        data: { droppedPath: join(nestedDir, 'e2.mkv') }, // dirname -> nestedDir, INSIDE fx.torrentDir
-      },
+      // dirname -> fx.torrentDir
+      historyRecord({ id: 1, seriesId: fx.targetId, date: '', sourceTitle: 'x', data: { droppedPath: join(fx.torrentDir, 'e1.mkv') } }),
+      // dirname -> nestedDir, INSIDE fx.torrentDir
+      historyRecord({ id: 2, seriesId: fx.targetId, date: '', sourceTitle: 'x', data: { droppedPath: join(nestedDir, 'e2.mkv') } }),
     ];
 
     const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 1 }], reasoning: 'x' }]);
@@ -828,9 +818,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
       ],
     });
-    fx.client.queue = [
-      { id: 1, seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' },
-    ];
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
     const job = claimIngestJob(fx);
@@ -849,9 +837,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
       ],
     });
-    fx.client.queue = [
-      { id: 1, seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' },
-    ];
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     // The SAME physical file surfaces from both the stuck downloadId scope and the bundle
     // folder scope (the arr's own manual-import queue and a plain directory listing agree).
     const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
@@ -873,9 +859,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
       ],
     });
     fx.ctx.config.ingest.downloadRoots = []; // forces the dirname() fallback for the sidecar sweep's own sourceDirsArr
-    fx.client.queue = [
-      { id: 1, seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' },
-    ];
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const stuckItem = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [stuckItem];
     // Seeded on a folder scope that must never be queried — if it were, this would ship too.
@@ -892,7 +876,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
   it('stuck download (movie): stuck items map 1:1 onto movieId with quality/languages/releaseGroup round-tripped, imported with no LLM call; a folder is never queried', async () => {
     // movieFiles: [] — an unoccupied movie, so the occupied-guard below doesn't intercept it.
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const quality = { quality: { id: 3, name: 'Bluray-1080p' } };
     const languages = [{ id: 1, name: 'Japanese' }];
     const item = manualImportItem({
@@ -930,7 +914,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
   it('movie rescue filter: an item carrying a rejection is dropped, so the command carries only the clean file — and the drop is recorded in ingest.rescued\'s skipped', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const rejected = manualImportItem({
       path: '/downloads/Movie/Sample.mkv',
@@ -951,7 +935,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
   it('movie rescue filter: an item whose item.movie names a DIFFERENT movie than the job target is dropped — and recorded in ingest.rescued\'s skipped', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const otherMovie = manualImportItem({ path: '/downloads/Movie/Featurette.mkv', folderName: 'Movie Torrent', movie: { id: 999 } });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [clean, otherMovie];
@@ -968,7 +952,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
   it('movie rescue filter: when EVERY item is filtered out, an info ingest.rescue-skipped event names the dropped paths instead of the stage going silent', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const rejected = manualImportItem({
       path: '/downloads/Movie/Sample.mkv',
       folderName: 'Movie Torrent',
@@ -993,7 +977,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
   it('movie rescue multi-survivor guard: more than one item survives filtering -> proposes an ingest.rescue-proposed attention item instead of executing any of them', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const itemA = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const itemB = manualImportItem({ path: '/downloads/Movie/Movie.Alt.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [itemA, itemB];
@@ -1025,7 +1009,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     // the accept route validates against, so a genuine shape mismatch fails here even if
     // both test files' fixtures happened to still agree with each other.
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const itemA = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const itemB = manualImportItem({ path: '/downloads/Movie/Movie.Alt.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [itemA, itemB];
@@ -1041,7 +1025,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
   it('movie occupied-guard: a movie that already has a file on disk proposes an attention item instead of executing', async () => {
     // ingestFixture's default movieFiles seeds one entry — occupied.
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
     const job = claimIngestJob(fx);
@@ -1062,7 +1046,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
   it('movie occupied-guard breaks the re-execution loop: once the movie has a file (post-import), a lingering stuck record proposes instead of re-executing', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
-    fx.client.queue = [{ id: 1, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning', title: 'x' }];
+    fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
 
@@ -1148,9 +1132,7 @@ describe('runIngestJob — mapArrPath boundary', () => {
 
     const client = fakeArrClient({
       series: [seriesResource({ id: 42, title: 'Frieren' })],
-      seriesHistory: [
-        { id: 1, seriesId: 42, eventType: 'downloadFolderImported', date: '', sourceTitle: 'Show Torrent', data: { droppedPath: arrDroppedPath } },
-      ],
+      seriesHistory: [historyRecord({ id: 1, seriesId: 42, date: '', sourceTitle: 'Show Torrent', data: { droppedPath: arrDroppedPath } })],
       episodes: [episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true })],
       episodeFiles: [{ id: 100, seriesId: 42, seasonNumber: 1, relativePath: videoFileName, path: arrVideoPath }],
     });
