@@ -10,8 +10,8 @@ season-pack torrents, and imports the arr got stuck on. Downloading and the actu
 still belong to Sonarr/Radarr and the torrent client; Warrden only does the decision-making
 and cleanup they can't.
 
-This is Phase 2 of the project: release acquisition (Phase 1) plus ingest (this phase). The
-subtitle pipeline is planned for a later phase — see the design spec linked below.
+This is Phase 3 of the project: release acquisition (Phase 1), ingest (Phase 2), and the
+subtitle pipeline (this phase). See the design spec linked below.
 
 ## Quickstart
 
@@ -146,6 +146,57 @@ re-derives the source folder by an exact file-size match scanned across
 `ingest.downloadRoots` itself, so for that case `downloadRoots` is required for sidecar
 rescue to find anything too, not just bundle rescue. See the example below.
 
+## Subtitle pipeline
+
+The subtitle pipeline covers a series' episodes with external subtitles in the configured
+languages, rescuing what the arr never fetches itself. It runs once per episode that's
+still missing any target language, triggered automatically as a follow-on to ingest for a
+series target, or by hand with `POST /api/subtitle` (`{ arrInstance, targetKind, targetId
+}`) from the dashboard or an API call. A movie subtitle job is a no-op — movie subs are
+already swept as ingest sidecars, so a movie target is never enqueued.
+
+The flow per series run:
+
+1. **Reconcile** — `ffprobe` inventories every on-disk episode file and its embedded
+   subtitle streams; episodes that already carry *every* configured language (embedded or
+   external) need nothing.
+2. **Archive cache** — a previously-downloaded subtitle pack cached under
+   `dataDir/subtitle/cache` is matched against still-missing episodes before any new
+   download, so a mid-season episode that landed after its pack was fetched reuses the pack
+   instead of re-fetching it.
+3. **Per-site search** — each configured `subtitle.sites` entry is searched one at a time in
+   order, stopping once nothing is missing. Each site is driven by a browser agent (see
+   v1 scope below) that downloads the archive, which is extracted and cached.
+4. **Archive mapping** — each archive's files are matched to episodes: deterministic
+   filename parsing first (the `archive-map` call-site covers whatever's cryptic).
+5. **Drift gate** — every candidate is compared against the episode's own embedded subtitle
+   track (extracted with ffmpeg). In-sync candidates are placed as-is; a drifted one is
+   resynced with `alass`, then `ffsubsync` if that doesn't land in-sync, and placed only if
+   it then scores in-sync; a candidate with no embedded reference is placed `unverified`
+   without resync. An unscorable or never-landed candidate is moved to
+   `dataDir/subtitle/quarantine`.
+6. **Atomic placement** — survivors are copied (never moved, and never overwriting a file
+   Warrden didn't itself place) beside their video under the arr's naming convention, each
+   recorded in `placed_files` provenance.
+
+Any episode with no survivor after the cache and every site, and every quarantined
+candidate, raises an **Attention** item — these are gaps the pipeline couldn't close on its
+own.
+
+**v1 scope:** the site-search agent's fetch tiers are `curl` (plain HTTP with a browser
+user-agent) and `chromium` (headless Playwright, for JS-rendered listings and bot walls that
+pass a plain request). Downloaded archives are handled in zip/tar/tar.gz only; **rar and 7z
+archives are unsupported** and treated as failed candidates in this phase.
+
+**External tool requirements:** the pipeline shells out to `ffprobe`/`ffmpeg` (probing and
+embedded-track extraction), `alass`/`ffsubsync` (drift resync), and a headless chromium for
+the browser tier. The shipped container bundles them, but the pipeline degrades gracefully
+rather than failing to boot if one is absent. Missing `alass` skips straight to `ffsubsync`;
+if *both* resync tools are missing, a drifted candidate can't be resynced and is
+quarantined instead. `ffprobe`/`ffmpeg` are effectively required — without them, no
+reconcile or drift gate can run. None of these are needed at build time in a bare
+checkout; they're only consumed at runtime.
+
 ## Configuration reference
 
 All configuration lives in `config.json` inside the data directory and is editable from
@@ -162,12 +213,18 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `pathMappings[].from` / `.to` | `[]` | Translates a path the arr reports (`.from`) into Warrden's own filesystem view (`.to`) — needed whenever Ingest's filesystem work sees the same files under a different mount point than the arr does. Not used by Acquire, which never touches files directly. |
 | `ingest.mountMarkers` | `[]` | Warrden-local paths that must exist before Ingest touches the filesystem — typically a canary file at the root of each mounted share. Empty means no mount verification. |
 | `ingest.downloadRoots` | `[]` | Arr-side paths of the torrent clients' download roots, used to find each torrent's own folder. Effectively required for bundle rescue (see [Ingest](#ingest) above) — without it, bundle rescue never fires. Also required for the movie no-import-history size-match fallback: without it, a history-less (or history-folder-vanished) movie's sidecar rescue never fires either. |
+| `subtitle.languages` | `[]` | Target subtitle languages for the subtitle pipeline, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). An episode is considered covered only when it carries *every* one as an embedded or external track. |
+| `subtitle.sites[].name` | — | Unique label for a subtitle fan site the pipeline searches. |
+| `subtitle.sites[].baseUrl` | — | Base URL of the site; registered as the site's profile root. |
+| `subtitle.sites[].searchUrlTemplate` | omitted | Search-page URL with `{query}` where the URL-encoded search term goes. Optional: without it the agent must discover the search endpoint itself (recorded into the site profile on success). |
+| `browser.stepBudget` | `20` | Hard ceiling on LLM steps (tool calls) for one site-search agent run against a single site. |
+| `browser.siteCooldownSeconds` | `30` | Polite re-hit floor per site after a failure; exponential on repeated failures, capped at 6h. |
 | `picking.tags` | `[]` | Freeform tags describing release preferences, folded into the LLM's picking policy. |
 | `picking.seederFloor` | `3` | Minimum seeders a candidate must have to be considered. |
 | `picking.minSizeMB` | `50` | Minimum release size, in MB, to filter out sample/junk releases. |
 | `picking.maxSizeMB` | `60000` | Maximum release size, in MB, to filter out oversized releases. |
 | `llm.activeProfile` | `prod` | Which of `llm.profiles` (`dev` or `prod`) is currently in effect. |
-| `llm.profiles` | `{ dev: {}, prod: {} }` | Per-profile, per-call-site model configuration (provider, model, optional fallback). Call-sites: `release-pick` (Phase 1); `sidecar-match`, `bundle-map` (Phase 2, Ingest). |
+| `llm.profiles` | `{ dev: {}, prod: {} }` | Per-profile, per-call-site model configuration (provider, model, optional fallback). Call-sites: `release-pick` (Phase 1); `sidecar-match`, `bundle-map` (Phase 2, Ingest); `archive-map`, `site-search` (Phase 3, Subtitle). |
 | `llm.keys.openrouter` / `.openai` / `.anthropic` | unset | API keys for the corresponding LLM provider. Not required for the `claude-code` provider, which uses subscription auth instead. |
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop diffs each arr's full series/movie list against what Warrden has already seen, as a backstop for missed webhooks (both Acquire and Ingest). The same interval also doubles as the grace period before a newly-registered `warrden-` tag/profile becomes eligible for garbage collection. |
 
