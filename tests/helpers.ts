@@ -9,7 +9,6 @@ import type {
   EpisodeFileResource,
   EpisodeResource,
   HistoryRecord,
-  ManualImportFile,
   ManualImportItem,
   MovieFileResource,
   MovieResource,

@@ -9,16 +9,6 @@ import { FakeGenerator, freshDb, makeCtx, findEvent, enqueueAndClaim, withFakeTi
 const SITE: SubtitleSiteConfig = { name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 const OK_HTML: FetchResult = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
 
-/** A fake `FetchTier` whose fetch results are consumed one per call in order. */
-function fakeTier(results: FetchResult[]): FetchTier {
-  const queue = [...results];
-  return {
-    tier: 'curl' as const,
-    fetch: async () => queue.shift() ?? { ok: false, blocked: false },
-    close: vi.fn(async () => {}),
-  };
-}
-
 /** A stub `tiers` factory — `make(t)` returns a fake tier backed by ONE shared queue, so
  * escalation consumes results sequentially across rungs exactly as the real ladder would
  * (curl's wall, then chromium's success). Chromium stays out of tests while still
@@ -69,12 +59,12 @@ describe('SubtitleRuns', () => {
     expect(row.status).toBe('done');
   });
 
-  it('latestForSite returns the newest run for a job+site', () => {
+  it('listByJob returns runs for the job in id order', () => {
     const runs = new SubtitleRuns(freshDb());
-    runs.start(7, 'acgrip');
+    const first = runs.start(7, 'acgrip');
     const second = runs.start(7, 'acgrip');
-    runs.start(7, 'other');
-    expect(runs.latestForSite(7, 'acgrip')!.id).toBe(second);
+    runs.start(8, 'other'); // different job — must not appear
+    expect(runs.listByJob(7).map((r) => r.id)).toEqual([first, second]);
   });
 });
 
@@ -127,7 +117,7 @@ describe('searchSite', () => {
     expect(profile.last_failure_at).not.toBeNull();
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')).toBeDefined();
     // The run row is marked failed (the LLM throw happened before any step, so no transcript).
-    const row = new SubtitleRuns(ctx.db).latestForSite(job.id, 'acgrip')!;
+    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acgrip')!;
     expect(row.status).toBe('failed');
     expect(row.transcript).toHaveLength(0);
   });
@@ -149,7 +139,7 @@ describe('searchSite', () => {
     expect(profile.last_failure_at).toBeNull();
     expect(profile.last_success_at).not.toBeNull();
     expect(profile.last_working_tier).toBe('curl');
-    const row = new SubtitleRuns(ctx.db).latestForSite(job.id, 'acgrip')!;
+    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acgrip')!;
     expect(row.status).toBe('done');
     expect(row.transcript).toHaveLength(1);
   });

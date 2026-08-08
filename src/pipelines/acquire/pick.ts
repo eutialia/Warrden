@@ -45,7 +45,7 @@ const LlmPickResponseSchema = z
 /** External shape `pickRelease` resolves to — a `guid`, not the candidate number the LLM
  * actually answered with, so every other caller (`run.ts`, tests) keeps working against a
  * real candidate identifier rather than an index into a list only `pick.ts` ever builds. */
-export const PickResultSchema = z.discriminatedUnion('decision', [
+const PickResultSchema = z.discriminatedUnion('decision', [
   z.object({
     decision: z.literal('pick'),
     guid: z.string(),
@@ -55,7 +55,7 @@ export const PickResultSchema = z.discriminatedUnion('decision', [
   }),
   z.object({ decision: z.literal('none'), reasoning: z.string() }),
 ]);
-export type PickResult = z.infer<typeof PickResultSchema>;
+type PickResult = z.infer<typeof PickResultSchema>;
 
 const CALLSITE = 'release-pick';
 

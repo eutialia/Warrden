@@ -9,7 +9,7 @@ import type { SubtitleCue } from '../../media/subtitles.js';
  * no-reference case, which today just marks the candidate unverifiable upstream.
  */
 
-export const DRIFT_CONFIG = {
+const DRIFT_CONFIG = {
   /** 0 = score the whole file. Reserved for future golden-section windowed sampling. */
   windowSize: 0,
   maxOffsetMs: 120_000,
@@ -20,12 +20,13 @@ export const DRIFT_CONFIG = {
   acceptRatio: 0.85,
 } as const;
 
-export interface OffsetScore {
+interface OffsetScore {
   offsetMs: number;
   score: number;
 }
 
 export interface DriftAssessment {
+  // Exported for unit tests that type expected assessDrift states.
   state: 'in-sync' | 'drifted' | 'unscorable';
   offsetMs: number;
   score: number;

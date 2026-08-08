@@ -11,7 +11,7 @@ import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
 import { ConfigSchema } from '../src/config/schema.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent, bundleImportPayload, openAttentionForJob } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, bundleImportPayload, openAttentionForJob } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
 

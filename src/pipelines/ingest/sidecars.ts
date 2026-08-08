@@ -9,7 +9,7 @@ export const SIDECAR_EXTS: readonly string[] = ['.mka', '.srt', '.ass'];
  * size match, or when looking for the sibling video a sidecar's filename actually names. */
 export const VIDEO_EXTS: readonly string[] = ['.mkv', '.mp4', '.avi'];
 
-export type SidecarKind = 'audio' | 'subtitle';
+type SidecarKind = 'audio' | 'subtitle';
 
 /** `.mka` (case-insensitive) is an external audio track; every other sidecar
  * extension is a subtitle. */
@@ -17,7 +17,7 @@ export function sidecarKindForExt(ext: string): SidecarKind {
   return ext.toLowerCase() === '.mka' ? 'audio' : 'subtitle';
 }
 
-export interface EpisodeRef {
+interface EpisodeRef {
   season: number | null;
   episode: number;
 }

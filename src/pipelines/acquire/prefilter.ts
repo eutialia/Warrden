@@ -12,7 +12,7 @@ export interface DroppedCandidate {
   reason: string;
 }
 
-export interface PrefilterResult {
+interface PrefilterResult {
   kept: ReleaseCandidate[];
   dropped: DroppedCandidate[];
 }
@@ -59,9 +59,8 @@ export function prefilter(candidates: ReleaseCandidate[], opts: PrefilterOpts): 
 
 /** Cap on how many prefiltered candidates ever reach the LLM pick step (and get persisted
  * in `acquire_records.candidates_json`) — an unbounded list is both a needless token cost
- * and, past some size, actively confuses picking. One constant, used by both the cap
- * itself and `run.ts`'s cap-notice event. */
-export const MAX_CANDIDATES_FOR_PICK = 30;
+ * and, past some size, actively confuses picking. */
+const MAX_CANDIDATES_FOR_PICK = 30;
 
 /**
  * Caps an already-prefiltered candidate list to the top `max` by seeders (highest first;

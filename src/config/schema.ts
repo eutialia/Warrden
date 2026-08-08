@@ -11,19 +11,19 @@ import { z } from 'zod';
  * hand if this value ever changes. */
 export const SECRET_PLACEHOLDER = '•••';
 
-export const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic', 'claude-code']);
-export const CallsiteModelSchema = z.object({
+const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic', 'claude-code']);
+const CallsiteModelSchema = z.object({
   provider: ProviderSchema,
   model: z.string().min(1),
   fallback: z.object({ provider: ProviderSchema, model: z.string().min(1) }).optional(),
 });
-export const ArrInstanceSchema = z.object({
+const ArrInstanceSchema = z.object({
   name: z.string().min(1),
   kind: z.enum(['sonarr', 'radarr']),
   baseUrl: z.url(),
   apiKey: z.string().min(1),
 });
-export const SubtitleSiteSchema = z.object({
+const SubtitleSiteSchema = z.object({
   name: z.string().min(1),
   baseUrl: z.url(),
   // Search page URL with `{query}` where the URL-encoded search term goes. Optional:

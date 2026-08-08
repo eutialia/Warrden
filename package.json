@@ -32,7 +32,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/adm-zip": "^0.5.8",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.1",
     "tsx": "^4.23.8",

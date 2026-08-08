@@ -34,12 +34,12 @@ describe('ArchiveCache', () => {
     expect(rows[0]!.files).toEqual([]);
   });
 
-  it('scopes by target and deletes by id', () => {
+  it('scopes forTarget to the given target id', () => {
     const cache = new ArchiveCache(freshDb());
     cache.upsert(INPUT);
     cache.upsert({ ...INPUT, targetId: 43 });
     expect(cache.forTarget('sonarr', 'series', 42)).toHaveLength(1);
-    cache.deleteById(cache.forTarget('sonarr', 'series', 42)[0]!.id);
-    expect(cache.forTarget('sonarr', 'series', 42)).toHaveLength(0);
+    expect(cache.forTarget('sonarr', 'series', 43)).toHaveLength(1);
+    expect(cache.forTarget('sonarr', 'series', 99)).toHaveLength(0);
   });
 });

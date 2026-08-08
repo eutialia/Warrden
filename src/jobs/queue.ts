@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 
 export type TargetKind = 'series' | 'movie';
-export type JobStatus = 'pending' | 'running' | 'done' | 'failed';
+type JobStatus = 'pending' | 'running' | 'done' | 'failed';
 export type PipelineName = 'acquire' | 'ingest' | 'subtitle';
 
 export interface EnqueueInput {
@@ -13,7 +13,7 @@ export interface EnqueueInput {
   notBefore?: number;
 }
 
-export interface EnqueueResult {
+interface EnqueueResult {
   id: number | null;
   outcome: 'enqueued' | 'coalesced' | 'marked-dirty';
 }

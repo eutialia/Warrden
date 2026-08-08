@@ -3,13 +3,13 @@ import type { TargetKind } from '../jobs/queue.js';
 /** The bare minimum a job needs to carry to build its own `targetEventData` — a real
  * `JobRow` always satisfies this; kept structural rather than importing `JobRow` itself
  * so a caller that only has these three fields (not a full row) can still use it. */
-export interface EventTarget {
+interface EventTarget {
   arr_instance: string;
   target_kind: TargetKind;
   target_id: number;
 }
 
-export interface TargetEventData {
+interface TargetEventData {
   instance: string;
   targetKind: TargetKind;
   targetId: number;

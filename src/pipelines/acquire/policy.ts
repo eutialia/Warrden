@@ -1,4 +1,4 @@
-export interface SynthesizePolicyPromptInput {
+interface SynthesizePolicyPromptInput {
   tags: string[];
   title: string;
   kind: 'series' | 'movie';
@@ -9,7 +9,7 @@ export interface SynthesizePolicyPromptInput {
   hint?: string;
 }
 
-export interface PolicyPrompt {
+interface PolicyPrompt {
   system: string;
   user: string;
 }

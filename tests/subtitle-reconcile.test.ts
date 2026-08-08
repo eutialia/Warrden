@@ -30,7 +30,7 @@ const ZH_EMBEDDED: MediaStream[] = [
 describe('findMissingSubtitles', () => {
   it('flags a video with no subtitle streams at all', async () => {
     const { video } = videoDir();
-    const videos: VideoEntry[] = [{ videoPath: video, episodeId: 1, externalSubtitles: [] }];
+    const videos: VideoEntry[] = [{ videoPath: video, episodeId: 1 }];
     const missing = await findMissingSubtitles({ videos, languages: ['zh-Hans'], media: fakeMedia({ [video]: [] }) });
     expect(missing).toEqual([{ videoPath: video, episodeId: 1, languages: ['zh-Hans'], embeddedRefs: [] }]);
   });
@@ -38,7 +38,7 @@ describe('findMissingSubtitles', () => {
   it('passes a video whose embedded track covers the language', async () => {
     const { video } = videoDir();
     const missing = await findMissingSubtitles({
-      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: ZH_EMBEDDED }),
     });
@@ -49,7 +49,7 @@ describe('findMissingSubtitles', () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.zh-Hans.ass'), 'x');
     const missing = await findMissingSubtitles({
-      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: [] }),
     });
@@ -59,7 +59,7 @@ describe('findMissingSubtitles', () => {
   it('reports embeddedRefs for drift-gate reference extraction when other languages are missing', async () => {
     const { video } = videoDir();
     const missing = await findMissingSubtitles({
-      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans', 'zh-Hant'],
       media: fakeMedia({ [video]: ZH_EMBEDDED }),
     });
@@ -72,7 +72,7 @@ describe('findMissingSubtitles', () => {
     const { video } = videoDir();
     const media = fakeMedia({ [video]: [{ index: 2, codecType: 'subtitle', codecName: 'ass', language: 'ZH' }] });
     const missing = await findMissingSubtitles({
-      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media,
     });
@@ -83,7 +83,7 @@ describe('findMissingSubtitles', () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.ass'), 'x');
     const missing = await findMissingSubtitles({
-      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: [] }),
     });
@@ -94,7 +94,7 @@ describe('findMissingSubtitles', () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05 Special.zh-Hans.ass'), 'x');
     const missing = await findMissingSubtitles({
-      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: [] }),
     });
@@ -116,8 +116,8 @@ describe('findMissingSubtitles', () => {
     };
     const missing = await findMissingSubtitles({
       videos: [
-        { videoPath: video, episodeId: 1, externalSubtitles: [] },
-        { videoPath: other, episodeId: 2, externalSubtitles: [] },
+        { videoPath: video, episodeId: 1 },
+        { videoPath: other, episodeId: 2 },
       ],
       languages: ['zh-Hans'],
       media: throwingMedia,

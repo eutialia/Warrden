@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runAgentLoop, TierBlockedError, type AgentAction } from '../src/agent/loop.js';
+import { runAgentLoop, TierBlockedError } from '../src/agent/loop.js';
 import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { SiteProfileRow } from '../src/db/siteProfiles.js';
 import { FakeGenerator, tmpDir } from './helpers.js';

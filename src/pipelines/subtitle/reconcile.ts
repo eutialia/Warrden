@@ -4,16 +4,14 @@ import type { MediaStream, MediaTools } from '../../media/tools.js';
 import { parseLangTag, sidecarStem } from '../ingest/sidecars.js';
 
 export interface VideoEntry {
+  // Kept exported: tests build VideoEntry[] fixtures against this shape.
   videoPath: string;
   episodeId?: number;
-  movieId?: number;
-  externalSubtitles: string[]; // filled by findMissingSubtitles itself; callers pass []
 }
 
-export interface MissingSubtitle {
+interface MissingSubtitle {
   videoPath: string;
   episodeId?: number;
-  movieId?: number;
   languages: string[]; // still-missing target languages
   embeddedRefs: { streamIndex: number; lang: string | null }[]; // embedded subs usable as drift reference
 }
@@ -72,8 +70,7 @@ export async function findMissingSubtitles(input: {
       continue;
     }
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
-    video.externalSubtitles = externalSubsFor(video.videoPath);
-    const externalLangs = video.externalSubtitles.map((p) => parseLangTag(basename(p)));
+    const externalLangs = externalSubsFor(video.videoPath).map((p) => parseLangTag(basename(p)));
 
     const lacking = languages.filter((lang) => {
       const embeddedHit = embedded.some((s) => langCovers(lang, s.language));
@@ -85,7 +82,6 @@ export async function findMissingSubtitles(input: {
       missing.push({
         videoPath: video.videoPath,
         episodeId: video.episodeId,
-        movieId: video.movieId,
         languages: lacking,
         embeddedRefs: embedded.map((s) => ({ streamIndex: s.index, lang: s.language })),
       });

@@ -32,12 +32,10 @@ describe('SiteProfiles', () => {
     expect(profiles.get('acgrip')).toMatchObject({ fail_count: 3, notes: 'cloudflare on curl', last_working_tier: null });
   });
 
-  it('lists all profiles and deletes by name', () => {
+  it('lists all profiles ordered by name', () => {
     const profiles = new SiteProfiles(freshDb());
-    profiles.upsert({ name: 'a', baseUrl: 'https://a' });
     profiles.upsert({ name: 'b', baseUrl: 'https://b' });
+    profiles.upsert({ name: 'a', baseUrl: 'https://a' });
     expect(profiles.list().map((p) => p.name)).toEqual(['a', 'b']);
-    profiles.delete('a');
-    expect(profiles.list().map((p) => p.name)).toEqual(['b']);
   });
 });

@@ -79,7 +79,4 @@ export class SiteProfiles {
     this.db.prepare(`UPDATE site_profiles SET ${sets.join(', ')} WHERE name = ?`).run(...params);
   }
 
-  delete(name: string): void {
-    this.db.prepare(`DELETE FROM site_profiles WHERE name = ?`).run(name);
-  }
 }

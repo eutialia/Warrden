@@ -3,7 +3,7 @@ import type { TargetKind } from '../jobs/queue.js';
 
 export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
 
-export interface InsertAcquireRecordInput {
+interface InsertAcquireRecordInput {
   arrInstance: string;
   targetKind: TargetKind;
   targetId: number;

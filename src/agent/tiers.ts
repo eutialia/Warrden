@@ -79,7 +79,7 @@ export class CurlTier implements FetchTier {
 /** Tier 1: headless Chromium via Playwright — for sites whose HTML only appears after JS,
  * or whose bot-wall passes a real browser. One lazy browser per instance; `close()` must be
  * called when the owning job finishes (the agent runner owns this). */
-export class ChromiumTier implements FetchTier {
+class ChromiumTier implements FetchTier {
   readonly tier = 'chromium' as const;
   private browser: Browser | null = null;
 

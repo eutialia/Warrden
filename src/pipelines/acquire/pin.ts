@@ -19,7 +19,7 @@ function slugify(group: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-export interface PinReleaseGroupInput {
+interface PinReleaseGroupInput {
   instanceName: string;
   seriesId: number;
   group: string;

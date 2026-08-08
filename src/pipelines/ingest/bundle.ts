@@ -32,7 +32,7 @@ const BundleMapResponseSchema = z.object({
  * inferred from the schema so every caller that acts on a `BundlePlan` (the rescue stage in
  * `run.ts`, the accept-attention route in `server/app.ts`) shares this
  * exact type instead of re-declaring the union. */
-export type BundleConfidence = z.infer<typeof BundleMapResponseSchema>['confidence'];
+type BundleConfidence = z.infer<typeof BundleMapResponseSchema>['confidence'];
 
 const CALLSITE = 'bundle-map';
 

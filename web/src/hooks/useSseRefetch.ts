@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export interface SseRefetch {
+interface SseRefetch {
   /** True while the `/api/events/stream` connection is down; clears itself the moment it
    * reconnects (a RE-connect also fires `onEvent` once to catch up on anything missed while
    * it was down — the first open of a fresh mount doesn't, the page's own initial load

@@ -7,7 +7,7 @@ import { PlacedFiles } from '../src/db/placedFiles.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import type { MediaStream } from '../src/media/tools.js';
-import { enqueueAndClaim, episodeResource, FakeGenerator, findEvent, hasEvent, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
+import { enqueueAndClaim, FakeGenerator, findEvent, hasEvent, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
 
 /** A video with one embedded ASS track (stream index 2) — the drift reference. The track's
  * language must NOT be a target language: reconcile treats an embedded zh-Hans track as

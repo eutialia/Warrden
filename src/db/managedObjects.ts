@@ -23,7 +23,7 @@ interface ManagedObjectRowRaw {
   created_at: number;
 }
 
-export interface InsertManagedObjectInput {
+interface InsertManagedObjectInput {
   arrInstance: string;
   kind: ManagedObjectKind;
   externalId: number;

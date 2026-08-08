@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
-import { makeCtx, candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
+import { candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
   const client = fakeArrClient({

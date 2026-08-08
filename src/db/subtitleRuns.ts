@@ -57,11 +57,4 @@ export class SubtitleRuns {
     const rows = this.db.prepare(`SELECT * FROM subtitle_runs WHERE job_id = ? ORDER BY id ASC`).all(jobId) as SubtitleRunRowRaw[];
     return rows.map(parseRow);
   }
-
-  latestForSite(jobId: number, site: string): SubtitleRunRow | null {
-    const row = this.db
-      .prepare(`SELECT * FROM subtitle_runs WHERE job_id = ? AND site = ? ORDER BY id DESC LIMIT 1`)
-      .get(jobId, site) as SubtitleRunRowRaw | undefined;
-    return row ? parseRow(row) : null;
-  }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectSubtitleFormat, parseSubtitleCues } from '../src/media/subtitles.js';
+import { parseSubtitleCues } from '../src/media/subtitles.js';
 
 const SRT = `1
 00:00:01,000 --> 00:00:03,500
@@ -54,18 +54,5 @@ describe('parseSubtitleCues', () => {
 
   it('returns [] for content with no parseable cues', () => {
     expect(parseSubtitleCues('not a subtitle file')).toEqual([]);
-  });
-});
-
-describe('detectSubtitleFormat', () => {
-  it.each([
-    ['a.srt', 'srt'],
-    ['a.SRT', 'srt'],
-    ['a.ass', 'ass'],
-    ['a.ssa', 'ass'],
-    ['a.mkv', null],
-    ['noext', null],
-  ])('%s -> %s', (name, expected) => {
-    expect(detectSubtitleFormat(name)).toBe(expected);
   });
 });

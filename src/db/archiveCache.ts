@@ -68,7 +68,4 @@ export class ArchiveCache {
     return rows.map(parseRow);
   }
 
-  deleteById(id: number): void {
-    this.db.prepare(`DELETE FROM archive_cache WHERE id = ?`).run(id);
-  }
 }

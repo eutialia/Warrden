@@ -25,7 +25,7 @@ interface AttentionRowRaw {
   resolved_at: number | null;
 }
 
-export interface OpenAttentionInput {
+interface OpenAttentionInput {
   kind: string;
   message: string;
   jobId?: number;

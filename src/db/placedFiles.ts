@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { TargetKind } from '../jobs/queue.js';
 
-export type PlacedFileKind = 'audio' | 'subtitle';
+type PlacedFileKind = 'audio' | 'subtitle';
 
 export interface PlacedFileRow {
   id: number;
@@ -33,6 +33,7 @@ interface PlacedFileRowRaw {
 }
 
 export interface UpsertPlacedFileInput {
+  // Kept exported: tests build partial fixtures with Partial<UpsertPlacedFileInput>.
   arrInstance: string;
   targetKind: TargetKind;
   targetId: number;

@@ -4,7 +4,7 @@ import { errorMessage } from '../util/errors.js';
 import { RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
 
-export type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
+type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
 
 const DEFAULT_INTERVAL_MS = 1000;
 

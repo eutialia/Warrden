@@ -16,9 +16,7 @@ const AgentActionSchema = z.object({
   url: z.string().describe('the absolute URL to act on (empty string for give_up)'),
   note: z.string().describe('one short sentence explaining this step for the transcript'),
 });
-export type AgentAction = z.infer<typeof AgentActionSchema>;
-
-export type AgentOutcome =
+type AgentOutcome =
   | { kind: 'downloaded'; filePath: string; url: string; searchUrl: string | null }
   | { kind: 'exhausted' }
   | { kind: 'gave-up' };

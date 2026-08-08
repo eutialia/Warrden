@@ -11,7 +11,7 @@ export interface ReleaseCandidate {
   publishDate: string;
 }
 
-export interface SeasonResource {
+interface SeasonResource {
   seasonNumber: number;
   monitored: boolean;
 }

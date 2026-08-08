@@ -32,14 +32,14 @@ const DownloadSchema = z.object({
 
 const WebhookSchema = z.discriminatedUnion('eventType', [SeriesAddSchema, MovieAddedSchema, DownloadSchema, TestSchema]);
 
-export interface HandleWebhookResult {
+interface HandleWebhookResult {
   handled: boolean;
   reason?: string;
 }
 
 /** Only the parts of AppContext handleWebhook actually reads — lets the route pass a
  * partial ctx without an `as AppContext` cast. */
-export type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config' | 'clients'>;
+type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config' | 'clients'>;
 
 /**
  * Validates an inbound Sonarr/Radarr webhook body and, for a series/movie "added"

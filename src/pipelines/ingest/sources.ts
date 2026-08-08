@@ -45,7 +45,7 @@ function deriveSourceDirs(droppedPaths: string[], downloadRoots: string[]): { di
   return [...dirs.entries()].map(([dir, rootDerived]) => ({ dir, rootDerived }));
 }
 
-export interface SourceDirsDetailed {
+interface SourceDirsDetailed {
   /** Every sweep-worthy dir. */
   all: string[];
   /** The subset that resolved through a configured `downloadRoots` entry, excluding the

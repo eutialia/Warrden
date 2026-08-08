@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3';
 import { AttentionItems } from '../db/attention.js';
 
-export type EventLevel = 'info' | 'warn' | 'attention';
+type EventLevel = 'info' | 'warn' | 'attention';
 
-export interface AppendInput {
+interface AppendInput {
   kind: string;
   level?: EventLevel;
   jobId?: number;

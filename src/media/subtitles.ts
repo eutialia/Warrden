@@ -8,14 +8,6 @@ export interface SubtitleCue {
   endMs: number;
 }
 
-/** `.ssa` is ASS's predecessor — same event syntax, parsed identically. */
-export function detectSubtitleFormat(fileName: string): 'srt' | 'ass' | null {
-  const ext = fileName.slice(fileName.lastIndexOf('.') + 1).toLowerCase();
-  if (ext === 'srt') return 'srt';
-  if (ext === 'ass' || ext === 'ssa') return 'ass';
-  return null;
-}
-
 // SRT: 00:00:01,000 or 00:00:01.000
 function parseSrtTimestamp(t: string): number | null {
   const m = t.trim().match(/^(\d+):(\d{2}):(\d{2})[,.](\d{3})$/);

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { create as tarCreate } from 'tar';
 import { describe, expect, it } from 'vitest';
-import { entriesForFiles, extractArchive, isArchive, UnsupportedArchiveError } from '../src/pipelines/subtitle/archives.js';
+import { entriesForFiles, extractArchive, isSupportedArchive, UnsupportedArchiveError } from '../src/pipelines/subtitle/archives.js';
 import { tmpDir } from './helpers.js';
 
 function makeZip(files: Record<string, string>): string {
@@ -14,12 +14,14 @@ function makeZip(files: Record<string, string>): string {
   return path;
 }
 
-describe('isArchive', () => {
+describe('isSupportedArchive', () => {
   it.each([
-    ['a.zip', true], ['a.ZIP', true], ['a.rar', true], ['a.7z', true],
+    ['a.zip', true], ['a.ZIP', true],
     ['a.tar', true], ['a.tar.gz', true], ['a.tgz', true],
+    // known archive types that v1 cannot extract
+    ['a.rar', false], ['a.7z', false],
     ['a.ass', false], ['a.mkv', false], ['a.zipx', false],
-  ])('%s -> %s', (name, expected) => expect(isArchive(name)).toBe(expected));
+  ])('%s -> %s', (name, expected) => expect(isSupportedArchive(name)).toBe(expected));
 });
 
 describe('extractArchive', () => {

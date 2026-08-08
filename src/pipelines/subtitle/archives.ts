@@ -5,14 +5,13 @@ import { extract as tarExtract } from 'tar';
 import type { ArchiveCacheEntry } from '../../db/archiveCache.js';
 import { parseEpisodeRef, parseLangTag } from '../ingest/sidecars.js';
 
-export const SUBTITLE_EXTENSIONS: readonly string[] = ['.srt', '.ass', '.ssa'];
+const SUBTITLE_EXTENSIONS: readonly string[] = ['.srt', '.ass', '.ssa'];
 
-const ARCHIVE_EXTS = new Set(['.zip', '.rar', '.7z', '.tar', '.tgz']);
-
-export function isArchive(fileName: string): boolean {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith('.tar.gz')) return true;
-  return ARCHIVE_EXTS.has(extname(lower));
+/** Whether `extractArchive` can unpack this path in v1 (zip/tar/tar.gz/tgz). Rar/7z and
+ * every non-archive path return false so the pipeline can skip them without throwing. */
+export function isSupportedArchive(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith('.zip') || lower.endsWith('.tar.gz') || lower.endsWith('.tgz') || lower.endsWith('.tar');
 }
 
 export class UnsupportedArchiveError extends Error {
@@ -26,7 +25,7 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
   mkdirSync(destDir, { recursive: true });
   const lower = archivePath.toLowerCase();
 
-  if (lower.endsWith('.rar') || lower.endsWith('.7z')) throw new UnsupportedArchiveError(archivePath);
+  if (!isSupportedArchive(archivePath)) throw new UnsupportedArchiveError(archivePath);
 
   const out: string[] = [];
   const keep = (name: string): boolean => SUBTITLE_EXTENSIONS.includes(extname(name).toLowerCase());
@@ -43,19 +42,16 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
     return out.sort();
   }
 
-  if (lower.endsWith('.tar') || lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
-    await tarExtract({ file: archivePath, cwd: destDir, filter: (path) => keep(path) });
-    const { walkFiles } = await import('../../fs/files.js');
-    const kept = walkFiles(destDir, SUBTITLE_EXTENSIONS);
-    for (const p of kept) {
-      const target = dest(p);
-      if (p !== target) renameSync(p, target);
-      out.push(target);
-    }
-    return out.sort();
+  // isSupportedArchive already gated zip/tar/tar.gz/tgz — remaining path is tar family.
+  await tarExtract({ file: archivePath, cwd: destDir, filter: (path) => keep(path) });
+  const { walkFiles } = await import('../../fs/files.js');
+  const kept = walkFiles(destDir, SUBTITLE_EXTENSIONS);
+  for (const p of kept) {
+    const target = dest(p);
+    if (p !== target) renameSync(p, target);
+    out.push(target);
   }
-
-  throw new UnsupportedArchiveError(archivePath);
+  return out.sort();
 }
 
 export function entriesForFiles(files: string[]): ArchiveCacheEntry[] {
