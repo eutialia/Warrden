@@ -11,11 +11,10 @@ import type { JobRow } from '../../jobs/queue.js';
 import { parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
 import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetTitle } from '../targetTitle.js';
-import { errorMessage } from '../../util/errors.js';
 import { assertMounted } from '../mounts.js';
-import { buildSidecarName, matchSidecarDeterministic, parseLangTag } from '../ingest/sidecars.js';
+import { buildSidecarName, matchSidecarDeterministic } from '../ingest/sidecars.js';
 import { entriesForFiles, extractArchive, UnsupportedArchiveError } from './archives.js';
-import { assessDrift, type DriftAssessment } from './drift.js';
+import { assessDrift } from './drift.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
 import { findMissingSubtitles } from './reconcile.js';
 
@@ -64,11 +63,11 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
 
-  assertMounted(ctx, job, 'subtitle');
-
   if (job.target_kind === 'movie') {
-    return; // no-op — see module doc
+    return; // no-op — a movie job is a true no-op even if a mount is missing (see module doc)
   }
+
+  assertMounted(ctx, job, 'subtitle');
 
   const media = requireMedia(ctx);
   const placedFiles = new PlacedFiles(ctx.db);
@@ -401,7 +400,10 @@ async function referenceCues(t: EpisodeTarget, media: MediaTools, refCache: Map<
 
 
 /** Tries alass then, if the result still isn't in-sync, ffsubsync; returns the place-plan for
- * the first that lands in-sync, or null if both fail to reach in-sync. */
+ * the first that lands in-sync, or null if both fail to reach in-sync. Degrades gracefully
+ * when a resync binary is missing (or fails): a missing alass skips straight to ffsubsync,
+ * and both missing returns null so the caller quarantines — a missing/failed binary never
+ * kills the job (see CliMediaTools' availability contract). */
 async function tryResyncPipeline(
   ctx: AppContext,
   job: JobRow,
@@ -415,24 +417,40 @@ async function tryResyncPipeline(
   const ext = extname(entryPath).toLowerCase() || '.srt';
   const base = sanitizeFilename(basename(entryPath).replace(/\.[^.]+$/, ''));
 
-  // Attempt 1: alass, reference = the video.
-  const alassOut = join(resyncDir, `${base}-alass${ext}`);
-  await media.resyncAlass({ reference: t.videoPath, subtitle: entryPath, outPath: alassOut });
-  const afterAlass = assessDrift(refCues, parseSubtitleCues(readFileSync(alassOut, 'utf8')));
-  if (afterAlass.state === 'in-sync') {
-    return { kind: 'place', path: alassOut, lang, offsetMs: afterAlass.offsetMs, drift: 'resynced' };
+  const avail = await media.available();
+  if (!avail.alass && !avail.ffsubsync) return null; // no resync tool at all -> quarantine
+
+  // Attempt 1: alass, reference = the video. Skipped when alass isn't on PATH; a throw
+  // (missing binary, or a failed run) also falls through to the ffsubsync attempt.
+  if (avail.alass) {
+    const alassOut = join(resyncDir, `${base}-alass${ext}`);
+    let alassOk = false;
+    try {
+      await media.resyncAlass({ reference: t.videoPath, subtitle: entryPath, outPath: alassOut });
+      alassOk = true;
+    } catch {
+      // alass failed (not installed despite availability, or errored) -> try ffsubsync.
+    }
+    if (alassOk) {
+      const afterAlass = assessDrift(refCues, parseSubtitleCues(readFileSync(alassOut, 'utf8')));
+      if (afterAlass.state === 'in-sync') {
+        return { kind: 'place', path: alassOut, lang, offsetMs: afterAlass.offsetMs, drift: 'resynced' };
+      }
+    }
   }
 
   // Attempt 2: ffsubsync (aligns to the video's audio), then re-assess.
   const ffOut = join(resyncDir, `${base}-ffsubsync${ext}`);
-  await media.resyncFfsubsync({ videoPath: t.videoPath, subtitlePath: entryPath, outPath: ffOut });
+  try {
+    await media.resyncFfsubsync({ videoPath: t.videoPath, subtitlePath: entryPath, outPath: ffOut });
+  } catch {
+    return null; // ffsubsync failed -> caller quarantines
+  }
   const afterFf = assessDrift(refCues, parseSubtitleCues(readFileSync(ffOut, 'utf8')));
   if (afterFf.state === 'in-sync') {
     return { kind: 'place', path: ffOut, lang, offsetMs: afterFf.offsetMs, drift: 'resynced' };
   }
 
-  void ctx;
-  void job;
   return null; // neither tool reached in-sync -> caller quarantines
 }
 

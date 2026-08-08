@@ -767,7 +767,11 @@ export class FakeMediaTools implements MediaTools {
       alassResults?: Record<string, string>;
       ffsubsyncResults?: Record<string, string>;
     } = {},
-  ) {}
+  ) {
+    this.availability = null;
+  }
+
+  private availability: { ffprobe: boolean; alass: boolean; ffsubsync: boolean } | null;
 
   /** Post-construction seam: set/replace the streams probe returns for one video — a test
    * can't reference the fixture's videoPath inside subtitleFixture's own constructor
@@ -793,6 +797,17 @@ export class FakeMediaTools implements MediaTools {
   /** Same as setAlassResult but for the ffsubsync fallback. */
   setFfsubsyncResult(content: string): void {
     this.opts.ffsubsyncResults = { '*': content };
+  }
+
+  /** Post-construction seam: override which binaries `available()` reports on PATH.
+   * Defaults to all three present; pass e.g. `{ alass: false }` to exercise the ffsubsync
+   * fallback or quarantine paths. */
+  setAvailability(availability?: { ffprobe?: boolean; alass?: boolean; ffsubsync?: boolean }): void {
+    this.availability = {
+      ffprobe: availability?.ffprobe ?? true,
+      alass: availability?.alass ?? true,
+      ffsubsync: availability?.ffsubsync ?? true,
+    };
   }
 
   extractCalls: { videoPath: string; streamIndex: number; destPath: string }[] = [];
@@ -822,7 +837,7 @@ export class FakeMediaTools implements MediaTools {
   }
 
   async available(): Promise<{ ffprobe: boolean; alass: boolean; ffsubsync: boolean }> {
-    return { ffprobe: true, alass: true, ffsubsync: true };
+    return this.availability ?? { ffprobe: true, alass: true, ffsubsync: true };
   }
 }
 

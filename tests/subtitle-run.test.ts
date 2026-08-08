@@ -266,4 +266,54 @@ describe('runSubtitleJob', () => {
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(0);
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
   });
+
+  it('alass unavailable -> skips alass, ffsubsync fallback lands in-sync -> placed via ffsubsync', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    fx.media.setAvailability({ alass: false }); // container missing alass
+    fx.media.setFfsubsyncResult(SRT); // ffsubsync output lands aligned
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ass': SRT_SHIFTED }));
+
+    expect(fx.media.alassCalls).toHaveLength(0); // never attempted
+    expect(fx.media.ffsubsyncCalls).toHaveLength(1); // the fallback carried it
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.resynced')).toBe(true);
+    const expected = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
+    expect(existsSync(expected)).toBe(true);
+  });
+
+  it('both resync binaries unavailable -> quarantined + unresolved, candidate moved, no throw', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    fx.media.setAvailability({ alass: false, ffsubsync: false });
+
+    const job = claimSubtitleJob(fx);
+    await expect(runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ass': SRT_SHIFTED }))).resolves.toBeUndefined();
+
+    // Neither binary may even be attempted — a real missing binary would throw ENOENT here.
+    expect(fx.media.alassCalls).toHaveLength(0);
+    expect(fx.media.ffsubsyncCalls).toHaveLength(0);
+    const quarantined = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.quarantined');
+    expect(quarantined).toBeTruthy();
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+    const quarantinedPath = (quarantined!.data as { quarantinedPath: string }).quarantinedPath;
+    expect(existsSync(quarantinedPath)).toBe(true); // the candidate moved to the quarantine dir
+    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(0);
+  });
+
+  it('movie target is a true no-op even when a mount marker is absent', async () => {
+    // A movie subtitle job returns before the mount guard, so a missing mount must NOT
+    // reschedule it (ingest swept movie subs as sidecars — see module doc) — contrast with
+    // a series job, which throws RescheduleError on an absent marker.
+    const fx = subtitleFixture({ targetKind: 'movie', targetId: 7 });
+    fx.ctx.config.ingest.mountMarkers = [join(fx.libraryDir, 'nas-mount-marker')];
+
+    const job = claimSubtitleJob(fx);
+    await expect(runSubtitleJob(fx.ctx, job)).resolves.toBeUndefined();
+
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.mount-missing')).toBe(false);
+  });
 });
