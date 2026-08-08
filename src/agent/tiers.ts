@@ -58,7 +58,10 @@ export class CurlTier implements FetchTier {
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
       if (opts?.destPath !== undefined) {
-        if (!res.ok || res.body === null) return { ok: false, status: res.status, blocked: looksBlocked(res.status, '') };
+        if (!res.ok || res.body === null) {
+          const body = res.body ? (await res.text()).slice(0, BODY_CAP) : '';
+          return { ok: false, status: res.status, blocked: looksBlocked(res.status, body) };
+        }
         mkdirSync(dirname(opts.destPath), { recursive: true });
         await pipeline(Readable.fromWeb(res.body as import('stream/web').ReadableStream), createWriteStream(opts.destPath));
         return { ok: true, status: res.status, filePath: opts.destPath, blocked: false };

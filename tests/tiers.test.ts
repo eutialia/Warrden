@@ -39,6 +39,19 @@ describe('CurlTier', () => {
     expect(readFileSync(dest, 'utf-8')).toBe('PK-bytes');
   });
 
+  it('flags a cloudflare 403 on a destPath download as blocked and writes no file', async () => {
+    const { tmpDir } = await import('./helpers.js');
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const dest = join(tmpDir(), 'wall.zip');
+    const tier = new CurlTier(
+      async () => new Response('Attention Required! | Cloudflare', { status: 403 }),
+    );
+    const res = await tier.fetch('https://x/wall.zip', { destPath: dest });
+    expect(res).toEqual({ ok: false, status: 403, blocked: true });
+    expect(existsSync(dest)).toBe(false);
+  });
+
   it('a network throw becomes ok:false, blocked:false', async () => {
     const tier = new CurlTier(async () => { throw new Error('ECONNREFUSED'); });
     const res = await tier.fetch('https://x');
