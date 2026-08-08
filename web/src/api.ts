@@ -64,6 +64,59 @@ export interface JobDetailResponse {
   acquireRecord: AcquireRecord | null;
   acquireOutcome: AcquireStatus | null;
   placedFiles: PlacedFile[];
+  // Per-site agent-run records for a subtitle job — empty for non-subtitle pipelines.
+  // Fetched alongside the rest of the job detail; `subtitle.transcript` SSE events
+  // trigger a wholesale refetch via `useSseRefetch` (see JobDetail.tsx), so the array
+  // stays live as each site's transcript grows.
+  subtitleRuns?: SubtitleRunRow[];
+}
+
+/** Access ladder tiers, cheapest first. Mirrors `AccessTier` in `src/db/siteProfiles.ts` —
+ * the dashboard hand-copies this union (no shared package between `web/` and the backend),
+ * keep it in sync if the ladder grows. */
+export type AccessTier = 'curl' | 'chromium' | 'camoufox' | 'remote';
+
+/** One `site_profiles` row — the browser agent's per-site memory. Field names are the
+ * server's snake_case (the API returns rows verbatim), not the camelCase `UpdateSiteProfileInput`
+ * the PUT body uses. Hand-copied from `SiteProfileRow` in `src/db/siteProfiles.ts`. */
+export interface SiteProfileRow {
+  name: string;
+  base_url: string;
+  last_working_tier: AccessTier | null;
+  search_url_patterns: string[];
+  notes: string;
+  last_success_at: number | null;
+  last_failure_at: number | null;
+  fail_count: number;
+  created_at: number;
+}
+
+/** One step of a site-search run's transcript, in chronological order. Hand-copied from
+ * `TranscriptEntry` in `src/db/subtitleRuns.ts`. */
+export interface TranscriptEntry {
+  ts: number;
+  tier: AccessTier;
+  action: string;
+  detail: string;
+}
+
+export interface SubtitleRunRow {
+  id: number;
+  job_id: number;
+  site: string;
+  transcript: TranscriptEntry[];
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Body for `PUT /api/site-profiles/:name` — every field optional (a PATCH-shaped PUT).
+ * `lastWorkingTier: null` clears the stored tier; omitting it leaves it untouched. */
+export interface SiteProfileUpdate {
+  notes?: string;
+  lastWorkingTier?: AccessTier | null;
+  searchUrlPatterns?: string[];
+  failCount?: number;
 }
 
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
@@ -90,7 +143,15 @@ export interface CallsiteModel {
 /** Every LLM call-site Warrden knows about, in the order each phase introduced it —
  * `llm.profiles` (a raw JSON editor on the Config page) accepts any string key, so this
  * exists purely as a discoverability hint for what to name one, not a validated list. */
-export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map'] as const;
+export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map', 'site-search', 'archive-map'] as const;
+
+export interface SubtitleSite {
+  name: string;
+  baseUrl: string;
+  /** Search page URL with `{query}` where the search term goes. Optional: without it the
+   * agent discovers the search endpoint itself. */
+  searchUrlTemplate?: string;
+}
 
 export interface Config {
   server: { port: number; publicUrl: string };
@@ -98,6 +159,8 @@ export interface Config {
   pathMappings: { from: string; to: string }[];
   picking: { tags: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
   ingest: { mountMarkers: string[]; downloadRoots: string[] };
+  subtitle: { languages: string[]; sites: SubtitleSite[] };
+  browser: { stepBudget: number; siteCooldownSeconds: number };
   llm: {
     activeProfile: 'dev' | 'prod';
     profiles: Record<string, Record<string, CallsiteModel>>;
@@ -162,6 +225,22 @@ export function fetchJobs(limit = 50): Promise<Job[]> {
 
 export function fetchJob(id: number | string): Promise<JobDetailResponse> {
   return fetchJson<JobDetailResponse>(`/api/jobs/${id}`);
+}
+
+/** `GET /api/site-profiles` — one row per configured subtitle site, merged over stored rows:
+ * a configured site with no stored row yet still shows up with default fields. */
+export function fetchSiteProfiles(): Promise<{ profiles: SiteProfileRow[] }> {
+  return fetchJson('/api/site-profiles');
+}
+
+/** `PUT /api/site-profiles/:name` — PATCH-shaped: only the supplied fields are written. 404s
+ * for a name not in `config.subtitle.sites`. The returned row is the post-update state. */
+export function updateSiteProfile(name: string, patch: SiteProfileUpdate): Promise<SiteProfileRow> {
+  return fetchJson<SiteProfileRow>(`/api/site-profiles/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
 }
 
 export function fetchConfig(): Promise<Config> {

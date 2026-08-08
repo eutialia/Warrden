@@ -1,12 +1,23 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { ApiError, CALLSITES, fetchConfig, saveConfig, SECRET_PLACEHOLDER, type ArrInstance, type ArrKind, type Config } from '@/api';
+import {
+  ApiError,
+  CALLSITES,
+  fetchConfig,
+  saveConfig,
+  SECRET_PLACEHOLDER,
+  type ArrInstance,
+  type ArrKind,
+  type Config,
+  type SubtitleSite,
+} from '@/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
+const EMPTY_SUBTITLE_SITE: SubtitleSite = { name: '', baseUrl: '' };
 
 const LLM_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const;
 type LlmProvider = (typeof LLM_PROVIDERS)[number];
@@ -72,6 +83,14 @@ export default function ConfigPage() {
   const [pickingError, setPickingError] = useState<string | null>(null);
   const [profilesText, setProfilesText] = useState('');
   const [profilesError, setProfilesError] = useState<string | null>(null);
+  // Languages kept as newline-delimited text, exactly like `picking.tags` above — same UX
+  // (one per line, trim/drop-blank on save) and the same "don't coerce mid-edit" reason.
+  const [languagesText, setLanguagesText] = useState('');
+  // Browser-agent numbers, same free-form-text-then-parse treatment as the picking number
+  // fields above: a momentarily empty field while retyping must never silently save as 0.
+  const [stepBudgetText, setStepBudgetText] = useState('');
+  const [siteCooldownText, setSiteCooldownText] = useState('');
+  const [subtitleError, setSubtitleError] = useState<string | null>(null);
   // One editing state per provider key, not bound directly to `config.llm.keys` — see
   // `LlmKeyFieldState` above for what each field tracks and why.
   const [llmKeyFields, setLlmKeyFields] = useState<Record<LlmProvider, LlmKeyFieldState>>({
@@ -89,6 +108,9 @@ export default function ConfigPage() {
     setMinSizeMBText(String(c.picking.minSizeMB));
     setMaxSizeMBText(String(c.picking.maxSizeMB));
     setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
+    setLanguagesText(c.subtitle.languages.join('\n'));
+    setStepBudgetText(String(c.browser.stepBudget));
+    setSiteCooldownText(String(c.browser.siteCooldownSeconds));
     setLlmKeyFields({
       openrouter: { text: c.llm.keys.openrouter ?? '', wasSet: c.llm.keys.openrouter !== undefined, remove: false },
       openai: { text: c.llm.keys.openai ?? '', wasSet: c.llm.keys.openai !== undefined, remove: false },
@@ -184,6 +206,22 @@ export default function ConfigPage() {
     setConfig((prev) => (prev ? { ...prev, ingest: { ...prev.ingest, ...patch } } : prev));
   }
 
+  function updateSubtitleSite(index: number, patch: Partial<SubtitleSite>): void {
+    setConfig((prev) =>
+      prev
+        ? { ...prev, subtitle: { ...prev.subtitle, sites: prev.subtitle.sites.map((s, i) => (i === index ? { ...s, ...patch } : s)) } }
+        : prev,
+    );
+  }
+
+  function addSubtitleSite(): void {
+    setConfig((prev) => (prev ? { ...prev, subtitle: { ...prev.subtitle, sites: [...prev.subtitle.sites, { ...EMPTY_SUBTITLE_SITE }] } } : prev));
+  }
+
+  function removeSubtitleSite(index: number): void {
+    setConfig((prev) => (prev ? { ...prev, subtitle: { ...prev.subtitle, sites: prev.subtitle.sites.filter((_, i) => i !== index) } } : prev));
+  }
+
   /** Trims and drops blank entries from a `StringListField`-backed array — same intent as
    * the picking-tags split/trim/filter below, pulled out since `ingest.mountMarkers` and
    * `ingest.downloadRoots` both need it. Without this, a row left blank after an "Add"
@@ -245,10 +283,44 @@ export default function ConfigPage() {
       return;
     }
 
+    // Same number-parsing for the browser-agent fields — same "don't coerce mid-edit"
+    // reason as the picking fields above. Validated here (not on the schema) because the
+    // schema's own `min(1)`/`min(0)` floors are looser than what a blank field would land as.
+    setSubtitleError(null);
+    const stepBudget = parsePickingNumber(stepBudgetText);
+    const siteCooldownSeconds = parsePickingNumber(siteCooldownText);
+    if (stepBudget === undefined || siteCooldownSeconds === undefined) {
+      const messages = [
+        stepBudget === undefined && 'Step budget must be a number',
+        siteCooldownSeconds === undefined && 'Site cooldown must be a number',
+      ].filter((m): m is string => m !== false);
+      setSubtitleError(messages.join('; '));
+      toast.error('Browser agent fields must be numbers');
+      return;
+    }
+
     const tags = tagsText
       .split('\n')
       .map((t) => t.trim())
       .filter((t) => t.length > 0);
+
+    const languages = languagesText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    // Drop subtitle sites left with a blank name or baseUrl — same intent as
+    // `trimAndDropBlankMappings`: a row missing either side can never match anything
+    // (the schema's `.min(1)` on both would reject the whole save anyway). `searchUrlTemplate`
+    // is optional, so an empty/whitespace value is dropped to `undefined` rather than saved
+    // as an empty string the schema would reject.
+    const sites: SubtitleSite[] = config.subtitle.sites
+      .map((s) => ({
+        name: s.name.trim(),
+        baseUrl: s.baseUrl.trim(),
+        searchUrlTemplate: s.searchUrlTemplate?.trim() || undefined,
+      }))
+      .filter((s) => s.name.length > 0 && s.baseUrl.length > 0);
 
     // Full replace: round-trip everything from the last GET/save, with just the edited
     // fields overlaid — llm.keys entries are rebuilt from the per-provider text fields
@@ -261,6 +333,8 @@ export default function ConfigPage() {
         mountMarkers: trimAndDropBlank(config.ingest.mountMarkers),
         downloadRoots: trimAndDropBlank(config.ingest.downloadRoots),
       },
+      subtitle: { languages, sites },
+      browser: { stepBudget, siteCooldownSeconds },
       llm: { ...config.llm, profiles, keys: buildLlmKeys() },
     };
 
@@ -416,6 +490,81 @@ export default function ConfigPage() {
             </div>
           </div>
           {pickingError && <p className="text-sm text-destructive">{pickingError}</p>}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Subtitles</CardTitle>
+          <CardDescription>
+            Languages an episode "has subs" for once it carries every one (embedded or external).
+            Sites are tried in order; the agent records discovered search endpoints into each
+            site's profile (see the Sites page).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium">Languages (one per line)</label>
+            <Textarea rows={3} value={languagesText} onChange={(e) => setLanguagesText(e.target.value)} />
+          </div>
+          <div>
+            <label className="mb-2 block text-sm font-medium">Sites</label>
+            <div className="space-y-2">
+              {config.subtitle.sites.map((site, i) => (
+                <div key={i} className="grid grid-cols-[1fr_1.5fr_1.5fr_auto] items-center gap-2">
+                  <Input placeholder="name" value={site.name} onChange={(e) => updateSubtitleSite(i, { name: e.target.value })} />
+                  <Input placeholder="base URL" value={site.baseUrl} onChange={(e) => updateSubtitleSite(i, { baseUrl: e.target.value })} />
+                  <Input
+                    placeholder="search URL template (optional)"
+                    value={site.searchUrlTemplate ?? ''}
+                    onChange={(e) => updateSubtitleSite(i, { searchUrlTemplate: e.target.value })}
+                  />
+                  <Button variant="ghost" size="sm" onClick={() => removeSubtitleSite(i)}>
+                    Remove
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <Button variant="outline" size="sm" className="mt-2" onClick={addSubtitleSite}>
+              Add site
+            </Button>
+          </div>
+          {subtitleError && <p className="text-sm text-destructive">{subtitleError}</p>}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Browser agent</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Step budget</label>
+              <Input
+                type="number"
+                value={stepBudgetText}
+                onChange={(e) => {
+                  setStepBudgetText(e.target.value);
+                  setSubtitleError(null);
+                }}
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Hard ceiling on LLM steps per site-search run.</p>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Site cooldown (seconds)</label>
+              <Input
+                type="number"
+                value={siteCooldownText}
+                onChange={(e) => {
+                  setSiteCooldownText(e.target.value);
+                  setSubtitleError(null);
+                }}
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Polite re-hit floor per site; a profile's own backoff can push it later.</p>
+            </div>
+          </div>
+          {subtitleError && <p className="text-sm text-destructive">{subtitleError}</p>}
         </CardContent>
       </Card>
 

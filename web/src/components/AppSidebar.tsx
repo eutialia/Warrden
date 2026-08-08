@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Boxes, Settings } from 'lucide-react';
+import { Activity, AlertTriangle, Boxes, Globe, Settings } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   Sidebar,
@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { title: 'Activity', url: '/', icon: Activity },
   { title: 'Attention', url: '/attention', icon: AlertTriangle },
   { title: 'Managed objects', url: '/managed', icon: Boxes },
+  { title: 'Sites', url: '/sites', icon: Globe },
   { title: 'Config', url: '/config', icon: Settings },
 ];
 

@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { apiErrorMessage, fetchJob, postAcquire, type JobDetailResponse, type PlacedFileKind } from '@/api';
+import {
+  apiErrorMessage,
+  fetchJob,
+  postAcquire,
+  type AccessTier,
+  type JobDetailResponse,
+  type PlacedFileKind,
+  type SubtitleRunRow,
+  type TranscriptEntry,
+} from '@/api';
 import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
@@ -16,6 +26,46 @@ const PLACED_FILE_KIND_LABEL: Record<PlacedFileKind, string> = {
   audio: 'Audio',
   subtitle: 'Subtitle',
 };
+
+// Same variant ladder as the Sites page's own tier badge: cheapest working tier reads as
+// "good", a discovered-but-pricier tier stays secondary, and `null` (a transcript entry's
+// tier is required, but defensive) shows outline. Mirrored here rather than shared because
+// the Sites page's `TierBadge` carries a "no tier" null case that a transcript entry never has.
+const TIER_VARIANT: Record<AccessTier, 'default' | 'secondary'> = {
+  curl: 'default',
+  chromium: 'secondary',
+  camoufox: 'secondary',
+  remote: 'secondary',
+};
+
+/** Renders one subtitle agent run as a chronological step list — each entry's tier badge,
+ * action, and detail on its own line, ordered oldest-first (the transcript's own array
+ * order). `detail` can be long, so it breaks across lines rather than truncating. */
+function TranscriptList({ entries }: { entries: TranscriptEntry[] }): ReactNode {
+  if (entries.length === 0) return <p className="text-xs text-muted-foreground">No steps recorded.</p>;
+  return (
+    <ol className="space-y-1.5 text-xs">
+      {entries.map((e, i) => (
+        <li key={i} className="flex items-start gap-1.5">
+          <Badge variant={TIER_VARIANT[e.tier]} className="shrink-0">{e.tier}</Badge>
+          <span>
+            <span className="font-medium">{e.action}</span>
+            {e.detail && <span className="text-muted-foreground"> — {e.detail}</span>}
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** A subtitle run's status badge — same destructive/secondary/default ladder as the
+ * job-status badge, keyed off the run's own `done`/`failed` (and any in-flight status the
+ * agent recorded before finishing). */
+function RunStatusBadge({ status }: { status: string }): ReactNode {
+  const variant: 'default' | 'secondary' | 'destructive' =
+    status === 'done' ? 'default' : status === 'failed' ? 'destructive' : 'secondary';
+  return <Badge variant={variant}>{status}</Badge>;
+}
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -108,7 +158,7 @@ export default function JobDetail() {
     );
   }
 
-  const { job, acquireRecord, acquireOutcome, placedFiles } = data;
+  const { job, acquireRecord, acquireOutcome, placedFiles, subtitleRuns } = data;
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
 
   return (
@@ -184,6 +234,35 @@ export default function JobDetail() {
           </CardContent>
         </Card>
       )}
+
+      {subtitleRuns && subtitleRuns.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Subtitle runs</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {subtitleRuns.map((run) => (
+              <SubtitleRunCard key={run.id} run={run} />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function SubtitleRunCard({ run }: { run: SubtitleRunRow }): ReactNode {
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{run.site}</span>
+        <RunStatusBadge status={run.status} />
+        <span className="text-xs text-muted-foreground">
+          Started {new Date(run.created_at).toLocaleString()}
+          {run.updated_at !== run.created_at && ` · updated ${new Date(run.updated_at).toLocaleString()}`}
+        </span>
+      </div>
+      <TranscriptList entries={run.transcript} />
     </div>
   );
 }
