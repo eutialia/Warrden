@@ -13,7 +13,8 @@ import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { assertMounted } from '../mounts.js';
 import { buildSidecarName, matchSidecarDeterministic } from '../ingest/sidecars.js';
-import { entriesForFiles, extractArchive, UnsupportedArchiveError } from './archives.js';
+import { placeBlocked } from '../placeGuard.js';
+import { entriesForFiles, extractArchive, isSupportedArchive, UnsupportedArchiveError } from './archives.js';
 import { assessDrift } from './drift.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
 import { findMissingSubtitles, langCovers } from './reconcile.js';
@@ -21,7 +22,7 @@ import { findMissingSubtitles, langCovers } from './reconcile.js';
 /** Injectable seams for `runSubtitleJob` — same injectable-factory pattern as `searchSite`'s
  * own `tiers` param (Task 8): tests stub `searchSite` to a fake that returns a pre-built
  * archive instead of running a real browser + LLM loop. */
-export interface RunSubtitleDeps {
+interface RunSubtitleDeps {
   searchSite?: typeof searchSite;
 }
 
@@ -118,7 +119,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     }
 
     const missingList = await findMissingSubtitles({
-      videos: targets.map((t) => ({ videoPath: t.videoPath, episodeId: t.episodeId, externalSubtitles: [] })),
+      videos: targets.map((t) => ({ videoPath: t.videoPath, episodeId: t.episodeId })),
       languages: ctx.config.subtitle.languages,
       media,
     });
@@ -153,6 +154,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     // landed after the pack was fetched, avoiding a re-download.
     for (const row of cache.forTarget(job.arr_instance, 'series', job.target_id)) {
       if (missing.length === 0) break;
+      // matchArchiveRow drops fully-resolved episodes from `missing` itself.
       const resolved = await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, undefined);
       if (resolved.length > 0) {
         ctx.events.append({
@@ -161,7 +163,6 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
           message: `Covered ${resolved.length} episode(s) from the cached archive "${basename(row.path)}"`,
           data: targetEventData(job, { count: resolved.length, episodeIds: resolved, archive: row.path }),
         });
-        removeResolved(missing, resolved);
       }
     }
 
@@ -208,18 +209,11 @@ function removeResolved(missing: EpisodeTarget[], resolvedEpisodeIds: number[]):
   }
 }
 
-/** Drops every still-missing language that `placedLang` covers (same rule as reconcile).
- * An episode is only fully resolved once `missingLanguages` is empty — placing zh-Hans
- * must not stop the runner from still hunting zh-Hant for the same episode. */
-function markLanguagesCovered(t: EpisodeTarget, placedLang: string | null): void {
-  if (placedLang === null) return;
-  t.missingLanguages = t.missingLanguages.filter((want) => !langCovers(want, placedLang));
-}
-
 /**
- * After a successful place, updates the episode's remaining language gap and, when the
- * gap is empty, records it as fully resolved and drops it from `missing` immediately so
- * subsequent files in this pack (and the LLM remainder pass) don't re-match it.
+ * After a successful place, drops every still-missing language that `placedLang` covers
+ * (same rule as reconcile). When the gap is empty the episode is fully resolved and
+ * removed from `missing` immediately so subsequent files in this pack (and the LLM
+ * remainder pass) don't re-match it — placing zh-Hans must not stop the hunt for zh-Hant.
  */
 function notePlacement(
   missing: EpisodeTarget[],
@@ -227,7 +221,9 @@ function notePlacement(
   t: EpisodeTarget,
   placedLang: string | null,
 ): void {
-  markLanguagesCovered(t, placedLang);
+  if (placedLang !== null) {
+    t.missingLanguages = t.missingLanguages.filter((want) => !langCovers(want, placedLang));
+  }
   if (t.missingLanguages.length === 0) {
     resolved.push(t.episodeId);
     removeResolved(missing, [t.episodeId]);
@@ -352,9 +348,9 @@ async function driftAndPlace(
   // row is stale) is not a failure worth reporting — just skip it.
   if (!existsSync(entry.path)) return undefined;
 
-  const plan = await decideCandidate(ctx, job, entry, t, media, refCache, refDir, rawDir);
+  const plan = await decideCandidate(entry, t, media, refCache, refDir, rawDir);
   if (plan.kind === 'quarantine') {
-    await quarantine(ctx, job, entry.path);
+    quarantine(ctx, job, entry.path);
     return undefined;
   }
 
@@ -365,8 +361,6 @@ async function driftAndPlace(
  * to place — the original, or a resynced output — plus the offset/drift labels for the event
  * and provenance). */
 async function decideCandidate(
-  ctx: AppContext,
-  job: JobRow,
   entry: { path: string; lang: string | null },
   t: EpisodeTarget,
   media: MediaTools,
@@ -395,7 +389,7 @@ async function decideCandidate(
   // resync reference is the video path itself (alass accepts a video as its reference).
   const resyncDir = join(rawDir, 'resync', String(t.episodeId));
   mkdirSync(resyncDir, { recursive: true });
-  const c = await tryResyncPipeline(ctx, job, entry.path, entry.lang, t, refCues, media, resyncDir);
+  const c = await tryResyncPipeline(entry.path, entry.lang, t, refCues, media, resyncDir);
   if (c === null) return { kind: 'quarantine' };
   return c;
 }
@@ -434,8 +428,6 @@ async function referenceCues(t: EpisodeTarget, media: MediaTools, refCache: Map<
  * and both missing returns null so the caller quarantines — a missing/failed binary never
  * kills the job (see CliMediaTools' availability contract). */
 async function tryResyncPipeline(
-  ctx: AppContext,
-  job: JobRow,
   entryPath: string,
   lang: string | null,
   t: EpisodeTarget,
@@ -469,6 +461,7 @@ async function tryResyncPipeline(
   }
 
   // Attempt 2: ffsubsync (aligns to the video's audio), then re-assess.
+  if (!avail.ffsubsync) return null;
   const ffOut = join(resyncDir, `${base}-ffsubsync${ext}`);
   try {
     await media.resyncFfsubsync({ videoPath: t.videoPath, subtitlePath: entryPath, outPath: ffOut });
@@ -485,7 +478,7 @@ async function tryResyncPipeline(
 
 /** Moves an unusable candidate (unscorable, or never landable in-sync after both resync
  * tools) into `dataDir/quarantine/` and raises a `subtitle.quarantined` attention event. */
-async function quarantine(ctx: AppContext, job: JobRow, entryPath: string): Promise<void> {
+function quarantine(ctx: AppContext, job: JobRow, entryPath: string): void {
   const quarantineDir = join(ctx.dataDir, 'subtitle', 'quarantine');
   mkdirSync(quarantineDir, { recursive: true });
   let dest = join(quarantineDir, basename(entryPath));
@@ -535,9 +528,8 @@ function placeSubtitle(
   const targetName = buildSidecarName(basename(videoLocal), { lang: effectiveLang, ext });
   const targetPath = join(dirname(videoLocal), targetName);
 
-  const existingAtTarget = placedFiles.findByPlacedPath(targetPath);
-
-  if (existsSync(targetPath) && !existingAtTarget) {
+  const block = placeBlocked(placedFiles, targetPath, sourcePath);
+  if (block?.kind === 'foreign') {
     ctx.events.append({
       kind: 'subtitle.skipped-foreign',
       level: 'warn',
@@ -547,13 +539,12 @@ function placeSubtitle(
     });
     return undefined;
   }
-
-  if (existingAtTarget && existingAtTarget.source_path !== sourcePath) {
+  if (block?.kind === 'collision') {
     ctx.events.append({
       kind: 'subtitle.skipped-collision',
       level: 'warn',
       jobId: job.id,
-      message: `Skipped "${basename(sourcePath)}" — "${targetName}" is already claimed by "${existingAtTarget.source_path}"`,
+      message: `Skipped "${basename(sourcePath)}" — "${targetName}" is already claimed by "${block.claimedBy}"`,
       data: targetEventData(job, { sourcePath, targetPath }),
     });
     return undefined;
@@ -624,7 +615,7 @@ async function siteSearchPass(
     const download = await search(ctx, job, site, seriesTitle, rawDir);
     if (!download) continue; // site produced nothing this run (cooldown or no match)
 
-    if (!extractArchiveSupports(download.filePath)) continue;
+    if (!isSupportedArchive(download.filePath)) continue;
 
     // Extract fresh into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
     // the pack without re-downloading. Keyed uniquely so ArchiveCache's (target, path) upsert
@@ -659,22 +650,9 @@ async function siteSearchPass(
       files: entries,
       created_at: Date.now(),
     };
-    const resolved = await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, site.name);
-    removeResolved(missing, resolved);
+    // matchArchiveRow drops fully-resolved episodes from `missing` itself.
+    await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, site.name);
   }
-}
-
-/** Whether `extractArchive` can handle this download — mirrors `isArchive` from archives.ts
- * (zip/tar/tar.gz; rar/7z are unsupported in v1 and treated as a failed candidate). */
-function extractArchiveSupports(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  if (lower.endsWith('.rar') || lower.endsWith('.7z')) return false;
-  return (
-    lower.endsWith('.zip') ||
-    lower.endsWith('.tar') ||
-    lower.endsWith('.tar.gz') ||
-    lower.endsWith('.tgz')
-  );
 }
 
 /** Replaces path-breaking chars in a filename so it can't escape the ref/resync dirs. */

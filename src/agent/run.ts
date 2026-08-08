@@ -64,26 +64,48 @@ export async function searchSite(
   }
 
   const runId = runs.start(job.id, site.name);
-  const startIdx = Math.max(0, TIER_ORDER.indexOf((profile.last_working_tier ?? TIER_ORDER[0]) as (typeof TIER_ORDER)[number]));
+  // Start at the remembered tier when it's a v1 rung; unimplemented seams (camoufox/remote)
+  // and a null floor both fall back to the cheapest implemented tier.
+  const startIdx = Math.max(0, TIER_ORDER.indexOf(profile.last_working_tier as (typeof TIER_ORDER)[number]));
   const activeTiers: FetchTier[] = [];
 
   /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
    * steps or by the runner's escalation handling. */
   const onTranscriptEvent = (entry: TranscriptEntry): void => {
     runs.appendTranscript(runId, [entry]);
-    ctx.events.append({ kind: 'subtitle.transcript', jobId: job.id, message: `[${site.name}] ${entry.action}: ${entry.detail}`, data: targetEventData(job, { site: site.name, entry }) });
+    ctx.events.append({
+      kind: 'subtitle.transcript',
+      jobId: job.id,
+      message: `[${site.name}] ${entry.action}: ${entry.detail}`,
+      data: targetEventData(job, { site: site.name, entry }),
+    });
+  };
+
+  /** Persist a site-level failure (genuine error or every rung empty) and emit the event. */
+  const failSite = (kind: 'subtitle.site-failed' | 'subtitle.site-exhausted', message: string): null => {
+    runs.finish(runId, 'failed');
+    profiles.update(site.name, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
+    ctx.events.append({
+      kind,
+      level: 'warn',
+      jobId: job.id,
+      message,
+      data: targetEventData(job, { site: site.name, dedupeKey: site.name }),
+    });
+    return null;
   };
 
   try {
     for (let i = startIdx; i < TIER_ORDER.length; i++) {
-      const tier = tiers.make(TIER_ORDER[i]!);
+      const tierName = TIER_ORDER[i]!;
+      const tier = tiers.make(tierName);
       activeTiers.push(tier);
       try {
         const outcome = await runAgentLoop({
           llm: ctx.llm,
           tier,
           site,
-          profile: profiles.get(site.name)!,
+          profile,
           query,
           destDir,
           maxSteps: ctx.config.browser.stepBudget,
@@ -94,15 +116,16 @@ export async function searchSite(
           runs.finish(runId, 'done');
           // Record a newly discovered search URL that isn't already known and isn't the
           // configured template, capping the learned list at 5.
-          const discovered =
-            outcome.searchUrl !== null &&
-            outcome.searchUrl !== site.searchUrlTemplate &&
-            !profile.search_url_patterns.includes(outcome.searchUrl);
-          const learned = discovered
-            ? [...profile.search_url_patterns, outcome.searchUrl as string].slice(-5)
+          const searchUrl = outcome.searchUrl;
+          const isNew =
+            searchUrl !== null &&
+            searchUrl !== site.searchUrlTemplate &&
+            !profile.search_url_patterns.includes(searchUrl);
+          const learned = isNew
+            ? [...profile.search_url_patterns, searchUrl].slice(-5)
             : profile.search_url_patterns;
           profiles.update(site.name, {
-            lastWorkingTier: TIER_ORDER[i],
+            lastWorkingTier: tierName,
             lastSuccessAt: Date.now(),
             failCount: 0,
             lastFailureAt: null,
@@ -110,34 +133,23 @@ export async function searchSite(
           });
           return { filePath: outcome.filePath, url: outcome.url };
         }
-        // exhausted/gave-up/blocked-without-error: fall through to the next rung.
+        // exhausted/gave-up: fall through to the next rung.
       } catch (err) {
         if (!(err instanceof TierBlockedError)) {
           // A genuine error (bad LLM output after retries, FS failure, ...) is a site-level
           // failure, not an escalation signal.
-          runs.finish(runId, 'failed');
-          profiles.update(site.name, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
-          ctx.events.append({
-            kind: 'subtitle.site-failed', level: 'warn', jobId: job.id,
-            message: `Site ${site.name} failed: ${errorMessage(err)}`,
-            data: targetEventData(job, { site: site.name, dedupeKey: site.name }),
-          });
-          return null;
+          return failSite('subtitle.site-failed', `Site ${site.name} failed: ${errorMessage(err)}`);
         }
         // TierBlockedError: note the wall in the run's transcript and try the next rung.
-        onTranscriptEvent({ ts: Date.now(), tier: TIER_ORDER[i], action: 'escalate', detail: errorMessage(err) });
+        onTranscriptEvent({ ts: Date.now(), tier: tierName, action: 'escalate', detail: errorMessage(err) });
       }
     }
 
     // Every rung came up empty.
-    runs.finish(runId, 'failed');
-    profiles.update(site.name, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
-    ctx.events.append({
-      kind: 'subtitle.site-exhausted', level: 'warn', jobId: job.id,
-      message: `Site ${site.name} produced no download across ${TIER_ORDER.length - startIdx} tier(s)`,
-      data: targetEventData(job, { site: site.name, dedupeKey: site.name }),
-    });
-    return null;
+    return failSite(
+      'subtitle.site-exhausted',
+      `Site ${site.name} produced no download across ${TIER_ORDER.length - startIdx} tier(s)`,
+    );
   } finally {
     await Promise.all(activeTiers.map((t) => t.close()));
   }

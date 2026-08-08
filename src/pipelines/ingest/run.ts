@@ -19,6 +19,7 @@ import type { JobRow } from '../../jobs/queue.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { assertMounted } from '../mounts.js';
+import { placeBlocked } from '../placeGuard.js';
 import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
@@ -582,22 +583,12 @@ function tryPlace(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sideca
 
 /**
  * Copies one matched sidecar beside its video and records provenance — the only place
- * `atomicCopy`/`placedFiles.upsert` for a sidecar happen. Two guards run first, both
- * against the destructive-overwrite limit (never touch a file without a matching
- * provenance row):
- * - **Foreign-file guard**: something already sits at the target path with no
- *   `placed_files` row for it — not ours to overwrite.
- * - **Collision guard**: a `placed_files` row already claims the target path from a
- *   DIFFERENT source (two sidecars — e.g. two lang-null subs — resolving to the same
- *   filename). Re-placement from the SAME source is always allowed (that's the
- *   idempotent-refresh path). A claim from a source that's since vanished still blocks the
- *   slot too — once the old source is gone, nothing here can re-derive what's actually
- *   sitting at the target to decide whether overwriting it is safe, and the file may well
- *   be human-edited. Note the block is deliberately durable: the claiming row is only ever
- *   removed by stale cleanup (which triggers on the VIDEO going away, not the sidecar), so
- *   freeing the slot for a different source means removing or renaming the episode's video
- *   (a re-grab/upgrade does exactly that) — deleting just the placed sidecar leaves the
- *   claim in place.
+ * `atomicCopy`/`placedFiles.upsert` for a sidecar happen. Foreign-file + collision guards
+ * live in `placeBlocked` (`../placeGuard.ts`, shared with the subtitle pipeline); see that
+ * helper for the overwrite rules. A claim from a source that's since vanished still blocks
+ * the slot — the claiming row is only ever removed by stale cleanup (which triggers on the
+ * VIDEO going away, not the sidecar), so freeing it for a different source means removing
+ * or renaming the episode's video.
  */
 function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPath: string, videoArrPath: string, matchedBy: MatchedBy): void {
   const videoLocal = mapArrPath(ctx.config.pathMappings, videoArrPath);
@@ -606,9 +597,8 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
   const targetName = buildSidecarName(basename(videoLocal), { lang, ext });
   const targetPath = join(dirname(videoLocal), targetName);
 
-  const existingAtTarget = placedFiles.findByPlacedPath(targetPath);
-
-  if (existsSync(targetPath) && !existingAtTarget) {
+  const block = placeBlocked(placedFiles, targetPath, sidecarPath);
+  if (block?.kind === 'foreign') {
     ctx.events.append({
       kind: 'ingest.skipped-foreign',
       level: 'warn',
@@ -618,13 +608,12 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
     });
     return;
   }
-
-  if (existingAtTarget && existingAtTarget.source_path !== sidecarPath) {
+  if (block?.kind === 'collision') {
     ctx.events.append({
       kind: 'ingest.skipped-collision',
       level: 'warn',
       jobId: job.id,
-      message: `Skipped "${basename(sidecarPath)}" — "${targetName}" is already claimed by "${existingAtTarget.source_path}"`,
+      message: `Skipped "${basename(sidecarPath)}" — "${targetName}" is already claimed by "${block.claimedBy}"`,
       data: targetEventData(job, { sidecarPath, targetPath }),
     });
     return;
