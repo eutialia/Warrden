@@ -5,7 +5,8 @@ import { ConfigSchema } from '../src/config/schema.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { RescheduleError } from '../src/jobs/errors.js';
-import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS, MOUNT_RETRY_MS } from '../src/pipelines/ingest/run.js';
+import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS } from '../src/pipelines/ingest/run.js';
+import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
 import { AcceptDataSchema } from '../src/server/app.js';
 import {
   bundleImportPayload,
@@ -76,6 +77,36 @@ describe('runIngestJob — settle gate', () => {
     await expect(call).rejects.toMatchObject({ delayMs: MOUNT_RETRY_MS });
 
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.mount-missing')).toBe(true);
+  });
+});
+
+describe('runIngestJob — subtitle follow-on enqueue', () => {
+  it('enqueues a subtitle job after a series ingest completes', async () => {
+    const fx = ingestFixture(); // series target (default)
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    // The series settle completes and a follow-on subtitle job for the same target is queued.
+    const subtitleJob = fx.ctx.queue.list().find((j) => j.pipeline === 'subtitle');
+    expect(subtitleJob).toBeTruthy();
+    expect(subtitleJob).toMatchObject({
+      target_kind: 'series',
+      target_id: fx.targetId,
+      arr_instance: fx.arrInstance,
+      status: 'pending',
+    });
+    expect(subtitleJob!.payload).toEqual({ source: 'ingest' });
+  });
+
+  it('does not enqueue a subtitle job for a movie ingest', async () => {
+    const fx = ingestFixture({ targetKind: 'movie' });
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    // Movie subtitle jobs are no-ops, so ingest must not even enqueue one.
+    expect(fx.ctx.queue.list().filter((j) => j.pipeline === 'subtitle')).toHaveLength(0);
   });
 });
 

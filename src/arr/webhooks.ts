@@ -92,6 +92,15 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
   if (!target) {
     return { handled: false, reason: 'ignored' };
   }
+
+  let jobPayload: Record<string, unknown> = { title: target.title };
+  if (event.eventType === 'Download') {
+    // `isUpgrade` rides along on the job payload (not just the event's `data`) because
+    // the subtitle pipeline is enqueued as a follow-on from ingest — whose payload is
+    // built from the webhook's original job, so the only chain that can tell an upgrade
+    // from a fresh download is this payload. Ingest itself ignores it.
+    jobPayload = { title: target.title, isUpgrade: event.isUpgrade };
+  }
   // No `downloadId` here (even for a Download event): nothing downstream reads it — ingest
   // derives its own download ids straight from the arr's live queue (`assessQueue`), not
   // from whatever the webhook happened to carry when the job was first enqueued.
@@ -100,7 +109,7 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
     targetKind,
     targetId: target.id,
     arrInstance: instanceName,
-    payload: { title: target.title },
+    payload: jobPayload,
   });
   ctx.events.append({
     kind: 'webhook.received',

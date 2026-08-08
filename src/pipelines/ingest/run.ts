@@ -12,12 +12,13 @@ import type {
 import type { AppContext } from '../../context.js';
 import { PlacedFiles, type PlacedFileRow } from '../../db/placedFiles.js';
 import { targetEventData } from '../../events/target.js';
-import { atomicCopy, ensureMounts, MountError, walkFiles } from '../../fs/files.js';
+import { atomicCopy, walkFiles } from '../../fs/files.js';
 import { mapArrPath, type PathMapping } from '../../fs/paths.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
+import { assertMounted } from '../mounts.js';
 import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
@@ -26,7 +27,6 @@ import { resolveSourceDirsDetailed } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
 export const SETTLE_DEADLINE_MS = 24 * 60 * 60_000;
-export const MOUNT_RETRY_MS = 5 * 60_000;
 
 type MatchedBy = 'deterministic' | 'llm';
 
@@ -83,7 +83,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
 
-  assertMounted(ctx, job);
+  assertMounted(ctx, job, 'ingest');
 
   const records = await client.listQueue();
   const assessment = assessQueue(records, { kind: job.target_kind, id: job.target_id });
@@ -173,26 +173,21 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   await sweepSidecars(ctx, job, placedFiles, target, sidecarPaths, identifiedSourceVideo);
 
   await rescueStuckImports(ctx, job, client, target, assessment, bundleFolders);
-}
 
-/** Verifies every configured mount marker is present, translating a `MountError` into an
- * attention event plus an uncounted, fixed-delay reschedule (no deadline — a missing mount
- * pauses ingest until every marker is back) — filesystem work (the sweep below) against an
- * unmounted NAS share would otherwise look like "nothing to do" instead of "not actually
- * mounted", silently pruning provenance for files that are really just unreachable. */
-function assertMounted(ctx: AppContext, job: JobRow): void {
-  try {
-    ensureMounts(ctx.config.ingest.mountMarkers);
-  } catch (err) {
-    if (!(err instanceof MountError)) throw err;
-    ctx.events.append({
-      kind: 'ingest.mount-missing',
-      level: 'attention',
-      jobId: job.id,
-      message: `Ingest paused — missing mount marker(s): ${err.missing.join(', ')}`,
-      data: targetEventData(job, { missing: err.missing }),
+  // Kick off the subtitle pipeline for a series target once ingest has settled the import
+  // (movie subtitle jobs are no-ops, so we don't even enqueue one — see run.ts's own
+  // doc). The enqueue coalesces into a pending/running subtitle job for the same target
+  // (queue.ts's singleton rule), so a manual trigger and this automatic trigger race
+  // cleanly. `source: 'ingest'` lets the subtitle runner (and any attention/retry that
+  // links back) tell automatic runs from a manual dashboard one.
+  if (job.target_kind === 'series') {
+    ctx.queue.enqueue({
+      pipeline: 'subtitle',
+      targetKind: job.target_kind,
+      targetId: job.target_id,
+      arrInstance: job.arr_instance,
+      payload: { source: 'ingest' },
     });
-    throw new RescheduleError('mount marker(s) missing', MOUNT_RETRY_MS);
   }
 }
 

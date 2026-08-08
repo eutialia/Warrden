@@ -12,6 +12,7 @@ import { AiSdkGenerator } from './llm/generator.js';
 import { CliMediaTools } from './media/tools.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
 import { runIngestJob } from './pipelines/ingest/run.js';
+import { runSubtitleJob } from './pipelines/subtitle/run.js';
 import { createApp } from './server/app.js';
 import { reclaimAbandonedJobs, scheduleReconcile } from './startup.js';
 import { errorMessage } from './util/errors.js';
@@ -58,7 +59,7 @@ async function main(): Promise<void> {
 
   reclaimAbandonedJobs(ctx);
 
-  const stopRunner = startRunner(ctx, { acquire: runAcquireJob, ingest: runIngestJob });
+  const stopRunner = startRunner(ctx, { acquire: runAcquireJob, ingest: runIngestJob, subtitle: runSubtitleJob });
   const stopReconcile = scheduleReconcile(ctx);
 
   const server = serve({ fetch: createApp(ctx).fetch, port: ctx.config.server.port }, () => {

@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { vi } from 'vitest';
+import type { MediaStream, MediaTools } from '../src/media/tools.js';
 import type {
   ArrApi,
   EpisodeFileResource,
@@ -620,6 +621,11 @@ export function ingestFixture(opts?: {
       ],
       ingest: { mountMarkers: opts?.mountMarkers ?? [], downloadRoots: [downloadsDir] },
     }),
+    // Ingest now enqueues a follow-on subtitle job for series targets; the real runner
+    // (e2e.test.ts) picks that job up and runSubtitleJob requires ctx.media for its
+    // reconcile probe. A bare FakeMediaTools (no streams) is enough — the sweep already
+    // placed the sidecar, so the subtitle reconcile finds nothing missing either way.
+    media: new FakeMediaTools(),
   });
 
   return { ctx, client, arrInstance: arrInstanceName, targetKind, targetId, downloadsDir, torrentDir, libraryDir, videoPath, droppedPath };
@@ -741,6 +747,150 @@ export function candidate(overrides?: Partial<ReleaseCandidate>): ReleaseCandida
     publishDate: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
+}
+
+/** A `MediaTools` fake for tests: `probeStreams` returns `streamsByPath[p]` (empty by
+ * default), `extractSubtitle` writes a canned file to `destPath`, and `resyncAlass`/
+ * `resyncFfsubsync` copy their input to `outPath` verbatim (so a drifted candidate is
+ * "resynced" to a byte-identical copy, never actually re-aligned). `resyncAlass` can be
+ * `null`-fired for `resyncAlass` to throw (exercising the ffsubsync fallback). */
+export class FakeMediaTools implements MediaTools {
+  constructor(
+    private readonly opts: {
+      streamsByPath?: Record<string, MediaStream[]>;
+      extractResults?: Record<string, string>;
+      /** inputPath.subtitle -> output content. When absent, resync copies input -> output
+       * verbatim (a passthrough). A verbatim copy can never change a drift verdict on its
+       * own, so a test exercising a successful resync INJECTS a corrected table here — the
+       * fake simulates what alass/ffsubsync would produce, while the real
+       * parseSubtitleCues/assessDrift still run on that output. */
+      alassResults?: Record<string, string>;
+      ffsubsyncResults?: Record<string, string>;
+    } = {},
+  ) {}
+
+  /** Post-construction seam: set/replace the streams probe returns for one video — a test
+   * can't reference the fixture's videoPath inside subtitleFixture's own constructor
+   * options, so the common "give the fixture's video an embedded track" setup goes through
+   * this instead of a self-referencing initializer. */
+  setStreams(videoPath: string, streams: MediaStream[]): void {
+    this.opts.streamsByPath = { ...this.opts.streamsByPath, [videoPath]: streams };
+  }
+
+  /** Post-construction seam: set what `extractSubtitle` writes for `key` (`videoPath:streamIndex`). */
+  setExtraction(key: string, content: string): void {
+    this.opts.extractResults = { ...this.opts.extractResults, [key]: content };
+  }
+
+  /** Post-construction seam: make `resyncAlass`/`resyncFfsubsync` write `content` for every
+   * input instead of the verbatim-copy passthrough. Call BEFORE the run when the test can't
+   * know the extracted candidate's path up front (the site-search flow picks it at runtime) —
+   * the content is what the tool would produce, so the real drift gate re-assesses it. */
+  setAlassResult(content: string): void {
+    this.opts.alassResults = { '*': content };
+  }
+
+  /** Same as setAlassResult but for the ffsubsync fallback. */
+  setFfsubsyncResult(content: string): void {
+    this.opts.ffsubsyncResults = { '*': content };
+  }
+
+  extractCalls: { videoPath: string; streamIndex: number; destPath: string }[] = [];
+  alassCalls: { reference: string; subtitle: string; outPath: string }[] = [];
+  ffsubsyncCalls: { videoPath: string; subtitlePath: string; outPath: string }[] = [];
+
+  async probeStreams(videoPath: string): Promise<MediaStream[]> {
+    return this.opts.streamsByPath?.[videoPath] ?? [];
+  }
+
+  async extractSubtitle(videoPath: string, streamIndex: number, destPath: string): Promise<void> {
+    this.extractCalls.push({ videoPath, streamIndex, destPath });
+    const result = this.opts.extractResults?.[`${videoPath}:${streamIndex}`];
+    writeFileSync(destPath, result ?? '');
+  }
+
+  async resyncAlass(input: { reference: string; subtitle: string; outPath: string }): Promise<void> {
+    this.alassCalls.push(input);
+    const injected = this.opts.alassResults?.[input.subtitle] ?? this.opts.alassResults?.['*'];
+    writeFileSync(input.outPath, injected ?? readFileSync(input.subtitle));
+  }
+
+  async resyncFfsubsync(input: { videoPath: string; subtitlePath: string; outPath: string }): Promise<void> {
+    this.ffsubsyncCalls.push(input);
+    const injected = this.opts.ffsubsyncResults?.[input.subtitlePath] ?? this.opts.ffsubsyncResults?.['*'];
+    writeFileSync(input.outPath, injected ?? readFileSync(input.subtitlePath));
+  }
+
+  async available(): Promise<{ ffprobe: boolean; alass: boolean; ffsubsync: boolean }> {
+    return { ffprobe: true, alass: true, ffsubsync: true };
+  }
+}
+
+export interface SubtitleFixture {
+  ctx: AppContext;
+  client: FakeArrClient;
+  arrInstance: string;
+  targetKind: TargetKind;
+  targetId: number;
+  libraryDir: string;
+  videoPath: string;
+  media: FakeMediaTools;
+}
+
+/**
+ * Builds the filesystem + arr-client + MediaTools fixture the subtitle pipeline tests need:
+ * a temp library holding one video (S01E05, matching `episodeFiles`), a `fakeArrClient` with
+ * the matching series/episodes/episodeFiles, and `ctx.media` = a `FakeMediaTools`. Config has
+ * `subtitle.languages: ['zh-Hans']` and one site ({name:'acgrip'}) unless `sites` overrides it.
+ * Does not enqueue/claim a job — call `enqueueAndClaim(ctx, { pipeline: 'subtitle', ... })`.
+ */
+export function subtitleFixture(opts?: {
+  targetKind?: TargetKind;
+  targetId?: number;
+  episodes?: EpisodeResource[];
+  episodeFiles?: EpisodeFileResource[];
+  languages?: string[];
+  streamsByPath?: Record<string, MediaStream[]>;
+  extractResults?: Record<string, string>;
+  /** When unset, defaults to one {name:'acgrip'} site so the site-search flow is exercised
+   * by default; pass `sites: []` to test the no-sites path. */
+  sites?: { name: string; baseUrl: string; searchUrlTemplate?: string }[];
+}): SubtitleFixture {
+  const targetKind = opts?.targetKind ?? 'series';
+  const targetId = opts?.targetId ?? 42;
+  const arrInstanceName = targetKind === 'movie' ? 'radarr' : 'sonarr';
+  const libraryDir = tmpDir();
+  const videoPath = join(libraryDir, 'Show - S01E05.mkv');
+  writeFileSync(videoPath, 'video');
+
+  const episodes = opts?.episodes ?? [
+    episodeResource({ id: 1, seriesId: targetId, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+  ];
+  const episodeFiles = opts?.episodeFiles ?? [
+    { id: 100, seriesId: targetId, seasonNumber: 1, relativePath: basename(videoPath), path: videoPath },
+  ];
+
+  const client = fakeArrClient({
+    series: targetKind === 'series' ? [seriesResource({ id: targetId, title: 'Frieren' })] : [],
+    movies: targetKind === 'movie' ? [movieResource({ id: targetId, title: 'Perfect Blue' })] : [],
+    episodes: targetKind === 'series' ? episodes : [],
+    episodeFiles: targetKind === 'series' ? episodeFiles : [],
+  });
+
+  const media = new FakeMediaTools({ streamsByPath: opts?.streamsByPath, extractResults: opts?.extractResults });
+  const ctx = makeCtx({
+    clients: new Map([[arrInstanceName, client]]),
+    config: ConfigSchema.parse({
+      pathMappings: [{ from: libraryDir, to: libraryDir }],
+      subtitle: {
+        languages: opts?.languages ?? ['zh-Hans'],
+        sites: opts?.sites ?? [{ name: 'acgrip', baseUrl: 'https://acg.rip' }],
+      },
+    }),
+    media,
+  });
+
+  return { ctx, client, arrInstance: arrInstanceName, targetKind, targetId, libraryDir, videoPath, media };
 }
 
 /**

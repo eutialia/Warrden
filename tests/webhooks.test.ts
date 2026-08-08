@@ -42,8 +42,10 @@ describe('handleWebhook', () => {
     const job = ctx.queue.claim()!;
     expect(job).toMatchObject({ pipeline: 'ingest', target_kind: targetKind, target_id: targetId, arr_instance: instance });
     // No `downloadId` — the payload above carries one (mimicking a real webhook body), but
-    // it's never read, so it must not survive onto the job payload.
-    expect(job.payload).toEqual({ title: target.title });
+    // it's never read, so it must not survive onto the job payload. `isUpgrade` DOES ride
+    // along: the subtitle pipeline reads it to decide whether an upgrade re-triggers sub
+    // reconciliation, so it's part of the payload contract, not a webhook-only detail.
+    expect(job.payload).toEqual({ title: target.title, isUpgrade });
     const events = ctx.events.list();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: 'webhook.received', job_id: job.id });

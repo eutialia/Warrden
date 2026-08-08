@@ -600,4 +600,34 @@ describe('app', () => {
       expect(res.status).toBe(400);
     });
   });
+
+  describe('POST /api/subtitle', () => {
+    it('enqueues a subtitle job for a known instance', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/subtitle', {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42 }),
+      });
+      expect(res.status).toBe(200);
+      const job = ctx.queue.claim()!;
+      expect(job).toMatchObject({ pipeline: 'subtitle', arr_instance: 'sonarr', target_kind: 'series', target_id: 42 });
+      expect(job.payload).toEqual({ source: 'manual' });
+    });
+
+    it('rejects an unknown instance with 400', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/subtitle', {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ arrInstance: 'radarr', targetKind: 'series', targetId: 42 }),
+      });
+      expect(res.status).toBe(400);
+      expect(ctx.queue.claim()).toBeNull();
+    });
+  });
 });

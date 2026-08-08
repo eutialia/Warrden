@@ -333,6 +333,38 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       });
       return c.json({ outcome: result.outcome });
     });
+
+    // Mirrors /api/acquire minus title/hint: a subtitle job has no search hint to carry
+    // (unlike a release pick), and its target title is re-derived from the arr by
+    // runSubtitleJob itself. Payload distinguishes a manual trigger from the automatic
+    // ingest follow-on (`source: 'ingest'`) so retry/attention links read correctly.
+    const SubtitleBodySchema = z.object({
+      arrInstance: z.string().min(1),
+      targetKind: z.enum(['series', 'movie']),
+      targetId: z.number().int(),
+    });
+
+    app.post('/api/subtitle', async (c) => {
+      const body: unknown = await c.req.json().catch(() => undefined);
+      const parsed = SubtitleBodySchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
+      }
+      const { arrInstance, targetKind, targetId } = parsed.data;
+      // Same "checked against ctx.clients, the runner's actual resolution source" rule as
+      // /api/acquire — see that route's matching comment.
+      if (!clients.has(arrInstance)) {
+        return c.json({ error: `unknown arr instance "${arrInstance}"` }, 400);
+      }
+      const result = queue.enqueue({
+        pipeline: 'subtitle',
+        arrInstance,
+        targetKind,
+        targetId,
+        payload: { source: 'manual' },
+      });
+      return c.json({ outcome: result.outcome });
+    });
   }
 
   if (ctx.db && ctx.queue && ctx.clients && ctx.events) {
