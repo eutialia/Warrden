@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import type { MediaTools } from '../../media/tools.js';
-import { parseLangTag } from '../ingest/sidecars.js';
+import type { MediaStream, MediaTools } from '../../media/tools.js';
+import { parseLangTag, sidecarStem } from '../ingest/sidecars.js';
 
 export interface VideoEntry {
   videoPath: string;
@@ -30,13 +30,16 @@ function langCovers(want: string, have: string | null): boolean {
   return h === w || h === w.split('-')[0] || w === h.split('-')[0];
 }
 
-/** Same-stem sibling subtitle files for a video, e.g. 'Show - S01E05.zh-Hans.ass'. */
+/** Same-stem sibling subtitle files for a video, e.g. 'Show - S01E05.zh-Hans.ass'.
+ * Matching uses exact stem equality (via `sidecarStem`, which strips the extension then
+ * one trailing lang token), never a prefix match — a `Show - S01E05 Special.zh-Hans.ass`
+ * must not count as covering `Show - S01E05.mkv`. */
 function externalSubsFor(videoPath: string): string[] {
   const dir = dirname(videoPath);
   if (!existsSync(dir)) return [];
-  const stem = basename(videoPath).replace(/\.[^.]+$/, '');
+  const stem = sidecarStem(basename(videoPath));
   return readdirSync(dir)
-    .filter((f) => SUB_EXTS.has(extname(f).toLowerCase()) && f.replace(/\.[^.]+$/, '').startsWith(stem))
+    .filter((f) => SUB_EXTS.has(extname(f).toLowerCase()) && sidecarStem(f) === stem)
     .map((f) => join(dir, f));
 }
 
@@ -57,7 +60,15 @@ export async function findMissingSubtitles(input: {
   const missing: MissingSubtitle[] = [];
 
   for (const video of videos) {
-    const streams = await media.probeStreams(video.videoPath);
+    // A video can vanish mid-probe (a torrent client moving files on a live share makes
+    // `probeStreams` reject): skip it rather than crash the whole reconcile or report it
+    // as missing when it's simply gone.
+    let streams: MediaStream[];
+    try {
+      streams = await media.probeStreams(video.videoPath);
+    } catch {
+      continue;
+    }
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
     video.externalSubtitles = externalSubsFor(video.videoPath);
     const externalLangs = video.externalSubtitles.map((p) => parseLangTag(basename(p)));

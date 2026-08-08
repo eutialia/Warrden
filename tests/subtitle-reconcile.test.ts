@@ -89,4 +89,39 @@ describe('findMissingSubtitles', () => {
     });
     expect(missing).toHaveLength(1);
   });
+
+  it('does not let a longer same-prefix sibling sub cover an episode', async () => {
+    const { dir, video } = videoDir();
+    writeFileSync(join(dir, 'Show - S01E05 Special.zh-Hans.ass'), 'x');
+    const missing = await findMissingSubtitles({
+      videos: [{ videoPath: video, episodeId: 1, externalSubtitles: [] }],
+      languages: ['zh-Hans'],
+      media: fakeMedia({ [video]: [] }),
+    });
+    expect(missing).toEqual([{ videoPath: video, episodeId: 1, languages: ['zh-Hans'], embeddedRefs: [] }]);
+  });
+
+  it('skips a video whose probe throws instead of crashing the reconcile', async () => {
+    const { video } = videoDir();
+    const other = join(videoDir().dir, 'Show - S02E01.mkv');
+    const throwingMedia: MediaTools = {
+      probeStreams: async (p: string) => {
+        if (p === video) throw new Error('file vanished');
+        return ZH_EMBEDDED;
+      },
+      extractSubtitle: async () => {},
+      resyncAlass: async () => {},
+      resyncFfsubsync: async () => {},
+      available: async () => ({ ffprobe: true, alass: true, ffsubsync: true }),
+    };
+    const missing = await findMissingSubtitles({
+      videos: [
+        { videoPath: video, episodeId: 1, externalSubtitles: [] },
+        { videoPath: other, episodeId: 2, externalSubtitles: [] },
+      ],
+      languages: ['zh-Hans'],
+      media: throwingMedia,
+    });
+    expect(missing).toEqual([]);
+  });
 });
