@@ -148,12 +148,13 @@ rescue to find anything too, not just bundle rescue. See the example below.
 
 ## Subtitle pipeline
 
-The subtitle pipeline covers a series' episodes with external subtitles in the configured
-languages, rescuing what the arr never fetches itself. It runs once per episode that's
-still missing any target language, triggered automatically as a follow-on to ingest for a
-series target, or by hand with `POST /api/subtitle` (`{ arrInstance, targetKind, targetId
-}`) from the dashboard or an API call. A movie subtitle job is a no-op — movie subs are
-already swept as ingest sidecars, so a movie target is never enqueued.
+The subtitle pipeline covers a target's videos with external subtitles in the configured
+languages, rescuing what the arr never fetches itself. It runs when episodes/movies still
+miss any target language, triggered automatically as a follow-on to ingest, or by hand with
+`POST /api/subtitle` (`{ arrInstance, targetKind, targetId }`) from the dashboard or an API
+call. **Series and movies both use this path** (ingest sidecars still cover packs that already
+shipped `.srt`/`.ass`; site search covers the rest). Preferred fansub groups and the pinned
+acquire release group are soft ranking hints only — never hard filters.
 
 The flow per series run:
 
@@ -183,10 +184,11 @@ Any episode with no survivor after the cache and every site, and every quarantin
 candidate, raises an **Attention** item — these are gaps the pipeline couldn't close on its
 own.
 
-**v1 scope:** the site-search agent's fetch tiers are `curl` (plain HTTP with a browser
-user-agent) and `chromium` (headless Playwright, for JS-rendered listings and bot walls that
-pass a plain request). Downloaded archives are handled in zip/tar/tar.gz only; **rar and 7z
-archives are unsupported** and treated as failed candidates in this phase.
+**v1 scope:** the site-search path uses a **protocol adapter** when the configured site
+matches one (today: **subhd.tv** — structured search, LLM pack pick, cookie-warm download,
+one automated captcha attempt), otherwise the generic HTML agent with fetch tiers `curl`
+and `chromium`. Archives: zip/tar/tar.gz natively; **rar/7z** via `7z` or `unrar` on PATH
+(the container image includes `p7zip-full`).
 
 **External tool requirements:** the pipeline shells out to `ffprobe`/`ffmpeg` (probing and
 embedded-track extraction), `alass`/`ffsubsync` (drift resync), and a headless chromium for
@@ -213,7 +215,8 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `pathMappings[].from` / `.to` | `[]` | Translates a path the arr reports (`.from`) into Warrden's own filesystem view (`.to`) — needed whenever Ingest's filesystem work sees the same files under a different mount point than the arr does. Not used by Acquire, which never touches files directly. |
 | `ingest.mountMarkers` | `[]` | Warrden-local paths that must exist before Ingest touches the filesystem — typically a canary file at the root of each mounted share. Empty means no mount verification. |
 | `ingest.downloadRoots` | `[]` | Arr-side paths of the torrent clients' download roots, used to find each torrent's own folder. Effectively required for bundle rescue (see [Ingest](#ingest) above) — without it, bundle rescue never fires. Also required for the movie no-import-history size-match fallback: without it, a history-less (or history-folder-vanished) movie's sidecar rescue never fires either. |
-| `subtitle.languages` | `[]` | Target subtitle languages for the subtitle pipeline, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). An episode is considered covered only when it carries *every* one as an embedded or external track. |
+| `subtitle.languages` | `[]` | Target subtitle languages for the subtitle pipeline, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). A video is considered covered only when it carries *every* one as an embedded or external track. |
+| `subtitle.preferredGroups` | `[]` | Soft rank boost for fansub/release group names when browsing packs. Never exclusive — if none match, search continues with other groups. |
 | `subtitle.sites[].name` | — | Unique label for a subtitle fan site the pipeline searches. |
 | `subtitle.sites[].baseUrl` | — | Base URL of the site; registered as the site's profile root. |
 | `subtitle.sites[].searchUrlTemplate` | omitted | Search-page URL with `{query}` where the URL-encoded search term goes. Optional: without it the agent must discover the search endpoint itself (recorded into the site profile on success). |

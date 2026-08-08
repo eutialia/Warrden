@@ -1,14 +1,22 @@
+import { join } from 'node:path';
 import type { AppContext } from '../context.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
 import { SubtitleRuns, type TranscriptEntry } from '../db/subtitleRuns.js';
 import type { SubtitleSiteConfig } from '../config/schema.js';
 import type { JobRow } from '../jobs/queue.js';
 import { targetEventData } from '../events/target.js';
+import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/queries.js';
 import { errorMessage } from '../util/errors.js';
+import { resolveSiteAdapter } from './adapters/registry.js';
+import { runAdapterSearch } from './adapters/run.js';
+import type { SiteAdapter } from './adapters/types.js';
 import { runAgentLoop, TierBlockedError } from './loop.js';
 import { makeTier, TIER_ORDER, type FetchTier } from './tiers.js';
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
+/** After this long on a higher tier without probing cheaper ones, start one rung down so
+ * sites that dropped a bot wall can decay back toward curl (design: tier decay). */
+const TIER_DECAY_MS = 7 * 24 * 3_600_000;
 
 /** Cooldown after repeated site failures: exponential on the site's configured base,
  * capped at 6h — a wall that dropped 10 minutes ago shouldn't be retried for a day, but a
@@ -17,17 +25,41 @@ export function failBackoffMs(failCount: number, baseSeconds = 30): number {
   return Math.min(2 ** failCount * baseSeconds * 1000, MAX_BACKOFF_MS);
 }
 
+/**
+ * Ladder start index: remembered tier, optionally decayed one cheaper rung when the last
+ * success is older than `TIER_DECAY_MS` so walls that dropped can be rediscovered without
+ * a dashboard clear.
+ */
+export function tierStartIndex(
+  lastWorkingTier: string | null,
+  lastSuccessAt: number | null,
+  now = Date.now(),
+): number {
+  const remembered = TIER_ORDER.indexOf(lastWorkingTier as (typeof TIER_ORDER)[number]);
+  const floor = Math.max(0, remembered);
+  if (floor === 0) return 0;
+  if (lastSuccessAt !== null && now - lastSuccessAt >= TIER_DECAY_MS) {
+    return floor - 1;
+  }
+  return floor;
+}
+
 interface TierFactory {
   make(t: AccessTier): FetchTier;
 }
 
 const REAL_TIERS: TierFactory = { make: makeTier };
 
+export interface SearchSiteDeps {
+  tiers?: TierFactory;
+  /** Inject adapters in tests; production uses the built-in registry. */
+  resolveAdapter?: (site: SubtitleSiteConfig) => SiteAdapter | null;
+}
+
 /**
  * Runs the site-search agent for one site with full access-ladder orchestration: cooldown
- * check, start at the remembered tier, escalate one rung on TierBlockedError, and persist
- * every outcome back into the site profile (tier floor, discovered search patterns,
- * failure backoff). Returns the downloaded file + its source URL, or null when the site
+ * check, optional protocol adapter (parse-then-pick), then generic HTML loop with tier
+ * escalation. Returns the downloaded file + its source URL, or null when the site
  * couldn't produce one this run — never throws (a broken site is a health event, not a job
  * failure). The transcript lands in `subtitle_runs` and streams live as
  * `subtitle.transcript` events.
@@ -36,14 +68,31 @@ export async function searchSite(
   ctx: AppContext,
   job: JobRow,
   site: SubtitleSiteConfig,
-  query: string,
+  query: string | SearchHints,
   destDir: string,
-  tiers: TierFactory = REAL_TIERS,
+  tiersOrDeps: TierFactory | SearchSiteDeps = REAL_TIERS,
 ): Promise<{ filePath: string; url: string } | null> {
+  // Back-compat: tests pass a TierFactory as the 6th arg; production may pass deps.
+  const deps: SearchSiteDeps =
+    'make' in tiersOrDeps && typeof tiersOrDeps.make === 'function'
+      ? { tiers: tiersOrDeps }
+      : (tiersOrDeps as SearchSiteDeps);
+  const tiers = deps.tiers ?? REAL_TIERS;
+  const resolveAdapter = deps.resolveAdapter ?? resolveSiteAdapter;
+
   const profiles = new SiteProfiles(ctx.db);
   const runs = new SubtitleRuns(ctx.db);
   profiles.upsert({ name: site.name, baseUrl: site.baseUrl });
   const profile = profiles.get(site.name)!;
+  const hints: SearchHints =
+    typeof query === 'string'
+      ? buildSearchHints({
+          title: query,
+          languages: ctx.config.subtitle.languages,
+          preferredGroups: ctx.config.subtitle.preferredGroups,
+        })
+      : query;
+  const primaryQuery = hints.title;
 
   // Cooldown only applies while fail_count > 0. Success (and the dashboard "reset
   // failures" path) set fail_count back to 0; without this guard a stale last_failure_at
@@ -64,9 +113,9 @@ export async function searchSite(
   }
 
   const runId = runs.start(job.id, site.name);
-  // Start at the remembered tier when it's a v1 rung; unimplemented seams (camoufox/remote)
-  // and a null floor both fall back to the cheapest implemented tier.
-  const startIdx = Math.max(0, TIER_ORDER.indexOf(profile.last_working_tier as (typeof TIER_ORDER)[number]));
+  // Start at the remembered tier (with optional decay); unimplemented seams fall back via
+  // indexOf === -1 → max(0, -1) === 0 in tierStartIndex.
+  const startIdx = tierStartIndex(profile.last_working_tier, profile.last_success_at);
   const activeTiers: FetchTier[] = [];
 
   /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
@@ -96,6 +145,44 @@ export async function searchSite(
   };
 
   try {
+    // Protocol adapter first (subhd, …): structured search + pick + download, one captcha try.
+    const adapter = resolveAdapter(site);
+    if (adapter) {
+      try {
+        const adapterOut = await runAdapterSearch({
+          adapter,
+          llm: ctx.llm,
+          hints,
+          destDir,
+          workDir: join(ctx.dataDir, 'subtitle', 'adapter', site.name, String(job.id)),
+          onTranscript: onTranscriptEvent,
+        });
+        if (adapterOut) {
+          runs.finish(runId, 'done');
+          profiles.update(site.name, {
+            lastWorkingTier: 'curl',
+            lastSuccessAt: Date.now(),
+            failCount: 0,
+            lastFailureAt: null,
+          });
+          return { filePath: adapterOut.filePath, url: adapterOut.url };
+        }
+        onTranscriptEvent({
+          ts: Date.now(),
+          tier: 'curl',
+          action: 'adapter-fallback',
+          detail: `${adapter.id}: no download — falling through to generic agent`,
+        });
+      } catch (err) {
+        onTranscriptEvent({
+          ts: Date.now(),
+          tier: 'curl',
+          action: 'adapter-fallback',
+          detail: `${adapter.id}: error ${errorMessage(err)} — falling through to generic agent`,
+        });
+      }
+    }
+
     for (let i = startIdx; i < TIER_ORDER.length; i++) {
       const tierName = TIER_ORDER[i]!;
       const tier = tiers.make(tierName);
@@ -106,7 +193,8 @@ export async function searchSite(
           tier,
           site,
           profile,
-          query,
+          query: primaryQuery,
+          hints,
           destDir,
           maxSteps: ctx.config.browser.stepBudget,
           onTranscript: onTranscriptEvent,
@@ -114,8 +202,6 @@ export async function searchSite(
 
         if (outcome.kind === 'downloaded') {
           runs.finish(runId, 'done');
-          // Record a newly discovered search URL that isn't already known and isn't the
-          // configured template, capping the learned list at 5.
           const searchUrl = outcome.searchUrl;
           const isNew =
             searchUrl !== null &&

@@ -7,16 +7,23 @@ import { PlacedFiles } from '../../db/placedFiles.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
 import { mapArrPath } from '../../fs/paths.js';
+import type { ArrApi } from '../../arr/types.js';
 import type { JobRow } from '../../jobs/queue.js';
-import { parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
+import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
 import type { MediaTools } from '../../media/tools.js';
-import { resolveTargetTitle } from '../targetTitle.js';
+import { resolveTargetMeta } from '../targetTitle.js';
 import { assertMounted } from '../mounts.js';
 import { buildSidecarName, matchSidecarDeterministic } from '../ingest/sidecars.js';
 import { placeBlocked } from '../placeGuard.js';
-import { entriesForFiles, extractArchive, isSupportedArchive, UnsupportedArchiveError } from './archives.js';
+import {
+  entriesForFiles,
+  extractArchive,
+  isIngestibleSubtitlePayload,
+  UnsupportedArchiveError,
+} from './archives.js';
 import { assessDrift } from './drift.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
+import { buildSearchHints } from './queries.js';
 import { findMissingSubtitles, langCovers } from './reconcile.js';
 
 /** Injectable seams for `runSubtitleJob` — same injectable-factory pattern as `searchSite`'s
@@ -44,28 +51,24 @@ type CandidatePlan =
   | { kind: 'quarantine' };
 
 /**
- * The subtitle pipeline runner for a series target. A movie target is a no-op complete —
- * movie subs are already swept as ingest sidecars, so there's nothing for this pipeline to
- * reconcile (and ingest never even enqueues one). For a series it: mounts-guard, reconciles
- * which episodes still lack the target languages via `findMissingSubtitles`, checks the
- * per-series archive cache, searches each configured site for what's still missing, and
+ * The subtitle pipeline runner for a series or movie target. Mounts-guard, reconciles
+ * which videos still lack the target languages via `findMissingSubtitles`, checks the
+ * per-target archive cache, searches each configured site for what's still missing, and
  * drift-gates + places every candidate with full `placed_files` provenance.
  *
- * The drift gate (item 6 of the brief) decides per candidate whether to place as-is
- * (`in-sync`), resync it (alass then ffsubsync, re-assessing after each) and place, or
- * quarantine it. When the episode has no embedded reference track, the candidate is placed
- * with `drift: 'unverified'` — VAD/whisper verification stays the spec's reserved future
- * tier for that case. Any episode with no survivor after cache + every site raises
+ * Movies: one video slot (the arr's movie file); archive files map onto that single slot.
+ * Series: per-episode matching as before. Ingest sidecars still cover packs that already
+ * shipped `.srt`/`.ass`; site search covers the rest (design: movie no-op was a bug).
+ *
+ * The drift gate decides per candidate whether to place as-is (`in-sync`), resync
+ * (alass then ffsubsync) and place, or quarantine. No embedded reference → place
+ * `unverified`. Any video with no survivor after cache + every site raises
  * `subtitle.unresolved`.
  */
 export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubtitleDeps = {}): Promise<void> {
   const client = ctx.clients.get(job.arr_instance);
   if (!client) {
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
-  }
-
-  if (job.target_kind === 'movie') {
-    return; // no-op — a movie job is a true no-op even if a mount is missing (see module doc)
   }
 
   assertMounted(ctx, job, 'subtitle');
@@ -76,7 +79,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
 
   // This run's own scratch under dataDir: reference extractions + resync outputs + raw
   // downloads. Everything under here is ours to delete in the finally below; the archive
-  // cache (dataDir/subtitle/cache) and quarantine (dataDir/quarantine) live OUTSIDE it so they persist.
+  // cache (dataDir/subtitle/cache) and quarantine live OUTSIDE it so they persist.
   const runDir = join(ctx.dataDir, 'subtitle', 'runs', String(job.id));
   mkdirSync(runDir, { recursive: true });
   const refDir = join(runDir, 'refs');
@@ -90,29 +93,15 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   const refCache = new Map<string, string>();
 
   try {
-    const seriesTitle = await resolveTargetTitle(client, job);
-    const [episodes, episodeFiles] = await Promise.all([client.listEpisodes(job.target_id), client.listEpisodeFiles(job.target_id)]);
-    const byFileId = new Map(episodeFiles.map((f) => [f.id, f]));
-
-    const targets: EpisodeTarget[] = episodes
-      .filter((e) => e.hasFile && byFileId.has(e.episodeFileId))
-      .map((e) => {
-        const file = byFileId.get(e.episodeFileId)!;
-        return {
-          episodeId: e.id,
-          seasonNumber: e.seasonNumber,
-          episodeNumber: e.episodeNumber,
-          videoPath: mapArrPath(ctx.config.pathMappings, file.path),
-          missingLanguages: [],
-          embeddedRefs: [],
-        };
-      });
+    const meta = await resolveTargetMeta(client, job);
+    const title = meta.title;
+    const targets = await listVideoTargets(ctx, client, job);
 
     if (targets.length === 0) {
       ctx.events.append({
         kind: 'subtitle.complete',
         jobId: job.id,
-        message: `No on-disk episodes for series "${seriesTitle}" to subtitle`,
+        message: `No on-disk videos for "${title}" to subtitle`,
         data: targetEventData(job, { counts: { missing: 0, placed: 0 } }),
       });
       return;
@@ -135,7 +124,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       ctx.events.append({
         kind: 'subtitle.complete',
         jobId: job.id,
-        message: `Nothing missing — every episode already has subtitles for ${describeLanguages(ctx.config.subtitle.languages)}`,
+        message: `Nothing missing — every video already has subtitles for ${describeLanguages(ctx.config.subtitle.languages)}`,
         data: targetEventData(job, { counts: { missing: 0, placed: 0 } }),
       });
       return;
@@ -144,7 +133,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     ctx.events.append({
       kind: 'subtitle.missing',
       jobId: job.id,
-      message: `${missing.length} episode(s) missing subtitles for ${describeLanguages(ctx.config.subtitle.languages)}`,
+      message: `${missing.length} video(s) missing subtitles for ${describeLanguages(ctx.config.subtitle.languages)}`,
       data: targetEventData(job, {
         counts: { missing: missing.length, byEpisode: missing.map((m) => m.episodeId) },
       }),
@@ -152,42 +141,73 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
 
     // Cache pass first — a previously-downloaded pack can cover a mid-season episode that
     // landed after the pack was fetched, avoiding a re-download.
-    for (const row of cache.forTarget(job.arr_instance, 'series', job.target_id)) {
+    for (const row of cache.forTarget(job.arr_instance, job.target_kind, job.target_id)) {
       if (missing.length === 0) break;
-      // matchArchiveRow drops fully-resolved episodes from `missing` itself.
-      const resolved = await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, undefined);
+      const resolved = await matchArchiveRow(ctx, job, row, missing, title, media, placedFiles, refCache, refDir, rawDir, undefined);
       if (resolved.length > 0) {
         ctx.events.append({
           kind: 'subtitle.cache-hit',
           jobId: job.id,
-          message: `Covered ${resolved.length} episode(s) from the cached archive "${basename(row.path)}"`,
+          message: `Covered ${resolved.length} video(s) from the cached archive "${basename(row.path)}"`,
           data: targetEventData(job, { count: resolved.length, episodeIds: resolved, archive: row.path }),
         });
       }
     }
 
-    // Still-missing -> site search, one site at a time in configured order, stopping when
-    // nothing is missing.
-    await siteSearchPass(ctx, job, seriesTitle, missing, media, placedFiles, refCache, refDir, rawDir, cache, deps);
+    await siteSearchPass(ctx, job, title, meta.alternates, missing, media, placedFiles, refCache, refDir, rawDir, cache, deps);
 
-    // Any episode with no survivor after cache + every site gets its own attention item.
     for (const t of missing) {
+      const label =
+        job.target_kind === 'movie'
+          ? title
+          : `S${t.seasonNumber}E${t.episodeNumber} (${title})`;
       ctx.events.append({
         kind: 'subtitle.unresolved',
         level: 'attention',
         jobId: job.id,
-        message: `No subtitle found for S${t.seasonNumber}E${t.episodeNumber} (${seriesTitle})`,
-        // One row per episode, not one collapsing row for the whole series: a season of 12
-        // missing episodes is 12 distinct sub-target failures. String(episodeId) is the
-        // de-dup discriminator (see targetEventData/AttentionItems docs).
+        message: `No subtitle found for ${label}`,
         data: targetEventData(job, { episodeId: t.episodeId, dedupeKey: String(t.episodeId) }),
       });
     }
   } finally {
-    // Tear down this run's scratch (references, resync outputs, raw downloads). Quarantine
-    // and archive-cache state live outside runDir and are deliberately left alone.
     rmSync(runDir, { recursive: true, force: true });
   }
+}
+
+/** Series: every hasFile episode with an episode file. Movie: the single movie file, if any.
+ * `episodeId` for movies is the movie id so resolved tracking / attention de-dup still work. */
+async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): Promise<EpisodeTarget[]> {
+  if (job.target_kind === 'movie') {
+    const movieFiles = await client.listMovieFiles(job.target_id);
+    const file = movieFiles[0];
+    if (!file) return [];
+    return [
+      {
+        episodeId: job.target_id,
+        seasonNumber: 0,
+        episodeNumber: 0,
+        videoPath: mapArrPath(ctx.config.pathMappings, file.path),
+        missingLanguages: [],
+        embeddedRefs: [],
+      },
+    ];
+  }
+
+  const [episodes, episodeFiles] = await Promise.all([client.listEpisodes(job.target_id), client.listEpisodeFiles(job.target_id)]);
+  const byFileId = new Map(episodeFiles.map((f) => [f.id, f]));
+  return episodes
+    .filter((e) => e.hasFile && byFileId.has(e.episodeFileId))
+    .map((e) => {
+      const file = byFileId.get(e.episodeFileId)!;
+      return {
+        episodeId: e.id,
+        seasonNumber: e.seasonNumber,
+        episodeNumber: e.episodeNumber,
+        videoPath: mapArrPath(ctx.config.pathMappings, file.path),
+        missingLanguages: [],
+        embeddedRefs: [],
+      };
+    });
 }
 
 function describeLanguages(langs: string[]): string {
@@ -256,13 +276,27 @@ async function matchArchiveRow(
   const unmatchedPaths: string[] = [];
   for (const entry of row.files) {
     if (missing.length === 0) break;
-    const t = matchDeterministic(missing, entry);
+    const t = matchDeterministic(missing, entry, job.target_kind === 'movie');
     if (t) {
       const placedLang = await driftAndPlace(ctx, job, row, entry, t, media, placedFiles, refCache, refDir, rawDir, site);
       if (placedLang !== undefined) notePlacement(missing, resolved, t, placedLang);
     } else {
       unmatchedPaths.push(entry.path);
     }
+  }
+
+  // Movies: a single video slot — every remaining archive file targets that one video
+  // (lang filtering is via notePlacement shrinking missingLanguages).
+  if (job.target_kind === 'movie' && unmatchedPaths.length > 0 && missing[0]) {
+    const only = missing[0];
+    for (const path of unmatchedPaths) {
+      // notePlacement may have removed `only` from `missing` once every language is filled.
+      if (!missing.includes(only)) break;
+      const entry = entryByPath.get(path)!;
+      const placedLang = await driftAndPlace(ctx, job, row, entry, only, media, placedFiles, refCache, refDir, rawDir, site);
+      if (placedLang !== undefined) notePlacement(missing, resolved, only, placedLang);
+    }
+    return resolved;
   }
 
   if (unmatchedPaths.length > 0 && missing.length > 0) {
@@ -302,8 +336,9 @@ async function matchArchiveRow(
  * parseEpisodeRef would misread as a second number and treat as ambiguous — so it's stripped
  * before matching, exactly as `entriesForFiles` does when it pre-annotates `episodeRef`.
  * Matching reuses ingest's `matchSidecarDeterministic` (same season/episode/absolute rules).
- * Returns null when nothing matches. */
-function matchDeterministic(missing: EpisodeTarget[], entry: { path: string }): EpisodeTarget | null {
+ * Movies with a single missing slot always match that slot. Returns null when nothing matches. */
+function matchDeterministic(missing: EpisodeTarget[], entry: { path: string }, isMovie: boolean): EpisodeTarget | null {
+  if (isMovie && missing.length === 1) return missing[0]!;
   const bareName = basename(entry.path).replace(/^\d+-/, '');
   const hit = matchSidecarDeterministic(
     bareName,
@@ -375,7 +410,7 @@ async function decideCandidate(
     return { kind: 'place', path: entry.path, lang: entry.lang, offsetMs: 0, drift: 'unverified' };
   }
 
-  const candCues = parseSubtitleCues(readFileSync(entry.path, 'utf8'));
+  const candCues = parseSubtitleCues(decodeSubtitleBytes(readFileSync(entry.path)));
   const first = assessDrift(refCues, candCues);
 
   if (first.state === 'in-sync') {
@@ -417,7 +452,7 @@ async function referenceCues(t: EpisodeTarget, media: MediaTools, refCache: Map<
       return null;
     }
   }
-  const cues = parseSubtitleCues(readFileSync(refPath, 'utf8'));
+  const cues = parseSubtitleCues(decodeSubtitleBytes(readFileSync(refPath)));
   return cues.length > 0 ? cues : null;
 }
 
@@ -453,7 +488,7 @@ async function tryResyncPipeline(
       // alass failed (not installed despite availability, or errored) -> try ffsubsync.
     }
     if (alassOk) {
-      const afterAlass = assessDrift(refCues, parseSubtitleCues(readFileSync(alassOut, 'utf8')));
+      const afterAlass = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(alassOut))));
       if (afterAlass.state === 'in-sync') {
         return { kind: 'place', path: alassOut, lang, offsetMs: afterAlass.offsetMs, drift: 'resynced' };
       }
@@ -468,7 +503,7 @@ async function tryResyncPipeline(
   } catch {
     return null; // ffsubsync failed -> caller quarantines
   }
-  const afterFf = assessDrift(refCues, parseSubtitleCues(readFileSync(ffOut, 'utf8')));
+  const afterFf = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(ffOut))));
   if (afterFf.state === 'in-sync') {
     return { kind: 'place', path: ffOut, lang, offsetMs: afterFf.offsetMs, drift: 'resynced' };
   }
@@ -553,7 +588,7 @@ function placeSubtitle(
   atomicCopy(sourcePath, targetPath);
   placedFiles.upsert({
     arrInstance: job.arr_instance,
-    targetKind: 'series',
+    targetKind: job.target_kind,
     targetId: job.target_id,
     kind: 'subtitle',
     placedPath: targetPath,
@@ -596,6 +631,7 @@ async function siteSearchPass(
   ctx: AppContext,
   job: JobRow,
   seriesTitle: string,
+  alternates: string[],
   missing: EpisodeTarget[],
   media: MediaTools,
   placedFiles: PlacedFiles,
@@ -609,15 +645,23 @@ async function siteSearchPass(
   const sites = ctx.config.subtitle.sites;
   if (sites.length === 0) return; // missing-resolution emissions happen back in runSubtitleJob
 
+  const hints = buildSearchHints({
+    title: seriesTitle,
+    languages: ctx.config.subtitle.languages,
+    preferredGroups: ctx.config.subtitle.preferredGroups,
+    alternates,
+  });
+
   for (const site of sites) {
     if (missing.length === 0) break;
 
-    const download = await search(ctx, job, site, seriesTitle, rawDir);
+    const download = await search(ctx, job, site, hints, rawDir);
     if (!download) continue; // site produced nothing this run (cooldown or no match)
 
-    if (!isSupportedArchive(download.filePath)) continue;
+    // Archives (zip/tar/rar/7z) or a lone .srt/.ass/.ssa — subhd sometimes serves single files.
+    if (!isIngestibleSubtitlePayload(download.filePath)) continue;
 
-    // Extract fresh into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
+    // Extract/copy into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
     // the pack without re-downloading. Keyed uniquely so ArchiveCache's (target, path) upsert
     // refreshes the same row rather than piling up duplicates.
     const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${site.name}-${basename(download.filePath)}`);
@@ -633,7 +677,7 @@ async function siteSearchPass(
     const entries = entriesForFiles(files);
     cache.upsert({
       arrInstance: job.arr_instance,
-      targetKind: 'series',
+      targetKind: job.target_kind,
       targetId: job.target_id,
       sourceUrl: download.url,
       path: cacheDir,
@@ -643,7 +687,7 @@ async function siteSearchPass(
     const row: ArchiveCacheRow = {
       id: -1,
       arr_instance: job.arr_instance,
-      target_kind: 'series',
+      target_kind: job.target_kind,
       target_id: job.target_id,
       source_url: download.url,
       path: cacheDir,

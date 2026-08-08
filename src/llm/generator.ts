@@ -7,12 +7,19 @@ import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import type { z } from 'zod';
 import type { Config, Provider } from '../config/schema.js';
 import { errorMessage } from '../util/errors.js';
+import { planPromptCache } from './promptCache.js';
 
 export interface GenerateOpts<T> {
   callsite: string; // e.g. 'release-pick'
   schema: z.ZodType<T>;
   system: string;
   prompt: string;
+  /**
+   * Opt into provider-aware prompt caching for multi-step loops (site-search / adapter pick)
+   * where the system prefix is stable and the user half grows. Wiring differs by provider
+   * (see `planPromptCache`) — not "Anthropic-only, ignore elsewhere".
+   */
+  promptCache?: boolean;
 }
 
 export interface StructuredGenerator {
@@ -130,11 +137,25 @@ export class AiSdkGenerator implements StructuredGenerator {
       return await withFallback<T>(
         async (ref) => {
           const model = createModel(this.cfg, ref, opts.callsite);
+          const cache = planPromptCache(opts.promptCache === true, ref.provider, `warrden:${opts.callsite}`);
+          // System-as-message: stable prefix for automatic caches (OpenAI/etc.) and a place
+          // to hang explicit breakpoints (Anthropic / OpenRouter→Claude). User half varies.
           const { object } = await generateObject({
             model,
             schema: opts.schema,
-            system: opts.system,
-            prompt: opts.prompt,
+            messages: [
+              {
+                role: 'system',
+                content: opts.system,
+                ...(cache.systemProviderOptions
+                  ? { providerOptions: cache.systemProviderOptions }
+                  : {}),
+              },
+              { role: 'user', content: opts.prompt },
+            ],
+            ...(cache.callProviderOptions
+              ? { providerOptions: cache.callProviderOptions }
+              : {}),
             // Our own primary/primary/fallback/fallback ladder owns the retry count;
             // the AI SDK's default internal retries would otherwise multiply each
             // ladder slot into up to 3 provider calls of its own.

@@ -86,6 +86,8 @@ export default function ConfigPage() {
   // Languages kept as newline-delimited text, exactly like `picking.tags` above — same UX
   // (one per line, trim/drop-blank on save) and the same "don't coerce mid-edit" reason.
   const [languagesText, setLanguagesText] = useState('');
+  // Soft preferred fansub groups — same newline list UX as languages/tags.
+  const [preferredGroupsText, setPreferredGroupsText] = useState('');
   // Browser-agent numbers, same free-form-text-then-parse treatment as the picking number
   // fields above: a momentarily empty field while retyping must never silently save as 0.
   const [stepBudgetText, setStepBudgetText] = useState('');
@@ -109,6 +111,7 @@ export default function ConfigPage() {
     setMaxSizeMBText(String(c.picking.maxSizeMB));
     setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
     setLanguagesText(c.subtitle.languages.join('\n'));
+    setPreferredGroupsText((c.subtitle.preferredGroups ?? []).join('\n'));
     setStepBudgetText(String(c.browser.stepBudget));
     setSiteCooldownText(String(c.browser.siteCooldownSeconds));
     setLlmKeyFields({
@@ -309,6 +312,11 @@ export default function ConfigPage() {
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
 
+    const preferredGroups = preferredGroupsText
+      .split('\n')
+      .map((g) => g.trim())
+      .filter((g) => g.length > 0);
+
     // Drop subtitle sites left with a blank name or baseUrl — same intent as
     // `trimAndDropBlankMappings`: a row missing either side can never match anything
     // (the schema's `.min(1)` on both would reject the whole save anyway). `searchUrlTemplate`
@@ -333,7 +341,7 @@ export default function ConfigPage() {
         mountMarkers: trimAndDropBlank(config.ingest.mountMarkers),
         downloadRoots: trimAndDropBlank(config.ingest.downloadRoots),
       },
-      subtitle: { languages, sites },
+      subtitle: { languages, preferredGroups, sites },
       browser: { stepBudget, siteCooldownSeconds },
       llm: { ...config.llm, profiles, keys: buildLlmKeys() },
     };
@@ -497,15 +505,25 @@ export default function ConfigPage() {
         <CardHeader>
           <CardTitle>Subtitles</CardTitle>
           <CardDescription>
-            Languages an episode "has subs" for once it carries every one (embedded or external).
-            Sites are tried in order; the agent records discovered search endpoints into each
-            site's profile (see the Sites page).
+            Languages a video "has subs" for once it carries every one (embedded or external),
+            for series and movies. Preferred fansub groups are a soft rank boost only — if none
+            appear, search continues. Sites are tried in order; the agent records discovered
+            search endpoints into each site's profile (see the Sites page).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">Languages (one per line)</label>
             <Textarea rows={3} value={languagesText} onChange={(e) => setLanguagesText(e.target.value)} />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium">Preferred fansub groups (one per line, soft)</label>
+            <Textarea
+              rows={2}
+              value={preferredGroupsText}
+              onChange={(e) => setPreferredGroupsText(e.target.value)}
+              placeholder="Airota&#10;Sumisora&#10;VCB-Studio"
+            />
           </div>
           <div>
             <label className="mb-2 block text-sm font-medium">Sites</label>

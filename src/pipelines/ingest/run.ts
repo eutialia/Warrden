@@ -175,21 +175,18 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
 
   await rescueStuckImports(ctx, job, client, target, assessment, bundleFolders);
 
-  // Kick off the subtitle pipeline for a series target once ingest has settled the import
-  // (movie subtitle jobs are no-ops, so we don't even enqueue one — see run.ts's own
-  // doc). The enqueue coalesces into a pending/running subtitle job for the same target
+  // Kick off the subtitle pipeline once ingest has settled the import (series and movies).
+  // The enqueue coalesces into a pending/running subtitle job for the same target
   // (queue.ts's singleton rule), so a manual trigger and this automatic trigger race
   // cleanly. `source: 'ingest'` lets the subtitle runner (and any attention/retry that
   // links back) tell automatic runs from a manual dashboard one.
-  if (job.target_kind === 'series') {
-    ctx.queue.enqueue({
-      pipeline: 'subtitle',
-      targetKind: job.target_kind,
-      targetId: job.target_id,
-      arrInstance: job.arr_instance,
-      payload: { source: 'ingest' },
-    });
-  }
+  ctx.queue.enqueue({
+    pipeline: 'subtitle',
+    targetKind: job.target_kind,
+    targetId: job.target_id,
+    arrInstance: job.arr_instance,
+    payload: { source: 'ingest' },
+  });
 }
 
 /** Whether the file at `path` is exactly `size` bytes — `false` on ANY stat failure

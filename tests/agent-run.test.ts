@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { searchSite, failBackoffMs } from '../src/agent/run.js';
+import { searchSite, failBackoffMs, tierStartIndex } from '../src/agent/run.js';
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { SiteProfiles, type AccessTier } from '../src/db/siteProfiles.js';
 import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
@@ -44,6 +44,21 @@ describe('failBackoffMs', () => {
     [10, 6 * 3_600_000], // capped at 6h
   ])('failCount %i -> %i ms', (n, expected) => {
     expect(failBackoffMs(n)).toBe(expected);
+  });
+});
+
+describe('tierStartIndex', () => {
+  const week = 7 * 24 * 3_600_000;
+  it('starts at curl when no floor is remembered', () => {
+    expect(tierStartIndex(null, null)).toBe(0);
+  });
+  it('starts at the remembered chromium floor when success is recent', () => {
+    const now = 1_000_000_000_000;
+    expect(tierStartIndex('chromium', now - 1000, now)).toBe(1);
+  });
+  it('decays one cheaper rung when last success is older than a week', () => {
+    const now = 1_000_000_000_000;
+    expect(tierStartIndex('chromium', now - week - 1, now)).toBe(0);
   });
 });
 

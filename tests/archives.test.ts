@@ -3,7 +3,15 @@ import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { create as tarCreate } from 'tar';
 import { describe, expect, it } from 'vitest';
-import { entriesForFiles, extractArchive, isSupportedArchive, UnsupportedArchiveError } from '../src/pipelines/subtitle/archives.js';
+import {
+  entriesForFiles,
+  extractArchive,
+  isIngestibleSubtitlePayload,
+  isLooseSubtitleFile,
+  isSevenZipFamily,
+  isSupportedArchive,
+  UnsupportedArchiveError,
+} from '../src/pipelines/subtitle/archives.js';
 import { tmpDir } from './helpers.js';
 
 function makeZip(files: Record<string, string>): string {
@@ -18,8 +26,8 @@ describe('isSupportedArchive', () => {
   it.each([
     ['a.zip', true], ['a.ZIP', true],
     ['a.tar', true], ['a.tar.gz', true], ['a.tgz', true],
-    // known archive types that v1 cannot extract
-    ['a.rar', false], ['a.7z', false],
+    // rar/7z are attempted via 7z/unrar when present
+    ['a.rar', true], ['a.7z', true],
     ['a.ass', false], ['a.mkv', false], ['a.zipx', false],
   ])('%s -> %s', (name, expected) => expect(isSupportedArchive(name)).toBe(expected));
 });
@@ -36,6 +44,37 @@ describe('extractArchive', () => {
     const files = await extractArchive(zipPath, dest);
     expect(files).toHaveLength(2);
     expect(files.every((f) => f.endsWith('.ass'))).toBe(true);
+  });
+
+  it('skips 0-byte placeholder subtitle files', async () => {
+    const zipPath = makeZip({
+      'Show - 01.ass': 'dialogue',
+      'Show - 02.ass': '',
+    });
+    const dest = tmpDir();
+    const files = await extractArchive(zipPath, dest);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/Show - 01\.ass$/);
+  });
+
+  it('materializes a loose .ass download as a one-file pack', async () => {
+    expect(isLooseSubtitleFile('x.ass')).toBe(true);
+    expect(isIngestibleSubtitlePayload('x.ass')).toBe(true);
+    const src = join(tmpDir(), 'Show.ass');
+    writeFileSync(src, 'dialogue');
+    const dest = tmpDir();
+    const files = await extractArchive(src, dest);
+    expect(files).toEqual([join(dest, '0-Show.ass')]);
+  });
+
+  it('classifies rar/7z as seven-zip family and throws when no extractor binary works', async () => {
+    expect(isSevenZipFamily('a.rar')).toBe(true);
+    expect(isSevenZipFamily('a.7z')).toBe(true);
+    // A non-archive path that only looks like rar: extract still attempts external tool
+    // and surfaces UnsupportedArchiveError when 7z/unrar cannot open it (or are missing).
+    const bogus = join(tmpDir(), 'empty.rar');
+    writeFileSync(bogus, 'not-a-real-rar');
+    await expect(extractArchive(bogus, tmpDir())).rejects.toBeInstanceOf(UnsupportedArchiveError);
   });
 
   /**
@@ -83,7 +122,7 @@ describe('extractArchive', () => {
     expect(files).toEqual(expect.arrayContaining([join(dest, '0-01.ass'), join(dest, '1-01.ass')]));
   });
 
-  it('throws UnsupportedArchiveError for rar/7z', async () => {
+  it('throws UnsupportedArchiveError for missing or unreadable rar/7z', async () => {
     await expect(extractArchive('/x/pack.rar', tmpDir())).rejects.toBeInstanceOf(UnsupportedArchiveError);
     await expect(extractArchive('/x/pack.7z', tmpDir())).rejects.toBeInstanceOf(UnsupportedArchiveError);
   });

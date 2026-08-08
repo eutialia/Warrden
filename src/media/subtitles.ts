@@ -67,3 +67,41 @@ export function parseSubtitleCues(content: string): SubtitleCue[] {
   const cues = /\[events\]/i.test(content) ? parseAss(content) : parseSrt(content);
   return cues.sort((a, b) => a.startMs - b.startMs);
 }
+
+/**
+ * Decodes subtitle file bytes to a UTF-16/UTF-8/GBK string before cue parsing.
+ * Chinese fansub packs routinely ship UTF-16-LE .ass (CASO-style) or GBK text; reading
+ * those as naive UTF-8 yields garbage and an empty cue table, which the drift gate then
+ * treats as unscorable/unverified for the wrong reason.
+ */
+export function decodeSubtitleBytes(raw: Buffer): string {
+  if (raw.length === 0) return '';
+  // UTF-16 LE/BE BOM
+  if (raw.length >= 2 && raw[0] === 0xff && raw[1] === 0xfe) {
+    return raw.subarray(2).toString('utf16le');
+  }
+  if (raw.length >= 2 && raw[0] === 0xfe && raw[1] === 0xff) {
+    // Node has no utf16be; swap pairs into LE.
+    const swapped = Buffer.alloc(raw.length - 2);
+    for (let i = 2; i + 1 < raw.length; i += 2) {
+      swapped[i - 2] = raw[i + 1]!;
+      swapped[i - 1] = raw[i]!;
+    }
+    return swapped.toString('utf16le');
+  }
+  // UTF-8 BOM
+  if (raw.length >= 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf) {
+    return raw.subarray(3).toString('utf8');
+  }
+  const utf8 = raw.toString('utf8');
+  // If UTF-8 produced replacement chars and doesn't look like a subtitle, try GBK (Node ICU).
+  if (utf8.includes('\uFFFD') && !/\[events\]/i.test(utf8) && !/-->/.test(utf8)) {
+    try {
+      return new TextDecoder('gbk').decode(raw);
+    } catch {
+      // ICU without gbk — keep utf8 best-effort
+    }
+  }
+  return utf8;
+}
+

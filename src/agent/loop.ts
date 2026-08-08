@@ -4,6 +4,7 @@ import type { StructuredGenerator } from '../llm/generator.js';
 import type { FetchTier } from './tiers.js';
 import type { SiteProfileRow } from '../db/siteProfiles.js';
 import type { TranscriptEntry } from '../db/subtitleRuns.js';
+import { formatSearchHintsForPrompt, type SearchHints } from '../pipelines/subtitle/queries.js';
 
 const CALLSITE = 'site-search';
 const OBSERVATION_CAP = 4000;
@@ -41,20 +42,26 @@ export async function runAgentLoop(input: {
   tier: FetchTier;
   site: { name: string; baseUrl: string; searchUrlTemplate?: string };
   profile: SiteProfileRow;
+  /** Primary title; also `hints.title` when hints are provided. */
   query: string;
+  hints?: SearchHints;
   destDir: string;
   maxSteps: number;
   onTranscript: (e: TranscriptEntry) => void;
 }): Promise<AgentOutcome> {
-  const { llm, tier, site, profile, query, destDir, maxSteps, onTranscript } = input;
+  const { llm, tier, site, profile, destDir, maxSteps, onTranscript } = input;
+  const query = input.hints?.title ?? input.query;
+  const hintBlock = input.hints ? formatSearchHintsForPrompt(input.hints) : '';
 
   const patterns = [site.searchUrlTemplate, ...profile.search_url_patterns].filter((p): p is string => p !== undefined);
   const system = [
-    `You are finding and downloading a subtitle pack (zip/tar archive or subtitle files) for the show "${query}" on ${site.baseUrl}.`,
+    `You are finding and downloading a subtitle pack (zip/tar archive or subtitle files) for "${query}" on ${site.baseUrl}.`,
     patterns.length > 0 ? `Known search URL patterns ({query} = URL-encoded search term): ${patterns.join(', ')}` : '',
     profile.notes ? `Known site quirks: ${profile.notes}` : '',
+    hintBlock,
     'Choose one action per step: search (build a search URL), open (visit a result page), download (fetch the archive file), or give_up.',
-    'Only download links that look like complete season packs or batch archives — not single-episode files, unless nothing else exists.',
+    'Only download links that look like complete season packs, batch archives, or full-movie packs — not single-episode files, unless nothing else exists.',
+    'Preferred groups and languages are soft preferences: never give_up solely because the perfect group is missing.',
     'Respond with JSON matching the schema — no prose outside the JSON.',
   ].filter(Boolean).join(' ');
 
@@ -62,12 +69,18 @@ export async function runAgentLoop(input: {
   let lastSearchUrl: string | null = null;
   for (let step = 0; step < maxSteps; step++) {
     const prompt = [
-      `Show: ${query}`,
+      `Title: ${query}`,
       history.length > 0 ? `Steps so far:\n${history.join('\n')}` : 'No steps yet — start by searching.',
       `Step ${step + 1} of ${maxSteps}. What is the next action?`,
     ].join('\n\n');
 
-    const action = await llm.generate({ callsite: CALLSITE, schema: AgentActionSchema, system, prompt });
+    const action = await llm.generate({
+      callsite: CALLSITE,
+      schema: AgentActionSchema,
+      system,
+      prompt,
+      promptCache: true,
+    });
     onTranscript({ ts: Date.now(), tier: tier.tier, action: action.action, detail: `${action.note} (${action.url})` });
 
     if (action.action === 'give_up') return { kind: 'gave-up' };

@@ -16,6 +16,11 @@ interface SeasonResource {
   monitored: boolean;
 }
 
+/** One alternate title as returned by Sonarr/Radarr (shape varies; we only need the string). */
+export interface AlternateTitle {
+  title: string;
+}
+
 export interface SeriesResource {
   id: number;
   title: string;
@@ -26,6 +31,8 @@ export interface SeriesResource {
   // Season 0 is Sonarr's convention for "Specials" — acquire deliberately skips it (see
   // runAcquireJob's per-season loop) rather than treating specials like a regular season.
   seasons: SeasonResource[];
+  /** Extra title forms for search (Chinese, romaji, …) when the arr has them. */
+  alternateTitles?: AlternateTitle[];
 }
 
 export interface MovieResource {
@@ -35,6 +42,9 @@ export interface MovieResource {
   tmdbId: number;
   added: string;
   hasFile: boolean;
+  alternateTitles?: AlternateTitle[];
+  /** Radarr often exposes the non-English original title separately. */
+  originalTitle?: string;
 }
 
 export interface TagResource {

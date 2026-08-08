@@ -98,14 +98,21 @@ describe('runIngestJob — subtitle follow-on enqueue', () => {
     expect(subtitleJob!.payload).toEqual({ source: 'ingest' });
   });
 
-  it('does not enqueue a subtitle job for a movie ingest', async () => {
+  it('enqueues a subtitle job after a movie ingest completes', async () => {
     const fx = ingestFixture({ targetKind: 'movie' });
     const job = claimIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
-    // Movie subtitle jobs are no-ops, so ingest must not even enqueue one.
-    expect(fx.ctx.queue.list().filter((j) => j.pipeline === 'subtitle')).toHaveLength(0);
+    const subtitleJob = fx.ctx.queue.list().find((j) => j.pipeline === 'subtitle');
+    expect(subtitleJob).toBeTruthy();
+    expect(subtitleJob).toMatchObject({
+      target_kind: 'movie',
+      target_id: fx.targetId,
+      arr_instance: fx.arrInstance,
+      status: 'pending',
+    });
+    expect(subtitleJob!.payload).toEqual({ source: 'ingest' });
   });
 });
 

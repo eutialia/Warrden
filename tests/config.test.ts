@@ -207,19 +207,21 @@ describe('config store', () => {
   });
 
   // subtitle config
-  it('defaults subtitle config to empty languages/sites', () => {
+  it('defaults subtitle config to empty languages/preferredGroups/sites', () => {
     const cfg = ConfigSchema.parse({});
-    expect(cfg.subtitle).toEqual({ languages: [], sites: [] });
+    expect(cfg.subtitle).toEqual({ languages: [], preferredGroups: [], sites: [] });
   });
 
-  it('parses subtitle languages and sites', () => {
+  it('parses subtitle languages, preferred groups, and sites', () => {
     const cfg = ConfigSchema.parse({
       subtitle: {
         languages: ['zh-Hans'],
+        preferredGroups: ['Airota', 'Sumisora'],
         sites: [{ name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' }],
       },
     });
     expect(cfg.subtitle.languages).toEqual(['zh-Hans']);
+    expect(cfg.subtitle.preferredGroups).toEqual(['Airota', 'Sumisora']);
     expect(cfg.subtitle.sites[0]).toEqual({
       name: 'acgrip',
       baseUrl: 'https://acg.rip',

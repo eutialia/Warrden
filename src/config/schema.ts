@@ -95,6 +95,10 @@ export const ConfigSchema = z
         // Target languages, most-wanted first (e.g. ['zh-Hans', 'zh-Hant']). An episode
         // "has subs" when it carries EVERY one of these as an embedded or external track.
         languages: z.array(z.string().min(1)).default(() => []),
+        // Soft rank boost for fansub/release groups when browsing packs — never exclusive;
+        // if none of these appear, the agent keeps searching other groups (design decision
+        // log 2026-08-08). Same spirit as acquire pins, but not a hard filter.
+        preferredGroups: z.array(z.string().min(1)).default(() => []),
         sites: z.array(SubtitleSiteSchema).default(() => []),
       })
       .prefault({}),

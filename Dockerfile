@@ -60,6 +60,7 @@ COPY --from=builder --chown=node:node /app/web/dist ./web/dist
 #     needs along with its system libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
+      p7zip-full \
       python3 python3-pip python3-dev build-essential curl ca-certificates \
     && pip3 install --break-system-packages --no-cache-dir ffsubsync \
     && curl -fsSL --cacert /etc/ssl/certs/ca-certificates.crt https://sh.rustup.rs -o /tmp/rustup.sh \

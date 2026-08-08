@@ -864,6 +864,7 @@ export function subtitleFixture(opts?: {
   episodes?: EpisodeResource[];
   episodeFiles?: EpisodeFileResource[];
   languages?: string[];
+  preferredGroups?: string[];
   streamsByPath?: Record<string, MediaStream[]>;
   extractResults?: Record<string, string>;
   /** When unset, defaults to one {name:'acgrip'} site so the site-search flow is exercised
@@ -874,7 +875,7 @@ export function subtitleFixture(opts?: {
   const targetId = opts?.targetId ?? 42;
   const arrInstanceName = targetKind === 'movie' ? 'radarr' : 'sonarr';
   const libraryDir = tmpDir();
-  const videoPath = join(libraryDir, 'Show - S01E05.mkv');
+  const videoPath = join(libraryDir, targetKind === 'movie' ? 'Perfect Blue (1997).mkv' : 'Show - S01E05.mkv');
   writeFileSync(videoPath, 'video');
 
   const episodes = opts?.episodes ?? [
@@ -884,11 +885,17 @@ export function subtitleFixture(opts?: {
     { id: 100, seriesId: targetId, seasonNumber: 1, relativePath: basename(videoPath), path: videoPath },
   ];
 
+  const movieFiles =
+    targetKind === 'movie'
+      ? [{ id: 200, movieId: targetId, relativePath: basename(videoPath), path: videoPath, size: 4 }]
+      : [];
+
   const client = fakeArrClient({
     series: targetKind === 'series' ? [seriesResource({ id: targetId, title: 'Frieren' })] : [],
-    movies: targetKind === 'movie' ? [movieResource({ id: targetId, title: 'Perfect Blue' })] : [],
+    movies: targetKind === 'movie' ? [movieResource({ id: targetId, title: 'Perfect Blue', hasFile: true })] : [],
     episodes: targetKind === 'series' ? episodes : [],
     episodeFiles: targetKind === 'series' ? episodeFiles : [],
+    movieFiles,
   });
 
   const media = new FakeMediaTools({ streamsByPath: opts?.streamsByPath, extractResults: opts?.extractResults });
@@ -898,6 +905,7 @@ export function subtitleFixture(opts?: {
       pathMappings: [{ from: libraryDir, to: libraryDir }],
       subtitle: {
         languages: opts?.languages ?? ['zh-Hans'],
+        preferredGroups: opts?.preferredGroups ?? [],
         sites: opts?.sites ?? [{ name: 'acgrip', baseUrl: 'https://acg.rip' }],
       },
     }),

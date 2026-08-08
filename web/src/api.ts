@@ -161,7 +161,7 @@ export interface Config {
   pathMappings: { from: string; to: string }[];
   picking: { tags: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
   ingest: { mountMarkers: string[]; downloadRoots: string[] };
-  subtitle: { languages: string[]; sites: SubtitleSite[] };
+  subtitle: { languages: string[]; preferredGroups: string[]; sites: SubtitleSite[] };
   browser: { stepBudget: number; siteCooldownSeconds: number };
   llm: {
     activeProfile: 'dev' | 'prod';

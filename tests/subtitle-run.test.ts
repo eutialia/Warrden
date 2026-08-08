@@ -109,17 +109,24 @@ const NO_SITES = { searchSite: async () => { throw new Error('searchSite must no
 const PACK = { 'Show - S01E05.ass': SRT };
 
 describe('runSubtitleJob', () => {
-  it('movie target completes as a no-op: no events, no LLM calls, nothing placed', async () => {
+  it('movie target: missing langs -> site pack places beside the movie file', async () => {
     const fx = subtitleFixture({ targetKind: 'movie', targetId: 7 });
     const llm = new FakeGenerator([]);
     fx.ctx.llm = llm;
 
     const job = claimSubtitleJob(fx);
-    await runSubtitleJob(fx.ctx, job);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Perfect Blue.zh-Hans.ass': SRT }));
 
-    expect(fx.ctx.events.list()).toHaveLength(0);
     expect(llm.calls).toHaveLength(0);
-    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7)).toHaveLength(0);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
+    const expected = join(fx.libraryDir, 'Perfect Blue (1997).zh-Hans.ass');
+    expect(existsSync(expected)).toBe(true);
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      target_kind: 'movie',
+      data: { lang: 'zh-Hans', matchedBy: 'pipeline', drift: 'unverified' },
+    });
   });
 
   it('nothing missing -> subtitle.complete, no site search', async () => {
@@ -304,17 +311,16 @@ describe('runSubtitleJob', () => {
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(0);
   });
 
-  it('movie target is a true no-op even when a mount marker is absent', async () => {
-    // A movie subtitle job returns before the mount guard, so a missing mount must NOT
-    // reschedule it (ingest swept movie subs as sidecars — see module doc) — contrast with
-    // a series job, which throws RescheduleError on an absent marker.
+  it('movie target respects the mount guard like series (missing marker reschedules)', async () => {
     const fx = subtitleFixture({ targetKind: 'movie', targetId: 7 });
     fx.ctx.config.ingest.mountMarkers = [join(fx.libraryDir, 'nas-mount-marker')];
 
     const job = claimSubtitleJob(fx);
-    await expect(runSubtitleJob(fx.ctx, job)).resolves.toBeUndefined();
-
-    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.mount-missing')).toBe(false);
+    await expect(runSubtitleJob(fx.ctx, job)).rejects.toMatchObject({
+      name: 'RescheduleError',
+      delayMs: 300_000,
+    });
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.mount-missing')).toBe(true);
   });
 
   it('places one of two target languages without treating the episode as fully resolved', async () => {
