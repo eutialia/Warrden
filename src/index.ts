@@ -9,6 +9,7 @@ import { EventLog } from './events/log.js';
 import { JobQueue } from './jobs/queue.js';
 import { startRunner } from './jobs/runner.js';
 import { AiSdkGenerator } from './llm/generator.js';
+import { CliMediaTools } from './media/tools.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
 import { runIngestJob } from './pipelines/ingest/run.js';
 import { createApp } from './server/app.js';
@@ -32,6 +33,7 @@ function buildContext(dataDir: string): AppContext {
     events: new EventLog(db),
     clients,
     llm: new AiSdkGenerator(config),
+    media: new CliMediaTools(),
   };
 }
 

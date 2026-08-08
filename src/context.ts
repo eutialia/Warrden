@@ -4,6 +4,7 @@ import type { Config } from './config/schema.js';
 import type { EventLog } from './events/log.js';
 import type { JobQueue } from './jobs/queue.js';
 import type { StructuredGenerator } from './llm/generator.js';
+import type { MediaTools } from './media/tools.js';
 
 // grows as later tasks add more fields
 export interface AppContext {
@@ -16,6 +17,10 @@ export interface AppContext {
   // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly
   clients: Map<string, ArrApi>;
   llm: StructuredGenerator;
+  // External media binaries (ffprobe/alass/ffsubsync) behind one seam — production wires
+  // CliMediaTools, tests inject a fake. Optional so existing Partial<AppContext> call
+  // sites (createApp routes) stay valid; pipeline code that needs it asserts its presence.
+  media?: MediaTools;
   // Directory the dashboard's built assets (`index.html` + `assets/`) live in, served by
   // `createApp` when present. Optional and injectable (rather than a module-level constant
   // resolved off `import.meta.url`) so tests can point it at a small fixture dir instead of
