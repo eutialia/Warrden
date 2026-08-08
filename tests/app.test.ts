@@ -685,6 +685,10 @@ describe('app', () => {
       });
       expect(res.status).toBe(200);
 
+      // The response body is the post-update row — the dashboard swaps its table row with it.
+      const body = await res.json();
+      expect(body).toMatchObject({ name: 'acgrip', notes: 'cf on curl', last_working_tier: 'chromium' });
+
       const profile = new SiteProfiles(ctx.db).get('acgrip')!;
       expect(profile.notes).toBe('cf on curl');
       expect(profile.last_working_tier).toBe('chromium');

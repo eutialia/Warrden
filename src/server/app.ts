@@ -609,7 +609,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const site = requireConfig(ctx).subtitle.sites.find((s) => s.name === name)!;
       profiles.upsert({ name, baseUrl: site.baseUrl });
       profiles.update(name, patch);
-      return c.json({ ok: true });
+      // Return the post-update row: the dashboard replaces its table row with the response.
+      return c.json(profiles.get(name));
     });
   }
 
