@@ -205,4 +205,44 @@ describe('config store', () => {
   ])('accepts the boundary value: $scenario', ({ overrides }) => {
     expect(() => ConfigSchema.parse(overrides)).not.toThrow();
   });
+
+  // subtitle config
+  it('defaults subtitle config to empty languages/sites', () => {
+    const cfg = ConfigSchema.parse({});
+    expect(cfg.subtitle).toEqual({ languages: [], sites: [] });
+  });
+
+  it('parses subtitle languages and sites', () => {
+    const cfg = ConfigSchema.parse({
+      subtitle: {
+        languages: ['zh-Hans'],
+        sites: [{ name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' }],
+      },
+    });
+    expect(cfg.subtitle.languages).toEqual(['zh-Hans']);
+    expect(cfg.subtitle.sites[0]).toEqual({
+      name: 'acgrip',
+      baseUrl: 'https://acg.rip',
+      searchUrlTemplate: 'https://acg.rip/?term={query}',
+    });
+  });
+
+  it('rejects a blank site name or non-url baseUrl', () => {
+    expect(
+      ConfigSchema.safeParse({ subtitle: { sites: [{ name: '', baseUrl: 'https://x' }] } }).success,
+    ).toBe(false);
+    expect(
+      ConfigSchema.safeParse({ subtitle: { sites: [{ name: 'x', baseUrl: 'not-a-url' }] } }).success,
+    ).toBe(false);
+  });
+
+  // browser config
+  it('defaults browser config', () => {
+    const cfg = ConfigSchema.parse({});
+    expect(cfg.browser).toEqual({ stepBudget: 20, siteCooldownSeconds: 30 });
+  });
+
+  it('rejects a non-positive step budget', () => {
+    expect(ConfigSchema.safeParse({ browser: { stepBudget: 0 } }).success).toBe(false);
+  });
 });

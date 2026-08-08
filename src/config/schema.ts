@@ -23,6 +23,15 @@ export const ArrInstanceSchema = z.object({
   baseUrl: z.url(),
   apiKey: z.string().min(1),
 });
+export const SubtitleSiteSchema = z.object({
+  name: z.string().min(1),
+  baseUrl: z.url(),
+  // Search page URL with `{query}` where the URL-encoded search term goes. Optional:
+  // without it the agent must discover the search endpoint itself (recorded into the
+  // site profile's search_url_patterns on success).
+  searchUrlTemplate: z.string().min(1).optional(),
+});
+export type SubtitleSiteConfig = z.infer<typeof SubtitleSiteSchema>;
 export const ConfigSchema = z
   .object({
     // Nested objects use .prefault() rather than .default(): in Zod v4, .default()
@@ -79,6 +88,23 @@ export const ConfigSchema = z
         // itself" guard. `.min(1)` per entry: a blank root would match every path's
         // longest-prefix check in `resolveSourceDirsDetailed`, corrupting bundle rescue.
         downloadRoots: z.array(z.string().min(1)).default(() => []),
+      })
+      .prefault({}),
+    subtitle: z
+      .object({
+        // Target languages, most-wanted first (e.g. ['zh-Hans', 'zh-Hant']). An episode
+        // "has subs" when it carries EVERY one of these as an embedded or external track.
+        languages: z.array(z.string().min(1)).default(() => []),
+        sites: z.array(SubtitleSiteSchema).default(() => []),
+      })
+      .prefault({}),
+    browser: z
+      .object({
+        // Hard ceiling on LLM steps (tool calls) for one site-search agent run.
+        stepBudget: z.number().int().min(1).default(20),
+        // Polite re-hit floor per site; a site profile's own last-failure backoff can
+        // push a site's next attempt further out, never sooner.
+        siteCooldownSeconds: z.number().int().min(0).default(30),
       })
       .prefault({}),
     llm: z
