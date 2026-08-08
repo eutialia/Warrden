@@ -1,6 +1,6 @@
 import type { AppContext } from '../context.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
-import { SubtitleRuns } from '../db/subtitleRuns.js';
+import { SubtitleRuns, type TranscriptEntry } from '../db/subtitleRuns.js';
 import type { SubtitleSiteConfig } from '../config/schema.js';
 import type { JobRow } from '../jobs/queue.js';
 import { targetEventData } from '../events/target.js';
@@ -57,8 +57,15 @@ export async function searchSite(
   }
 
   const runId = runs.start(job.id, site.name);
-  const startIdx = Math.max(0, TIER_ORDER.indexOf((profile.last_working_tier ?? 'curl') as (typeof TIER_ORDER)[number]));
+  const startIdx = Math.max(0, TIER_ORDER.indexOf((profile.last_working_tier ?? TIER_ORDER[0]) as (typeof TIER_ORDER)[number]));
   const activeTiers: FetchTier[] = [];
+
+  /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
+   * steps or by the runner's escalation handling. */
+  const onTranscriptEvent = (entry: TranscriptEntry): void => {
+    runs.appendTranscript(runId, [entry]);
+    ctx.events.append({ kind: 'subtitle.transcript', jobId: job.id, message: `[${site.name}] ${entry.action}: ${entry.detail}`, data: targetEventData(job, { site: site.name, entry }) });
+  };
 
   try {
     for (let i = startIdx; i < TIER_ORDER.length; i++) {
@@ -73,16 +80,21 @@ export async function searchSite(
           query,
           destDir,
           maxSteps: ctx.config.browser.stepBudget,
-          onTranscript: (entry) => {
-            runs.appendTranscript(runId, [entry]);
-            ctx.events.append({ kind: 'subtitle.transcript', jobId: job.id, message: `[${site.name}] ${entry.action}: ${entry.detail}`, data: targetEventData(job, { site: site.name, entry }) });
-          },
+          onTranscript: onTranscriptEvent,
         });
 
         if (outcome.kind === 'downloaded') {
           runs.finish(runId, 'done');
-          const learned = profile.search_url_patterns;
-          profiles.update(site.name, { lastWorkingTier: TIER_ORDER[i], lastSuccessAt: Date.now(), failCount: 0, searchUrlPatterns: learned.slice(0, 5) });
+          // Record a newly discovered search URL that isn't already known and isn't the
+          // configured template, capping the learned list at 5.
+          const discovered =
+            outcome.searchUrl !== null &&
+            outcome.searchUrl !== site.searchUrlTemplate &&
+            !profile.search_url_patterns.includes(outcome.searchUrl);
+          const learned = discovered
+            ? [...profile.search_url_patterns, outcome.searchUrl as string].slice(-5)
+            : profile.search_url_patterns;
+          profiles.update(site.name, { lastWorkingTier: TIER_ORDER[i], lastSuccessAt: Date.now(), failCount: 0, searchUrlPatterns: learned });
           return { filePath: outcome.filePath, url: outcome.url };
         }
         // exhausted/gave-up/blocked-without-error: fall through to the next rung.
@@ -99,8 +111,8 @@ export async function searchSite(
           });
           return null;
         }
-        // TierBlockedError: record the wall and try the next rung.
-        profiles.update(site.name, { notes: `${TIER_ORDER[i]} blocked (${new Date().toISOString()})` });
+        // TierBlockedError: note the wall in the run's transcript and try the next rung.
+        onTranscriptEvent({ ts: Date.now(), tier: TIER_ORDER[i], action: 'escalate', detail: errorMessage(err) });
       }
     }
 

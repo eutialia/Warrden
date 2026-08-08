@@ -19,10 +19,9 @@ const AgentActionSchema = z.object({
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 
 export type AgentOutcome =
-  | { kind: 'downloaded'; filePath: string; url: string }
+  | { kind: 'downloaded'; filePath: string; url: string; searchUrl: string | null }
   | { kind: 'exhausted' }
-  | { kind: 'gave-up' }
-  | { kind: 'blocked' };
+  | { kind: 'gave-up' };
 
 /** The loop hit the current tier's wall — the runner escalates one rung and retries. */
 export class TierBlockedError extends Error {
@@ -62,6 +61,7 @@ export async function runAgentLoop(input: {
   ].filter(Boolean).join(' ');
 
   const history: string[] = [];
+  let lastSearchUrl: string | null = null;
   for (let step = 0; step < maxSteps; step++) {
     const prompt = [
       `Show: ${query}`,
@@ -82,11 +82,12 @@ export async function runAgentLoop(input: {
         history.push(`download ${action.url} -> FAILED`);
         continue;
       }
-      return { kind: 'downloaded', filePath: res.filePath, url: action.url };
+      return { kind: 'downloaded', filePath: res.filePath, url: action.url, searchUrl: lastSearchUrl };
     }
 
     const res = await tier.fetch(action.url);
     if (res.blocked) throw new TierBlockedError(`${action.action} blocked at ${action.url}`);
+    if (res.ok && action.action === 'search') lastSearchUrl = action.url;
     history.push(
       res.ok
         ? `${action.action} ${action.url} -> OK: ${(res.body ?? '').slice(0, OBSERVATION_CAP)}`

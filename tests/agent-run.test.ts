@@ -147,4 +147,32 @@ describe('searchSite', () => {
     expect(row.status).toBe('done');
     expect(row.transcript).toHaveLength(1);
   });
+
+  it('success appends a newly discovered search pattern', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      { action: 'search', url: 'https://acg.rip/find?q=frieren', note: 's' },
+      { action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' },
+    ]);
+    const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    expect(out).not.toBeNull();
+    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    expect(profile.search_url_patterns).toEqual(['https://acg.rip/find?q=frieren']);
+  });
+
+  it('does not append the configured searchUrlTemplate itself', async () => {
+    const { ctx, job } = setup();
+    const literalTemplate: SubtitleSiteConfig = { name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/search' };
+    ctx.llm = new FakeGenerator([
+      { action: 'search', url: 'https://acg.rip/search', note: 's' },
+      { action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' },
+    ]);
+    const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
+
+    await searchSite(ctx, job, literalTemplate, 'F', tmpDir(), tiers);
+    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    expect(profile.search_url_patterns).toEqual([]);
+  });
 });

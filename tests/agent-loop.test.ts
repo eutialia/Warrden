@@ -32,7 +32,7 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, query: 'Frieren', destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'downloaded', filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip' });
+    expect(out).toEqual({ kind: 'downloaded', filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip', searchUrl: 'https://acg.rip/?term=frieren' });
     expect(tier.urls).toEqual(['https://acg.rip/?term=frieren', 'https://acg.rip/t/123', 'https://acg.rip/dl/123.zip']);
   });
 
