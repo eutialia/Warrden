@@ -81,8 +81,9 @@ USER node
 
 VOLUME /data
 EXPOSE 9797
-# `curl`/`wget` aren't installed on this base image; Node's built-in `fetch` avoids
-# pulling either in just for the healthcheck. Hardcodes the *default* `server.port`
+# `curl` is already present (installed above for the rustup bootstrap), but Node's
+# built-in `fetch` avoids relying on an extra binary for the healthcheck. Hardcodes
+# the *default* `server.port`
 # (9797, matching `EXPOSE` above) — a `config.json` that overrides the port needs a
 # matching override here too, since a healthcheck can't read the container's own config.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

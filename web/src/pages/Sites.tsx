@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
 import { toast } from 'sonner';
 import {
   apiErrorMessage,
   fetchSiteProfiles,
   updateSiteProfile,
-  type AccessTier,
   type SiteProfileRow,
 } from '@/api';
 import { StatusNotice } from '@/components/StatusNotice';
-import { Badge } from '@/components/ui/badge';
+import { TierBadge } from '@/components/TierBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -17,23 +15,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { formatRelativeTime } from '@/lib/utils';
-
-// Same idea as ManagedObjects/JobDetail's own label maps — a raw `AccessTier` reads fine in
-// a log line but not as dashboard copy. The variants match StatusBadge's own ladder: the
-// cheapest working tier gets the "good" default, a discovered-but-pricier tier stays
-// secondary, and `null` (no tier ever worked) shows an outline badge so an empty cell
-// doesn't read as a missing column.
-const TIER_VARIANT: Record<AccessTier, 'default' | 'secondary'> = {
-  curl: 'default',
-  chromium: 'secondary',
-  camoufox: 'secondary',
-  remote: 'secondary',
-};
-
-function TierBadge({ tier }: { tier: AccessTier | null }): ReactNode {
-  if (tier === null) return <Badge variant="outline">no tier</Badge>;
-  return <Badge variant={TIER_VARIANT[tier]}>{tier}</Badge>;
-}
 
 export default function Sites() {
   const [profiles, setProfiles] = useState<SiteProfileRow[]>([]);

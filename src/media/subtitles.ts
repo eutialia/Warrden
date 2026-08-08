@@ -72,6 +72,6 @@ function parseAss(content: string): SubtitleCue[] {
 
 /** Parses SRT or ASS cue timings, auto-detected by content, sorted by start time. */
 export function parseSubtitleCues(content: string): SubtitleCue[] {
-  const cues = content.includes('[Events]') ? parseAss(content) : parseSrt(content);
+  const cues = /\[events\]/i.test(content) ? parseAss(content) : parseSrt(content);
   return cues.sort((a, b) => a.startMs - b.startMs);
 }

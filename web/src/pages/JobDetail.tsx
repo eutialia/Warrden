@@ -6,7 +6,6 @@ import {
   apiErrorMessage,
   fetchJob,
   postAcquire,
-  type AccessTier,
   type JobDetailResponse,
   type PlacedFileKind,
   type SubtitleRunRow,
@@ -14,6 +13,7 @@ import {
 } from '@/api';
 import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
+import { TierBadge } from '@/components/TierBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,17 +27,6 @@ const PLACED_FILE_KIND_LABEL: Record<PlacedFileKind, string> = {
   subtitle: 'Subtitle',
 };
 
-// Same variant ladder as the Sites page's own tier badge: cheapest working tier reads as
-// "good", a discovered-but-pricier tier stays secondary, and `null` (a transcript entry's
-// tier is required, but defensive) shows outline. Mirrored here rather than shared because
-// the Sites page's `TierBadge` carries a "no tier" null case that a transcript entry never has.
-const TIER_VARIANT: Record<AccessTier, 'default' | 'secondary'> = {
-  curl: 'default',
-  chromium: 'secondary',
-  camoufox: 'secondary',
-  remote: 'secondary',
-};
-
 /** Renders one subtitle agent run as a chronological step list — each entry's tier badge,
  * action, and detail on its own line, ordered oldest-first (the transcript's own array
  * order). `detail` can be long, so it breaks across lines rather than truncating. */
@@ -47,7 +36,7 @@ function TranscriptList({ entries }: { entries: TranscriptEntry[] }): ReactNode 
     <ol className="space-y-1.5 text-xs">
       {entries.map((e, i) => (
         <li key={i} className="flex items-start gap-1.5">
-          <Badge variant={TIER_VARIANT[e.tier]} className="shrink-0">{e.tier}</Badge>
+          <TierBadge tier={e.tier} className="shrink-0" />
           <span>
             <span className="font-medium">{e.action}</span>
             {e.detail && <span className="text-muted-foreground"> — {e.detail}</span>}

@@ -75,7 +75,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
 
   // This run's own scratch under dataDir: reference extractions + resync outputs + raw
   // downloads. Everything under here is ours to delete in the finally below; the archive
-  // cache (dataDir/cache) and quarantine (dataDir/quarantine) live OUTSIDE it so they persist.
+  // cache (dataDir/subtitle/cache) and quarantine (dataDir/quarantine) live OUTSIDE it so they persist.
   const runDir = join(ctx.dataDir, 'subtitle', 'runs', String(job.id));
   mkdirSync(runDir, { recursive: true });
   const refDir = join(runDir, 'refs');

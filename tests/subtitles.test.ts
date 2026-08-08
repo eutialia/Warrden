@@ -44,6 +44,14 @@ describe('parseSubtitleCues', () => {
     ]);
   });
 
+  it.each(['[Events]', '[events]', '[EVENTS]'])('auto-detects ASS from a %s section regardless of case', (section) => {
+    const cues = parseSubtitleCues(ASS.replace(/\[Events\]/, section));
+    expect(cues).toEqual([
+      { startMs: 1000, endMs: 3500 },
+      { startMs: 3723000, endMs: 3725000 },
+    ]);
+  });
+
   it('returns [] for content with no parseable cues', () => {
     expect(parseSubtitleCues('not a subtitle file')).toEqual([]);
   });

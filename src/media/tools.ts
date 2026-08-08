@@ -81,16 +81,21 @@ export class CliMediaTools implements MediaTools {
   async extractSubtitle(videoPath: string, streamIndex: number, destPath: string): Promise<void> {
     await execFileAsync('ffmpeg', ['-y', '-v', 'error', '-i', videoPath, '-map', `0:${streamIndex}`, destPath], {
       timeout: TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
     });
   }
 
   async resyncAlass(input: { reference: string; subtitle: string; outPath: string }): Promise<void> {
-    await execFileAsync('alass', [input.reference, input.subtitle, input.outPath], { timeout: TIMEOUT_MS });
+    await execFileAsync('alass', [input.reference, input.subtitle, input.outPath], {
+      timeout: TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+    });
   }
 
   async resyncFfsubsync(input: { videoPath: string; subtitlePath: string; outPath: string }): Promise<void> {
     await execFileAsync('ffsubsync', [input.videoPath, '-i', input.subtitlePath, '-o', input.outPath], {
       timeout: TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
     });
   }
 }
