@@ -15,6 +15,8 @@ import { AcquireRecords } from '../db/acquireRecords.js';
 import { AttentionItems, type AttentionStatus } from '../db/attention.js';
 import { ManagedObjects } from '../db/managedObjects.js';
 import { PlacedFiles } from '../db/placedFiles.js';
+import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '../db/siteProfiles.js';
+import { SubtitleRuns } from '../db/subtitleRuns.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 
@@ -141,6 +143,19 @@ const AcquireBodySchema = z.object({
 
 const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).optional() });
 
+// Dashboard edits to a site profile — every field optional so a partial PUT only touches
+// what the client sent. `lastWorkingTier` is the full AccessTier union or explicit null
+// (clears the "known-good" tier), `searchUrlPatterns` capped at 5 non-empty entries,
+// `notes` at 2000 chars (matching HINT_MAX_LENGTH's rationale — a pasted-in quirk note
+// shouldn't inflate the agent's prompt unboundedly). `failCount` is the accessible reset
+// seam: PUT `{ failCount: 0 }` clears the escalation/backoff bookkeeping.
+const SiteProfileUpdateSchema = z.object({
+  notes: z.string().max(2000).optional(),
+  lastWorkingTier: z.enum(['curl', 'chromium', 'camoufox', 'remote']).nullable().optional(),
+  searchUrlPatterns: z.array(z.string().min(1)).max(5).optional(),
+  failCount: z.number().int().min(0).optional(),
+});
+
 // What `runIngestJob`'s rescue stage (`src/pipelines/ingest/run.ts`) actually puts in an
 // `ingest.rescue-proposed` attention item's `data` — the accept endpoint below only ever
 // re-executes exactly that shape, never an arbitrary command a client could construct.
@@ -245,6 +260,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
   if (ctx.queue && ctx.db) {
     const queue = ctx.queue;
+    const db = ctx.db;
     const acquireRecords = new AcquireRecords(ctx.db);
     const placedFiles = new PlacedFiles(ctx.db);
 
@@ -300,7 +316,15 @@ export function createApp(ctx: Partial<AppContext>): Hono {
           since: job.created_at,
           until: isTerminal(job) ? job.updated_at : undefined,
         })[0] ?? null;
-      return c.json({ job, acquireRecord, acquireOutcome: acquireOutcome(job), placedFiles: placedFiles.listByJob(job.id) });
+      return c.json({
+        job,
+        acquireRecord,
+        acquireOutcome: acquireOutcome(job),
+        placedFiles: placedFiles.listByJob(job.id),
+        // This job's own subtitle site-search runs, transcript included — the dashboard's
+        // JobDetail "Subtitle runs" card renders these as a chronological step list.
+        subtitleRuns: new SubtitleRuns(db).listByJob(job.id),
+      });
     });
   }
 
@@ -526,6 +550,66 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // for the cases where it's the latter (no client configured, a foreign-named live
       // object, a tag still carried by another profile, ...).
       return c.json({ ok: true, deletedInArr });
+    });
+  }
+
+  if (ctx.db && ctx.config) {
+    const db = ctx.db;
+    const profiles = new SiteProfiles(db);
+
+    // Defaults for a configured site that has no stored profile row yet — mirrors what a
+    // freshly-inserted `site_profiles` row (via `profiles.upsert`) carries, so a brand-new
+    // site renders identically whether or not a row has been written. `upsert` seeds
+    // base_url; `start` (in the agent) back-fills the rest as it learns, so these only
+    // ever show for sites the agent hasn't touched.
+    function defaultProfile(name: string, baseUrl: string): SiteProfileRow {
+      const now = Date.now();
+      return {
+        name,
+        base_url: baseUrl,
+        last_working_tier: null,
+        search_url_patterns: [],
+        notes: '',
+        last_success_at: null,
+        last_failure_at: null,
+        fail_count: 0,
+        created_at: now,
+      };
+    }
+
+    // Merges config over the stored table so the dashboard always shows exactly the
+    // configured site set, with any learned per-site state layered on top.
+    app.get('/api/site-profiles', (c) => {
+      const config = requireConfig(ctx);
+      const profilesBySite = new Map(profiles.list().map((p) => [p.name, p]));
+      return c.json({
+        profiles: config.subtitle.sites.map((site) => profilesBySite.get(site.name) ?? defaultProfile(site.name, site.baseUrl)),
+      });
+    });
+
+    app.put('/api/site-profiles/:name', async (c) => {
+      const name = c.req.param('name');
+      // 404 for any name outside the configured site set — the dashboard only edits what
+      // config declares, so a stale/typo'd site is a caller mistake, not a silent no-op.
+      if (!requireConfig(ctx).subtitle.sites.some((s) => s.name === name)) {
+        return c.json({ error: `site "${name}" is not configured` }, 404);
+      }
+      const body: unknown = await c.req.json().catch(() => undefined);
+      const parsed = SiteProfileUpdateSchema.safeParse(body);
+      if (!parsed.success) {
+        return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
+      }
+      // Cast narrows the schema's `lastWorkingTier?: AccessTier | null` to the update
+      // input's `lastWorkingTier?: AccessTier` — a `null` "clear the tier" this way passes
+      // straight through to `update`, whose `!== undefined` guard still sets the column to
+      // null (the DB column is nullable), while an absent field is untouched.
+      const patch = parsed.data as UpdateSiteProfileInput;
+      // Upsert-then-update (not just update) so a partial PUT still creates the row when
+      // the agent hasn't run for this site yet — then only the provided fields land.
+      const site = requireConfig(ctx).subtitle.sites.find((s) => s.name === name)!;
+      profiles.upsert({ name, baseUrl: site.baseUrl });
+      profiles.update(name, patch);
+      return c.json({ ok: true });
     });
   }
 

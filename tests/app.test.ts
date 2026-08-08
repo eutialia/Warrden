@@ -6,8 +6,11 @@ import { createApp } from '../src/server/app.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
+import { SiteProfiles } from '../src/db/siteProfiles.js';
+import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
+import { ConfigSchema } from '../src/config/schema.js';
 import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, hasEvent, bundleImportPayload, openAttentionForJob } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
@@ -628,6 +631,124 @@ describe('app', () => {
       });
       expect(res.status).toBe(400);
       expect(ctx.queue.claim()).toBeNull();
+    });
+  });
+
+  describe('site profile routes', () => {
+    function ctxWithSites(sites: { name: string; baseUrl: string }[]) {
+      return makeCtx({ config: ConfigSchema.parse({ subtitle: { sites } }) });
+    }
+
+    it('GET /api/site-profiles merges config sites with stored rows', async () => {
+      const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
+      const profiles = new SiteProfiles(ctx.db);
+      profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
+      profiles.update('acgrip', { notes: 'cf on curl', lastWorkingTier: 'curl', failCount: 3 });
+      const app = createApp(ctx);
+
+      const res: any = await (await app.request('/api/site-profiles')).json();
+      expect(res.profiles).toHaveLength(1);
+      expect(res.profiles[0]).toMatchObject({
+        name: 'acgrip',
+        base_url: 'https://acg.rip',
+        notes: 'cf on curl',
+        last_working_tier: 'curl',
+        fail_count: 3,
+      });
+    });
+
+    it('GET /api/site-profiles shows a configured site with no stored row as defaults', async () => {
+      const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
+      const app = createApp(ctx);
+
+      const res: any = await (await app.request('/api/site-profiles')).json();
+      // No stored row -> SiteProfiles.upsert was never called, so the row has DB defaults.
+      expect(res.profiles).toHaveLength(1);
+      expect(res.profiles[0]).toMatchObject({
+        name: 'acgrip',
+        base_url: 'https://acg.rip',
+        notes: '',
+        fail_count: 0,
+        last_working_tier: null,
+        search_url_patterns: [],
+      });
+    });
+
+    it('PUT /api/site-profiles/:name updates notes and tier (partial body)', async () => {
+      const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/site-profiles/acgrip', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ notes: 'cf on curl', lastWorkingTier: 'chromium' }),
+      });
+      expect(res.status).toBe(200);
+
+      const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+      expect(profile.notes).toBe('cf on curl');
+      expect(profile.last_working_tier).toBe('chromium');
+      expect(profile.fail_count).toBe(0); // untouched by the partial body
+    });
+
+    it('PUT /api/site-profiles/:name 404s for an unconfigured site', async () => {
+      const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/site-profiles/nope', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ notes: 'x' }),
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it('PUT /api/site-profiles/:name rejects a bogus tier with 400', async () => {
+      const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
+      const app = createApp(ctx);
+      const profiles = new SiteProfiles(ctx.db);
+      profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
+
+      const res = await app.request('/api/site-profiles/acgrip', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ lastWorkingTier: 'sneaker-net' }),
+      });
+      expect(res.status).toBe(400);
+      expect(profiles.get('acgrip')!.last_working_tier).toBeNull();
+    });
+
+    it('PUT /api/site-profiles/:name accepts failCount 0 (reset failures)', async () => {
+      const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
+      const profiles = new SiteProfiles(ctx.db);
+      profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
+      profiles.update('acgrip', { failCount: 5 });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/site-profiles/acgrip', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ failCount: 0 }),
+      });
+      expect(res.status).toBe(200);
+      expect(profiles.get('acgrip')!.fail_count).toBe(0);
+    });
+  });
+
+  describe('GET /api/jobs/:id subtitleRuns', () => {
+    it('includes subtitleRuns for a job that has runs, empty array otherwise', async () => {
+      const ctx = makeCtx();
+      const jobId = ctx.queue.enqueue({ pipeline: 'subtitle', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      const runs = new SubtitleRuns(ctx.db);
+      const runId = runs.start(jobId, 'acgrip');
+      runs.appendTranscript(runId, [{ ts: 1, tier: 'curl', action: 'search', detail: 'page' }]);
+      runs.finish(runId, 'done');
+      const app = createApp(ctx);
+
+      const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
+      expect(detail.subtitleRuns).toHaveLength(1);
+      expect(detail.subtitleRuns[0]).toMatchObject({ site: 'acgrip', status: 'done' });
+      expect(detail.subtitleRuns[0].transcript).toEqual([{ ts: 1, tier: 'curl', action: 'search', detail: 'page' }]);
     });
   });
 });
