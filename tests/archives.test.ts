@@ -1,5 +1,7 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
+import { create as tarCreate } from 'tar';
 import { describe, expect, it } from 'vitest';
 import { entriesForFiles, extractArchive, isArchive, UnsupportedArchiveError } from '../src/pipelines/subtitle/archives.js';
 import { tmpDir } from './helpers.js';
@@ -32,6 +34,51 @@ describe('extractArchive', () => {
     const files = await extractArchive(zipPath, dest);
     expect(files).toHaveLength(2);
     expect(files.every((f) => f.endsWith('.ass'))).toBe(true);
+  });
+
+  /**
+   * Builds a `.tar.gz` from a temp source dir populated by `seed`, then returns the
+   * archive path. Uses the real `tar` package (same one `extractArchive` uses to unpack)
+   * so the fixture exercises the genuine tar/gzip code path end to end.
+   */
+  function makeTarGz(seed: Record<string, string>): string {
+    const src = tmpDir();
+    for (const [rel, content] of Object.entries(seed)) {
+      const full = join(src, rel);
+      mkdirSync(join(full, '..'), { recursive: true });
+      writeFileSync(full, content);
+    }
+    const path = join(tmpDir(), 'pack.tar.gz');
+    tarCreate({ gzip: true, file: path, cwd: src, sync: true }, Object.keys(seed));
+    return path;
+  }
+
+  it('extracts only subtitles from tar.gz, flattening names', async () => {
+    const tarPath = makeTarGz({
+      'S1/Show - 01.ass': 'a',
+      'S1/Show - 02.zh-Hans.ass': 'b',
+      'S1/font.ttf': 'c',
+      'S1/Show - 01.mkv': 'd',
+    });
+    const dest = tmpDir();
+    const files = await extractArchive(tarPath, dest);
+    expect(files).toHaveLength(2);
+    expect(files.every((f) => f.endsWith('.ass'))).toBe(true);
+    // flattened as sorted `<index>-<basename>` pairs, same contract as zip
+    expect(files).toEqual(
+      expect.arrayContaining([join(dest, '0-Show - 01.ass'), join(dest, '1-Show - 02.zh-Hans.ass')]),
+    );
+  });
+
+  it('extracts same-named files from nested dirs without collision', async () => {
+    const tarPath = makeTarGz({
+      'A/01.ass': 'a',
+      'B/01.ass': 'b',
+    });
+    const dest = tmpDir();
+    const files = await extractArchive(tarPath, dest);
+    expect(files).toHaveLength(2);
+    expect(files).toEqual(expect.arrayContaining([join(dest, '0-01.ass'), join(dest, '1-01.ass')]));
   });
 
   it('throws UnsupportedArchiveError for rar/7z', async () => {
