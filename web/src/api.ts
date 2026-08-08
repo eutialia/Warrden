@@ -111,12 +111,14 @@ export interface SubtitleRunRow {
 }
 
 /** Body for `PUT /api/site-profiles/:name` — every field optional (a PATCH-shaped PUT).
- * `lastWorkingTier: null` clears the stored tier; omitting it leaves it untouched. */
+ * `lastWorkingTier: null` clears the stored tier; `lastFailureAt: null` clears the
+ * failure timestamp; omitting either leaves it untouched. */
 export interface SiteProfileUpdate {
   notes?: string;
   lastWorkingTier?: AccessTier | null;
   searchUrlPatterns?: string[];
   failCount?: number;
+  lastFailureAt?: number | null;
 }
 
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.

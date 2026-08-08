@@ -26,7 +26,8 @@ function parseRow(row: SiteProfileRowRaw): SiteProfileRow {
 }
 
 export interface UpdateSiteProfileInput {
-  lastWorkingTier?: AccessTier;
+  /** `null` clears the stored known-good tier (dashboard "forget this floor"). */
+  lastWorkingTier?: AccessTier | null;
   searchUrlPatterns?: string[];
   notes?: string;
   lastSuccessAt?: number | null;

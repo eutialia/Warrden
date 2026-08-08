@@ -316,4 +316,45 @@ describe('runSubtitleJob', () => {
 
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.mount-missing')).toBe(false);
   });
+
+  it('places one of two target languages without treating the episode as fully resolved', async () => {
+    // Config wants both zh-Hans and zh-Hant. The pack only carries a zh-Hans-tagged file:
+    // that language must land, but the episode stays in the working set (and raises
+    // subtitle.unresolved) because zh-Hant is still missing. Pre-fix this collapsed the
+    // whole episode after any single placement.
+    const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
+    // No embedded ref -> place unverified (avoids needing cue content for the gate).
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.zh-Hans.ass': SRT }));
+
+    const hansPath = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
+    const hantPath = join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass');
+    expect(existsSync(hansPath)).toBe(true);
+    expect(existsSync(hantPath)).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
+    // Still unresolved: zh-Hant was never filled.
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).toMatchObject({ lang: 'zh-Hans' });
+  });
+
+  it('fully resolves an episode only after every target language is placed', async () => {
+    const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(
+      fx.ctx,
+      job,
+      siteStub({
+        'Show - S01E05.zh-Hans.ass': SRT,
+        'Show - S01E05.zh-Hant.ass': SRT,
+      }),
+    );
+
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(false);
+    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(2);
+  });
 });

@@ -78,7 +78,9 @@ export default function Sites() {
   async function handleResetFailures(name: string): Promise<void> {
     setResettingName(name);
     try {
-      const updated = await updateSiteProfile(name, { failCount: 0 });
+      // Clear both the counter and the failure timestamp — cooldown keys off both, and
+      // leaving last_failure_at set would still block the site briefly after a reset.
+      const updated = await updateSiteProfile(name, { failCount: 0, lastFailureAt: null });
       setProfiles((prev) => prev.map((p) => (p.name === name ? updated : p)));
       toast.success(`Reset failures for ${name}`);
     } catch (err) {

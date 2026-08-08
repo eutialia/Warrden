@@ -726,7 +726,7 @@ describe('app', () => {
       const ctx = ctxWithSites([{ name: 'acgrip', baseUrl: 'https://acg.rip' }]);
       const profiles = new SiteProfiles(ctx.db);
       profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
-      profiles.update('acgrip', { failCount: 5 });
+      profiles.update('acgrip', { failCount: 5, lastFailureAt: Date.now() });
       const app = createApp(ctx);
 
       const res = await app.request('/api/site-profiles/acgrip', {
@@ -735,7 +735,8 @@ describe('app', () => {
         body: JSON.stringify({ failCount: 0 }),
       });
       expect(res.status).toBe(200);
-      expect(profiles.get('acgrip')!.fail_count).toBe(0);
+      // Resetting failures also clears last_failure_at so the site is not left in cooldown.
+      expect(profiles.get('acgrip')).toMatchObject({ fail_count: 0, last_failure_at: null });
     });
   });
 

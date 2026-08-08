@@ -45,8 +45,15 @@ export async function searchSite(
   profiles.upsert({ name: site.name, baseUrl: site.baseUrl });
   const profile = profiles.get(site.name)!;
 
+  // Cooldown only applies while fail_count > 0. Success (and the dashboard "reset
+  // failures" path) set fail_count back to 0; without this guard a stale last_failure_at
+  // would still block the site for failBackoffMs(0) even after a clean success/reset.
   const cooldownMs = failBackoffMs(profile.fail_count, ctx.config.browser.siteCooldownSeconds);
-  if (profile.last_failure_at !== null && Date.now() - profile.last_failure_at < cooldownMs) {
+  if (
+    profile.fail_count > 0 &&
+    profile.last_failure_at !== null &&
+    Date.now() - profile.last_failure_at < cooldownMs
+  ) {
     ctx.events.append({
       kind: 'subtitle.site-cooldown',
       jobId: job.id,
@@ -94,7 +101,13 @@ export async function searchSite(
           const learned = discovered
             ? [...profile.search_url_patterns, outcome.searchUrl as string].slice(-5)
             : profile.search_url_patterns;
-          profiles.update(site.name, { lastWorkingTier: TIER_ORDER[i], lastSuccessAt: Date.now(), failCount: 0, searchUrlPatterns: learned });
+          profiles.update(site.name, {
+            lastWorkingTier: TIER_ORDER[i],
+            lastSuccessAt: Date.now(),
+            failCount: 0,
+            lastFailureAt: null,
+            searchUrlPatterns: learned,
+          });
           return { filePath: outcome.filePath, url: outcome.url };
         }
         // exhausted/gave-up/blocked-without-error: fall through to the next rung.

@@ -154,6 +154,8 @@ const SiteProfileUpdateSchema = z.object({
   lastWorkingTier: z.enum(['curl', 'chromium', 'camoufox', 'remote']).nullable().optional(),
   searchUrlPatterns: z.array(z.string().min(1)).max(5).optional(),
   failCount: z.number().int().min(0).optional(),
+  // Explicit null clears the timestamp (used with failCount: 0 by "reset failures").
+  lastFailureAt: z.number().int().nullable().optional(),
 });
 
 // What `runIngestJob`'s rescue stage (`src/pipelines/ingest/run.ts`) actually puts in an
@@ -599,11 +601,17 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!parsed.success) {
         return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       }
-      // Cast narrows the schema's `lastWorkingTier?: AccessTier | null` to the update
-      // input's `lastWorkingTier?: AccessTier` — a `null` "clear the tier" this way passes
-      // straight through to `update`, whose `!== undefined` guard still sets the column to
-      // null (the DB column is nullable), while an absent field is untouched.
-      const patch = parsed.data as UpdateSiteProfileInput;
+      // `null` fields (clear tier / clear lastFailureAt) pass straight through to `update`,
+      // whose `!== undefined` guard still writes the column to null while an absent field
+      // is untouched. When the client only sends `failCount: 0` (the dashboard "reset
+      // failures" button), also clear lastFailureAt so the cooldown bookkeeping is fully
+      // wiped — fail_count alone is not enough if a stale last_failure_at remains.
+      const patch: UpdateSiteProfileInput = {
+        ...parsed.data,
+        ...(parsed.data.failCount === 0 && parsed.data.lastFailureAt === undefined
+          ? { lastFailureAt: null }
+          : {}),
+      };
       // Upsert-then-update (not just update) so a partial PUT still creates the row when
       // the agent hasn't run for this site yet — then only the provided fields land.
       const site = requireConfig(ctx).subtitle.sites.find((s) => s.name === name)!;

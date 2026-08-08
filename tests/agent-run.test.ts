@@ -134,18 +134,39 @@ describe('searchSite', () => {
 
   it('success resets fail_count and leaves last_working_tier as the working rung', async () => {
     const { ctx, job } = setup();
+    // Seed a prior failure so success must clear both the counter AND the timestamp —
+    // otherwise a stale last_failure_at would keep the site in a residual cooldown.
+    const profiles = new SiteProfiles(ctx.db);
+    profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
+    profiles.update('acgrip', { failCount: 2, lastFailureAt: Date.now() - 10 * 60_000 });
     ctx.llm = new FakeGenerator([{ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
     expect(out).not.toBeNull();
-    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    const profile = profiles.get('acgrip')!;
     expect(profile.fail_count).toBe(0);
+    expect(profile.last_failure_at).toBeNull();
     expect(profile.last_success_at).not.toBeNull();
     expect(profile.last_working_tier).toBe('curl');
     const row = new SubtitleRuns(ctx.db).latestForSite(job.id, 'acgrip')!;
     expect(row.status).toBe('done');
     expect(row.transcript).toHaveLength(1);
+  });
+
+  it('does not skip a site after success just because last_failure_at is still recent', async () => {
+    // fail_count is 0 (post-success / post-reset) but last_failure_at is 5s ago: without
+    // the fail_count > 0 guard, failBackoffMs(0) would still block for the base cooldown.
+    const { ctx, job } = setup();
+    const profiles = new SiteProfiles(ctx.db);
+    profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
+    profiles.update('acgrip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
+    ctx.llm = new FakeGenerator([{ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }]);
+    const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    expect(out).not.toBeNull();
+    expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeUndefined();
   });
 
   it('success appends a newly discovered search pattern', async () => {

@@ -16,7 +16,7 @@ import { buildSidecarName, matchSidecarDeterministic } from '../ingest/sidecars.
 import { entriesForFiles, extractArchive, UnsupportedArchiveError } from './archives.js';
 import { assessDrift } from './drift.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
-import { findMissingSubtitles } from './reconcile.js';
+import { findMissingSubtitles, langCovers } from './reconcile.js';
 
 /** Injectable seams for `runSubtitleJob` — same injectable-factory pattern as `searchSite`'s
  * own `tiers` param (Task 8): tests stub `searchSite` to a fake that returns a pre-built
@@ -198,8 +198,9 @@ function requireMedia(ctx: AppContext): MediaTools {
   return ctx.media;
 }
 
-/** Removes episodes that got resolved (a candidate placed) from the working `missing` list so
- * later passes (next cache row / next site) don't keep chasing them. */
+/** Removes fully-resolved episodes (every target language filled) from the working
+ * `missing` list so later passes (next cache row / next site / later files in this pack)
+ * don't keep chasing them. */
 function removeResolved(missing: EpisodeTarget[], resolvedEpisodeIds: number[]): void {
   const gone = new Set(resolvedEpisodeIds);
   for (let i = missing.length - 1; i >= 0; i--) {
@@ -207,11 +208,38 @@ function removeResolved(missing: EpisodeTarget[], resolvedEpisodeIds: number[]):
   }
 }
 
+/** Drops every still-missing language that `placedLang` covers (same rule as reconcile).
+ * An episode is only fully resolved once `missingLanguages` is empty — placing zh-Hans
+ * must not stop the runner from still hunting zh-Hant for the same episode. */
+function markLanguagesCovered(t: EpisodeTarget, placedLang: string | null): void {
+  if (placedLang === null) return;
+  t.missingLanguages = t.missingLanguages.filter((want) => !langCovers(want, placedLang));
+}
+
+/**
+ * After a successful place, updates the episode's remaining language gap and, when the
+ * gap is empty, records it as fully resolved and drops it from `missing` immediately so
+ * subsequent files in this pack (and the LLM remainder pass) don't re-match it.
+ */
+function notePlacement(
+  missing: EpisodeTarget[],
+  resolved: number[],
+  t: EpisodeTarget,
+  placedLang: string | null,
+): void {
+  markLanguagesCovered(t, placedLang);
+  if (t.missingLanguages.length === 0) {
+    resolved.push(t.episodeId);
+    removeResolved(missing, [t.episodeId]);
+  }
+}
+
 /**
  * Matches one archive's files (from a cached row, or a just-downloaded+extracted pack) to the
  * still-missing episodes and drift-gates + places each match. Returns the episode ids that got
- * resolved. Deterministic matching first (via the entry's pre-parsed `episodeRef`), then one
- * `mapArchiveWithLlm` call for whatever's left — mirroring ingest's match-then-LLM ordering.
+ * fully resolved (every target language filled). Deterministic matching first (via the
+ * entry's pre-parsed `episodeRef`), then one `mapArchiveWithLlm` call for whatever's left —
+ * mirroring ingest's match-then-LLM ordering.
  */
 async function matchArchiveRow(
   ctx: AppContext,
@@ -234,9 +262,8 @@ async function matchArchiveRow(
     if (missing.length === 0) break;
     const t = matchDeterministic(missing, entry);
     if (t) {
-      if (await driftAndPlace(ctx, job, row, entry, t, media, placedFiles, refCache, refDir, rawDir, site)) {
-        resolved.push(t.episodeId);
-      }
+      const placedLang = await driftAndPlace(ctx, job, row, entry, t, media, placedFiles, refCache, refDir, rawDir, site);
+      if (placedLang !== undefined) notePlacement(missing, resolved, t, placedLang);
     } else {
       unmatchedPaths.push(entry.path);
     }
@@ -263,10 +290,11 @@ async function matchArchiveRow(
       const episodeId = ids[i] ?? null;
       if (episodeId === null) continue;
       const t = episodesById.get(episodeId);
+      // Episode may already have been fully resolved by an earlier file in this pack
+      // (and removed from `missing`); skip rather than re-placing over a closed gap.
       if (!t) continue;
-      if (await driftAndPlace(ctx, job, row, unmatchedEntries[i]!, t, media, placedFiles, refCache, refDir, rawDir, site)) {
-        resolved.push(t.episodeId);
-      }
+      const placedLang = await driftAndPlace(ctx, job, row, unmatchedEntries[i]!, t, media, placedFiles, refCache, refDir, rawDir, site);
+      if (placedLang !== undefined) notePlacement(missing, resolved, t, placedLang);
     }
   }
 
@@ -297,14 +325,15 @@ function matchDeterministic(missing: EpisodeTarget[], entry: { path: string }): 
 }
 
 /**
- * The drift gate + placement for one candidate file against one episode. Returns true only
- * when a usable subtitle was ACTUALLY placed (the episode's gap is now filled). Handles the
- * gate order from the brief: no reference -> place unverified; in-sync -> place; drifted ->
- * resyncAlass then re-assess -> place or try resyncFfsubsync -> re-assess -> place or
- * quarantine; unscorable -> quarantine. A quarantined candidate returns false: the episode
- * is still missing, so it stays in the working set and (if nothing else covers it) raises
- * `subtitle.unresolved` at the end of the run — quarantining a bad candidate is not "this
- * gap is filled".
+ * The drift gate + placement for one candidate file against one episode. Returns the
+ * effective language tag that was placed (which the caller uses to shrink the episode's
+ * still-missing set), or `undefined` when nothing was placed. Handles the gate order from
+ * the brief: no reference -> place unverified; in-sync -> place; drifted -> resyncAlass
+ * then re-assess -> place or try resyncFfsubsync -> re-assess -> place or quarantine;
+ * unscorable -> quarantine. A quarantined / skipped candidate returns `undefined`: the
+ * episode's gap is untouched, so it stays in the working set and (if nothing else covers
+ * it) raises `subtitle.unresolved` at the end of the run — quarantining a bad candidate is
+ * not "this gap is filled".
  */
 async function driftAndPlace(
   ctx: AppContext,
@@ -318,15 +347,15 @@ async function driftAndPlace(
   refDir: string,
   rawDir: string,
   site: string | undefined,
-): Promise<boolean> {
+): Promise<string | null | undefined> {
   // A candidate that no longer exists (already quarantined by an earlier run, or the cache
   // row is stale) is not a failure worth reporting — just skip it.
-  if (!existsSync(entry.path)) return false;
+  if (!existsSync(entry.path)) return undefined;
 
   const plan = await decideCandidate(ctx, job, entry, t, media, refCache, refDir, rawDir);
   if (plan.kind === 'quarantine') {
     await quarantine(ctx, job, entry.path);
-    return false;
+    return undefined;
   }
 
   return placeSubtitle(ctx, job, placedFiles, t, plan.path, plan.lang, plan.offsetMs, plan.drift, row, entry, site);
@@ -480,8 +509,9 @@ async function quarantine(ctx: AppContext, job: JobRow, entryPath: string): Prom
 /**
  * Atomically copies a candidate (original or resynced) beside its episode video and records
  * provenance. Same foreign-file + collision guards as ingest's `place` — never overwrites a
- * file at the target path unless a matching `placed_files` row claims it. Returns true when
- * placed.
+ * file at the target path unless a matching `placed_files` row claims it. Returns the
+ * effective language tag on success (caller shrinks the episode's still-missing set with
+ * it), or `undefined` when the place was skipped (foreign file / collision).
  */
 function placeSubtitle(
   ctx: AppContext,
@@ -495,7 +525,7 @@ function placeSubtitle(
   row: ArchiveCacheRow,
   entry: { path: string; lang: string | null },
   site: string | undefined,
-): boolean {
+): string | null | undefined {
   // A null lang tag on the candidate falls back to the first language this episode is still
   // missing — the fan-sub convention is that an untagged sub in a pack named for the missing
   // language is that language.
@@ -515,7 +545,7 @@ function placeSubtitle(
       message: `Skipped "${basename(sourcePath)}" — "${targetName}" already exists and wasn't placed by Warrden`,
       data: targetEventData(job, { sourcePath, targetPath }),
     });
-    return false;
+    return undefined;
   }
 
   if (existingAtTarget && existingAtTarget.source_path !== sourcePath) {
@@ -526,7 +556,7 @@ function placeSubtitle(
       message: `Skipped "${basename(sourcePath)}" — "${targetName}" is already claimed by "${existingAtTarget.source_path}"`,
       data: targetEventData(job, { sourcePath, targetPath }),
     });
-    return false;
+    return undefined;
   }
 
   atomicCopy(sourcePath, targetPath);
@@ -557,7 +587,7 @@ function placeSubtitle(
       message: `Resynced "${basename(sourcePath)}" (+${offsetMs}ms) and placed "${targetName}" beside "${basename(videoLocal)}"`,
       data: targetEventData(job, { sourcePath, placedPath: targetPath, offsetMs, targetName }),
     });
-    return true;
+    return effectiveLang;
   }
 
   ctx.events.append({
@@ -566,7 +596,7 @@ function placeSubtitle(
     message: `Placed "${targetName}" beside "${basename(videoLocal)}"${drift === 'unverified' ? ' (unverified — no reference track)' : ''}`,
     data: targetEventData(job, { sourcePath, placedPath: targetPath, drift, targetName }),
   });
-  return true;
+  return effectiveLang;
 }
 
 /** Site-search pass: for each configured site in order, search + download, extract, cache,

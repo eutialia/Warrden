@@ -180,26 +180,7 @@ export default function JobDetail() {
         </CardContent>
       </Card>
 
-      {job.pipeline === 'ingest' ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Placed files</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            {placedFiles.length === 0 && <p className="text-muted-foreground">No files placed for this job.</p>}
-            {placedFiles.map((f) => (
-              <div key={f.id} className="space-y-1 rounded-md border p-3">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline">{PLACED_FILE_KIND_LABEL[f.kind]}</Badge>
-                  {typeof f.data.matchedBy === 'string' && <Badge variant="secondary">{f.data.matchedBy}</Badge>}
-                </div>
-                <p className="break-all">Placed: {f.placed_path}</p>
-                <p className="break-all text-muted-foreground">Source: {f.source_path}</p>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      ) : (
+      {job.pipeline === 'acquire' ? (
         <Card>
           <CardHeader>
             <CardTitle>Acquire record</CardTitle>
@@ -220,6 +201,26 @@ export default function JobDetail() {
                 </div>
               </>
             )}
+          </CardContent>
+        </Card>
+      ) : (
+        // Ingest and subtitle both place library sidecars; acquire does not.
+        <Card>
+          <CardHeader>
+            <CardTitle>Placed files</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {placedFiles.length === 0 && <p className="text-muted-foreground">No files placed for this job.</p>}
+            {placedFiles.map((f) => (
+              <div key={f.id} className="space-y-1 rounded-md border p-3">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">{PLACED_FILE_KIND_LABEL[f.kind]}</Badge>
+                  {typeof f.data.matchedBy === 'string' && <Badge variant="secondary">{f.data.matchedBy}</Badge>}
+                </div>
+                <p className="break-all">Placed: {f.placed_path}</p>
+                <p className="break-all text-muted-foreground">Source: {f.source_path}</p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       )}

@@ -22,8 +22,10 @@ const SUB_EXTS = new Set(['.srt', '.ass', '.ssa']);
 
 /** Primary-subtag + full-tag match, case-insensitive: config 'zh-Hans' covers stream tags
  * 'zh-hans' and 'zh', but NOT 'zh-Hant'. ffprobe tags are ISO codes, so no fansub-token
- * normalization here — that's parseLangTag's job, and only on filenames. */
-function langCovers(want: string, have: string | null): boolean {
+ * normalization here — that's parseLangTag's job, and only on filenames. Exported so the
+ * pipeline runner can apply the same coverage rule when deciding whether a just-placed
+ * candidate actually filled a still-missing language. */
+export function langCovers(want: string, have: string | null): boolean {
   if (have === null) return false;
   const w = want.toLowerCase();
   const h = have.toLowerCase();

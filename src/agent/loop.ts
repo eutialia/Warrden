@@ -75,7 +75,12 @@ export async function runAgentLoop(input: {
     if (action.action === 'give_up') return { kind: 'gave-up' };
 
     if (action.action === 'download') {
-      const destPath = join(destDir, `${site.name}-${Date.now()}-${action.url.split('/').pop() ?? 'download'}`);
+      // Sanitize the URL tail so a model-chosen path segment can't escape destDir via
+      // `..` or separators (join('/data/dl', 'x-1-../../etc/passwd') would otherwise
+      // resolve outside the download dir).
+      const rawName = action.url.split('/').pop() || 'download';
+      const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'download';
+      const destPath = join(destDir, `${site.name}-${Date.now()}-${safeName}`);
       const res = await tier.fetch(action.url, { destPath });
       if (res.blocked) throw new TierBlockedError(`download blocked at ${action.url}`);
       if (!res.ok || res.filePath === undefined) {
