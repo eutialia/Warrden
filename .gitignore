@@ -9,6 +9,7 @@ web/dist/
 .ds-sync/
 ds-bundle/
 web/ds-dist/
+web/ds-tokens/
 .design-sync/.cache/
 .design-sync/learnings/
 .design-sync/node_modules

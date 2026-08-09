@@ -1,16 +1,18 @@
 /*
- * Stylesheet entry for the exported design system (see `.design-sync/`).
+ * Compiled-utility entry for the exported design system (see `.design-sync/`).
  *
- * The app's own CSS is compiled by the Vite plugin and never written to disk in a
- * form anything outside the app can consume, so this entry exists to produce one
- * standalone file: the same tokens and base layer as `src/index.css`, plus the
- * utilities used by the component previews.
+ * Deliberately imports `theme.css` and NOT `tokens.css`: the token layer ships as
+ * its own file (`ds-dist/tokens.css` → `tokens/tokens.css` in the export) so that
+ * anything reading this design system's tokens gets our names alone, rather than
+ * having to pick them out of a compiled stylesheet where Tailwind's internals
+ * (`--tw-*`) and its default theme sit in the same `:root` block.
  *
- * `@source` is what makes that second part work — Tailwind only emits utilities it
- * can see used, and the preview files live outside this package's default scan
- * root, so without these lines every preview card would render unstyled.
+ * The utilities here reference the tokens through `var(--…)`, which resolves at
+ * runtime — `@theme inline` inlines the reference rather than the value, so the
+ * values are not needed at compile time. `styles.css` imports the token file
+ * first, so both halves are always present together.
  */
-@import "./src/index.css";
+@import "./src/theme.css";
 
 @source "./src";
 @source "../.design-sync/previews";

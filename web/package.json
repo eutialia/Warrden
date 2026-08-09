@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "build:ds-css": "tailwindcss -i ./ds.css -o ./ds-dist/ds.css --minify && mkdir -p ds-dist/files && cp -R node_modules/@fontsource-variable/geist/files/. node_modules/@fontsource-variable/geist-mono/files/. ds-dist/files/",
+    "build:ds-css": "node scripts/build-ds-css.mjs",
     "build:ds": "npm run build:ds-css && tsc -p tsconfig.ds.json"
   },
   "dependencies": {
