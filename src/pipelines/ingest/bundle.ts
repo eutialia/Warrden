@@ -181,10 +181,12 @@ export interface BundlePlan {
  *   them is trustworthy enough to import unattended — ALL of them are pulled out of
  *   `files` and appended to `skipped`, and `reasoning` gets a note. Picking one over the
  *   other is a human call.
- * - **Occupied-episode cap**: if any surviving file (from *any* tier, including tier 1)
- *   targets an episode with `hasFile === true`, replacing an existing file is always a
- *   human decision — the whole plan's `confidence` is capped at `'low'`. This only ever
- *   downgrades, never upgrades, an otherwise-higher confidence.
+ * - **Already-imported skip (incremental only)**: any file whose episode id(s) are all
+ *   already on disk (`hasFile === true`) is dropped from `files` into `skipped`. Warrden
+ *   never proposes re-importing or replacing library files that Sonarr already owns —
+ *   only real leftovers (missing episodes) stay in the plan. A plan that ends up empty
+ *   after this pass returns `null` (quiet no-op), which is the correct outcome when the
+ *   arr's manual-import API re-lists an entire finished library.
  *
  * Returns `null` when nothing ended up importable — an empty `files` plan isn't worth
  * acting on.
@@ -280,11 +282,28 @@ export async function planBundleImport(input: {
     reasoning += `; ${duplicateIndices.size} file(s) skipped — duplicate episode targets (multiple files claimed the same episode)`;
   }
 
-  // Occupied-episode cap: replacing a file that's already on disk is always a human
-  // decision, regardless of which tier produced the mapping. This only ever downgrades.
+  // Incremental only: drop files that only target episodes Sonarr already has on disk.
+  // Replacing an existing library file is never Warrden's job (Sonarr upgrades handle that).
+  // A file that maps to a mix of free + occupied ids keeps only the free ones.
   const occupiedEpisodeIds = new Set(episodes.filter((e) => e.hasFile).map((e) => e.id));
-  const targetsOccupiedEpisode = files.some((f) => (f.episodeIds ?? []).some((id) => occupiedEpisodeIds.has(id)));
-  if (targetsOccupiedEpisode) confidence = 'low';
+  if (occupiedEpisodeIds.size > 0 && files.length > 0) {
+    const kept: ManualImportFile[] = [];
+    let droppedOccupied = 0;
+    for (const f of files) {
+      const ids = f.episodeIds ?? [];
+      const freeIds = ids.filter((id) => !occupiedEpisodeIds.has(id));
+      if (freeIds.length === 0) {
+        skipped.push(f.path);
+        droppedOccupied++;
+      } else {
+        kept.push(freeIds.length === ids.length ? f : { ...f, episodeIds: freeIds });
+      }
+    }
+    files = kept;
+    if (droppedOccupied > 0) {
+      reasoning += `; ${droppedOccupied} file(s) skipped — episode already imported in the library`;
+    }
+  }
 
   if (files.length === 0) return null;
 

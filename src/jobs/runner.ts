@@ -8,6 +8,14 @@ type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
 
 const DEFAULT_INTERVAL_MS = 1000;
 
+/** Human pipeline name for permanent-failure attention (never the raw enum). */
+function pipelineLabel(pipeline: string): string {
+  if (pipeline === 'acquire') return 'Release search';
+  if (pipeline === 'ingest') return 'Import cleanup';
+  if (pipeline === 'subtitle') return 'Subtitle search';
+  return pipeline;
+}
+
 /**
  * Polls the job queue on an interval, claiming one pending job per tick and dispatching it
  * to the handler registered for its `pipeline`. A handler that resolves completes the job
@@ -98,7 +106,7 @@ function failJob(ctx: AppContext, job: JobRow, message: string): void {
       kind: 'job.attention',
       level: 'attention',
       jobId: job.id,
-      message: `Job #${job.id} (${job.pipeline}) failed permanently: ${message}`,
+      message: `${pipelineLabel(job.pipeline)} for this title failed permanently: ${message}`,
       data: targetEventData(job, { pipeline: job.pipeline, dedupeKey: job.pipeline }),
     });
   }

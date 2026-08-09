@@ -1,33 +1,38 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
   ApiError,
   CALLSITES,
   fetchConfig,
+  fetchStorageHealth,
   saveConfig,
   SECRET_PLACEHOLDER,
   type ArrInstance,
   type ArrKind,
   type Config,
+  type StorageCheck,
   type SubtitleSite,
 } from '@/api';
+import { PageHeader } from '@/components/PageHeader';
+import { TagInput } from '@/components/TagInput';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { cn } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
 const EMPTY_SUBTITLE_SITE: SubtitleSite = { name: '', baseUrl: '' };
 
 const LLM_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const;
 type LlmProvider = (typeof LLM_PROVIDERS)[number];
-const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = { openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic' };
+const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = {
+  openrouter: 'OpenRouter',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+};
 
-/** One provider key field's editing state: `text` is what's shown (the sentinel, a typed
- * value, or blank), `wasSet` records whether the key was actually configured when the page
- * loaded (so a blank field can tell "never set" apart from "cleared"), and `remove` is the
- * explicit "delete this key" checkbox — the only path that actually unsets a previously-set
- * key (see `buildLlmKeys`). */
 interface LlmKeyFieldState {
   text: string;
   wasSet: boolean;
@@ -35,83 +40,105 @@ interface LlmKeyFieldState {
 }
 const EMPTY_KEY_FIELD: LlmKeyFieldState = { text: '', wasSet: false, remove: false };
 
-/** Add/remove editor for a flat string list (`ingest.mountMarkers`, `ingest.downloadRoots`)
- * — pulled out since both fields need the identical add/edit/remove shape, just with
- * different labels and helper text. */
-function StringListField({
-  label,
-  helperText,
-  values,
-  onChange,
+type SectionId = 'connections' | 'picking' | 'subtitles' | 'browser' | 'llm' | 'keys';
+
+/** Mirrors server `standardMounts` — web has no shared package with the backend. */
+const STANDARD_MOUNT_ROWS = [
+  { id: 'series', label: 'Series', path: '/tv', blurb: 'Sonarr Series root folder' },
+  { id: 'anime', label: 'Anime', path: '/anime', blurb: 'Sonarr Anime root folder' },
+  { id: 'movies', label: 'Movies', path: '/movies', blurb: 'Radarr library root' },
+  { id: 'downloads', label: 'Downloads', path: '/downloads', blurb: 'Torrent download / completed root' },
+] as const;
+
+function SectionFooter({
+  dirty,
+  saving,
+  onSave,
+  onDiscard,
+  error,
 }: {
-  label: string;
-  helperText: string;
-  values: string[];
-  onChange: (values: string[]) => void;
+  dirty: boolean;
+  saving: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  error?: string | null;
 }) {
   return (
-    <div>
-      <label className="mb-1 block text-sm font-medium">{label}</label>
-      <p className="mb-2 text-xs text-muted-foreground">{helperText}</p>
-      <div className="space-y-2">
-        {values.map((v, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <Input value={v} onChange={(e) => onChange(values.map((existing, idx) => (idx === i ? e.target.value : existing)))} />
-            <Button variant="ghost" size="sm" onClick={() => onChange(values.filter((_, idx) => idx !== i))}>
-              Remove
-            </Button>
-          </div>
-        ))}
-      </div>
-      <Button variant="outline" size="sm" className="mt-2" onClick={() => onChange([...values, ''])}>
-        Add
+    <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+      <Button onClick={onSave} disabled={!dirty || saving}>
+        {saving ? 'Saving…' : 'Save section'}
       </Button>
+      <Button variant="ghost" onClick={onDiscard} disabled={!dirty || saving}>
+        Discard
+      </Button>
+      {dirty && (
+        <Badge variant="outline" className="bg-amber-50 text-amber-950 border-amber-200">
+          Unsaved changes
+        </Badge>
+      )}
+      {error && <p className="w-full text-sm text-destructive">{error}</p>}
     </div>
   );
 }
 
+function storageStatusClass(status: StorageCheck['status']): string {
+  switch (status) {
+    case 'ok':
+      return 'bg-emerald-100 text-emerald-900 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-100';
+    case 'missing':
+    case 'not-mounted':
+      return 'bg-red-100 text-red-900 border-red-200 dark:bg-red-950 dark:text-red-100';
+    default:
+      return 'bg-amber-100 text-amber-950 border-amber-200 dark:bg-amber-950 dark:text-amber-100';
+  }
+}
+
+function storageStatusLabel(status: StorageCheck['status']): string {
+  switch (status) {
+    case 'ok':
+      return 'OK';
+    case 'missing':
+      return 'Missing';
+    case 'not-mounted':
+      return 'Not mounted';
+    case 'unreadable':
+      return 'Not readable';
+    case 'unwritable':
+      return 'Not writable';
+    default:
+      return status;
+  }
+}
+
 export default function ConfigPage() {
+  const [baseline, setBaseline] = useState<Config | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [tagsText, setTagsText] = useState('');
-  // Kept as free-form text (not the parsed numbers) so an in-progress edit — including a
-  // momentarily empty field while the user retypes it — never gets coerced to 0 and saved.
-  // Parsed and validated only in handleSave.
+  const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
+  const [storageError, setStorageError] = useState<string | null>(null);
+
   const [seederFloorText, setSeederFloorText] = useState('');
   const [minSizeMBText, setMinSizeMBText] = useState('');
   const [maxSizeMBText, setMaxSizeMBText] = useState('');
-  const [pickingError, setPickingError] = useState<string | null>(null);
   const [profilesText, setProfilesText] = useState('');
-  const [profilesError, setProfilesError] = useState<string | null>(null);
-  // Languages kept as newline-delimited text, exactly like `picking.tags` above — same UX
-  // (one per line, trim/drop-blank on save) and the same "don't coerce mid-edit" reason.
-  const [languagesText, setLanguagesText] = useState('');
-  // Soft preferred fansub groups — same newline list UX as languages/tags.
-  const [preferredGroupsText, setPreferredGroupsText] = useState('');
-  // Browser-agent numbers, same free-form-text-then-parse treatment as the picking number
-  // fields above: a momentarily empty field while retyping must never silently save as 0.
   const [stepBudgetText, setStepBudgetText] = useState('');
   const [siteCooldownText, setSiteCooldownText] = useState('');
-  const [subtitleError, setSubtitleError] = useState<string | null>(null);
-  // One editing state per provider key, not bound directly to `config.llm.keys` — see
-  // `LlmKeyFieldState` above for what each field tracks and why.
   const [llmKeyFields, setLlmKeyFields] = useState<Record<LlmProvider, LlmKeyFieldState>>({
     openrouter: EMPTY_KEY_FIELD,
     openai: EMPTY_KEY_FIELD,
     anthropic: EMPTY_KEY_FIELD,
   });
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+
+  const [savingSection, setSavingSection] = useState<SectionId | null>(null);
+  const [sectionError, setSectionError] = useState<Partial<Record<SectionId, string>>>({});
 
   function loadFormState(c: Config): void {
-    setConfig(c);
-    setTagsText(c.picking.tags.join('\n'));
+    setBaseline(structuredClone(c));
+    setConfig(structuredClone(c));
     setSeederFloorText(String(c.picking.seederFloor));
     setMinSizeMBText(String(c.picking.minSizeMB));
     setMaxSizeMBText(String(c.picking.maxSizeMB));
     setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
-    setLanguagesText(c.subtitle.languages.join('\n'));
-    setPreferredGroupsText((c.subtitle.preferredGroups ?? []).join('\n'));
     setStepBudgetText(String(c.browser.stepBudget));
     setSiteCooldownText(String(c.browser.siteCooldownSeconds));
     setLlmKeyFields({
@@ -119,24 +146,38 @@ export default function ConfigPage() {
       openai: { text: c.llm.keys.openai ?? '', wasSet: c.llm.keys.openai !== undefined, remove: false },
       anthropic: { text: c.llm.keys.anthropic ?? '', wasSet: c.llm.keys.anthropic !== undefined, remove: false },
     });
+    setSectionError({});
   }
+
+  const loadStorage = useCallback(() => {
+    setStorageError(null);
+    fetchStorageHealth()
+      .then((res) => setStorageChecks(res.checks))
+      .catch((err: unknown) => {
+        setStorageError(err instanceof ApiError ? err.message : 'Failed to check storage');
+      });
+  }, []);
+
+  function loadConfigFromServer(): void {
+    setLoadError(null);
+    fetchConfig()
+      .then((c) => {
+        loadFormState(c);
+        loadStorage();
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof ApiError ? err.message : 'Failed to load settings';
+        setLoadError(message);
+        toast.error(message);
+      });
+  }
+
+  useEffect(loadConfigFromServer, [loadStorage]);
 
   function updateLlmKeyField(provider: LlmProvider, patch: Partial<LlmKeyFieldState>): void {
     setLlmKeyFields((prev) => ({ ...prev, [provider]: { ...prev[provider], ...patch } }));
   }
 
-  /**
-   * Builds the `llm.keys` object to send on save. Per key, in priority order:
-   *  1. "Remove" checked — omitted entirely. This is the *only* path that actually
-   *     deletes a previously-set key.
-   *  2. A non-blank value (a freshly typed secret, or the sentinel round-tripped
-   *     unchanged) — sent as-is; the server resolves the sentinel back to the stored
-   *     secret, a real value rotates it.
-   *  3. Blank, but the key was set when the page loaded — re-sent as the sentinel, so
-   *     clearing the field back to empty is a no-op rather than a silent delete (the
-   *     bug this whole scheme fixes: clearing used to erase the stored secret).
-   *  4. Blank and never set — omitted; still unset either way.
-   */
   function buildLlmKeys(): Config['llm']['keys'] {
     const keys: Config['llm']['keys'] = {};
     for (const provider of LLM_PROVIDERS) {
@@ -151,22 +192,43 @@ export default function ConfigPage() {
     return keys;
   }
 
-  function loadConfigFromServer(): void {
-    setLoadError(null);
-    fetchConfig()
-      .then(loadFormState)
-      .catch((err: unknown) => {
-        const message = err instanceof ApiError ? err.message : 'failed to load config';
-        setLoadError(message);
-        toast.error(message);
-      });
+  function parseNumber(text: string): number | undefined {
+    const trimmed = text.trim();
+    const value = Number(trimmed);
+    return trimmed === '' || Number.isNaN(value) ? undefined : value;
   }
 
-  useEffect(loadConfigFromServer, []);
+  async function persist(section: SectionId, next: Config): Promise<void> {
+    if (!baseline) return;
+    // Mounts are fixed outside the UI — never let a section save rewrite them.
+    const payload: Config = { ...next, ingest: baseline.ingest, pathMappings: baseline.pathMappings };
+    setSavingSection(section);
+    setSectionError((prev) => ({ ...prev, [section]: undefined }));
+    try {
+      const result = await saveConfig(payload);
+      toast.success(result.restartRequired ? 'Saved — restart the container to apply fully' : 'Saved');
+      const fresh = await fetchConfig();
+      loadFormState(fresh);
+      if (section === 'connections') loadStorage();
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const issueText = err.issues?.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
+        const message = issueText ? `${err.message} — ${issueText}` : err.message;
+        setSectionError((prev) => ({ ...prev, [section]: message }));
+        toast.error(err.message);
+      } else {
+        setSectionError((prev) => ({ ...prev, [section]: 'Failed to save' }));
+        toast.error('Failed to save');
+      }
+    } finally {
+      setSavingSection(null);
+    }
+  }
 
   if (loadError) {
     return (
       <div className="space-y-2">
+        <PageHeader title="Settings" description="Connections and preferences for Warrden." />
         <p className="text-sm text-destructive">{loadError}</p>
         <Button variant="outline" size="sm" onClick={loadConfigFromServer}>
           Retry
@@ -175,38 +237,46 @@ export default function ConfigPage() {
     );
   }
 
-  if (!config) {
+  if (!config || !baseline) {
     return <p className="text-muted-foreground">Loading…</p>;
   }
 
+  // --- dirty helpers (section-local) ---
+  const connectionsDirty =
+    JSON.stringify(config.arrs) !== JSON.stringify(baseline.arrs) ||
+    config.server.publicUrl !== baseline.server.publicUrl ||
+    config.server.port !== baseline.server.port;
+
+  const pickingDirty =
+    JSON.stringify(config.picking.tags) !== JSON.stringify(baseline.picking.tags) ||
+    seederFloorText !== String(baseline.picking.seederFloor) ||
+    minSizeMBText !== String(baseline.picking.minSizeMB) ||
+    maxSizeMBText !== String(baseline.picking.maxSizeMB);
+
+  const subtitlesDirty =
+    JSON.stringify(config.subtitle.languages) !== JSON.stringify(baseline.subtitle.languages) ||
+    JSON.stringify(config.subtitle.preferredGroups ?? []) !== JSON.stringify(baseline.subtitle.preferredGroups ?? []) ||
+    JSON.stringify(config.subtitle.sites) !== JSON.stringify(baseline.subtitle.sites);
+
+  const browserDirty =
+    stepBudgetText !== String(baseline.browser.stepBudget) ||
+    siteCooldownText !== String(baseline.browser.siteCooldownSeconds);
+
+  const llmDirty =
+    config.llm.activeProfile !== baseline.llm.activeProfile ||
+    profilesText !== JSON.stringify(baseline.llm.profiles, null, 2);
+
+  const keysDirty = LLM_PROVIDERS.some((p) => {
+    const field = llmKeyFields[p];
+    const base = baseline.llm.keys[p] ?? '';
+    if (field.remove) return true;
+    if (field.text === SECRET_PLACEHOLDER || field.text === base) return false;
+    if (field.text === '' && !field.wasSet) return false;
+    return field.text !== base;
+  });
+
   function updateArr(index: number, patch: Partial<ArrInstance>): void {
     setConfig((prev) => (prev ? { ...prev, arrs: prev.arrs.map((a, i) => (i === index ? { ...a, ...patch } : a)) } : prev));
-  }
-
-  function addArr(): void {
-    setConfig((prev) => (prev ? { ...prev, arrs: [...prev.arrs, { ...EMPTY_ARR }] } : prev));
-  }
-
-  function removeArr(index: number): void {
-    setConfig((prev) => (prev ? { ...prev, arrs: prev.arrs.filter((_, i) => i !== index) } : prev));
-  }
-
-  function updatePathMapping(index: number, patch: Partial<Config['pathMappings'][number]>): void {
-    setConfig((prev) =>
-      prev ? { ...prev, pathMappings: prev.pathMappings.map((m, i) => (i === index ? { ...m, ...patch } : m)) } : prev,
-    );
-  }
-
-  function addPathMapping(): void {
-    setConfig((prev) => (prev ? { ...prev, pathMappings: [...prev.pathMappings, { from: '', to: '' }] } : prev));
-  }
-
-  function removePathMapping(index: number): void {
-    setConfig((prev) => (prev ? { ...prev, pathMappings: prev.pathMappings.filter((_, i) => i !== index) } : prev));
-  }
-
-  function updateIngest(patch: Partial<Config['ingest']>): void {
-    setConfig((prev) => (prev ? { ...prev, ingest: { ...prev.ingest, ...patch } } : prev));
   }
 
   function updateSubtitleSite(index: number, patch: Partial<SubtitleSite>): void {
@@ -217,111 +287,35 @@ export default function ConfigPage() {
     );
   }
 
-  function addSubtitleSite(): void {
-    setConfig((prev) => (prev ? { ...prev, subtitle: { ...prev.subtitle, sites: [...prev.subtitle.sites, { ...EMPTY_SUBTITLE_SITE }] } } : prev));
-  }
-
-  function removeSubtitleSite(index: number): void {
-    setConfig((prev) => (prev ? { ...prev, subtitle: { ...prev.subtitle, sites: prev.subtitle.sites.filter((_, i) => i !== index) } } : prev));
-  }
-
-  /** Trims and drops blank entries from a `StringListField`-backed array — same intent as
-   * the picking-tags split/trim/filter below, pulled out since `ingest.mountMarkers` and
-   * `ingest.downloadRoots` both need it. Without this, a row left blank after an "Add"
-   * click (or never filled in) would save as `''`, which the server schema now rejects
-   * outright (`.min(1)` per entry) — filtering here means an accidental blank row is
-   * silently dropped instead of blocking the whole save. */
-  function trimAndDropBlank(values: string[]): string[] {
-    return values.map((v) => v.trim()).filter((v) => v.length > 0);
-  }
-
-  /** Same idea as `trimAndDropBlank`, but a `pathMappings` row has two sides — a row is
-   * kept only when both `from` and `to` are non-blank after trimming; either side left
-   * blank drops the whole row rather than saving a mapping that can never match anything. */
-  function trimAndDropBlankMappings(mappings: Config['pathMappings']): Config['pathMappings'] {
-    return mappings
-      .map((m) => ({ from: m.from.trim(), to: m.to.trim() }))
-      .filter((m) => m.from.length > 0 && m.to.length > 0);
-  }
-
-  /** Parses one of the picking number fields, rejecting blank/non-numeric text outright —
-   * `Number('')` is `0`, so without this a field the user cleared mid-edit would silently
-   * save as zero instead of blocking the save like the LLM-profiles JSON check does. Has
-   * no side effect so the caller can collect every failing field's message rather than
-   * only the last one checked. */
-  function parsePickingNumber(text: string): number | undefined {
-    const trimmed = text.trim();
-    const value = Number(trimmed);
-    return trimmed === '' || Number.isNaN(value) ? undefined : value;
-  }
-
-  async function handleSave(): Promise<void> {
+  async function saveConnections(): Promise<void> {
     if (!config) return;
+    await persist( 'connections', {
+      ...config,
+      arrs: config.arrs
+        .map((a) => ({ ...a, name: a.name.trim(), baseUrl: a.baseUrl.trim() }))
+        .filter((a) => a.name.length > 0 && a.baseUrl.length > 0),
+      server: { ...config.server, publicUrl: config.server.publicUrl.trim() },
+    });
+  }
 
-    let profiles: Config['llm']['profiles'];
-    try {
-      profiles = JSON.parse(profilesText) as Config['llm']['profiles'];
-      setProfilesError(null);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'invalid JSON';
-      setProfilesError(message);
-      toast.error(`LLM profiles is not valid JSON: ${message}`);
-      return;
-    }
-
-    setPickingError(null);
-    const seederFloor = parsePickingNumber(seederFloorText);
-    const minSizeMB = parsePickingNumber(minSizeMBText);
-    const maxSizeMB = parsePickingNumber(maxSizeMBText);
+  async function savePicking(): Promise<void> {
+    if (!config) return;
+    const seederFloor = parseNumber(seederFloorText);
+    const minSizeMB = parseNumber(minSizeMBText);
+    const maxSizeMB = parseNumber(maxSizeMBText);
     if (seederFloor === undefined || minSizeMB === undefined || maxSizeMB === undefined) {
-      // Collects every failing field's message (not just the last one checked) so the
-      // user can fix them all in one pass instead of one save attempt per field.
-      const messages = [
-        seederFloor === undefined && 'Seeder floor must be a number',
-        minSizeMB === undefined && 'Min size must be a number',
-        maxSizeMB === undefined && 'Max size must be a number',
-      ].filter((m): m is string => m !== false);
-      setPickingError(messages.join('; '));
-      toast.error('Picking fields must all be numbers');
+      setSectionError((prev) => ({ ...prev, picking: 'Seeder floor and size limits must be numbers' }));
+      toast.error('Picking fields must be numbers');
       return;
     }
+    await persist('picking', {
+      ...config,
+      picking: { tags: config.picking.tags, seederFloor, minSizeMB, maxSizeMB },
+    });
+  }
 
-    // Same number-parsing for the browser-agent fields — same "don't coerce mid-edit"
-    // reason as the picking fields above. Validated here (not on the schema) because the
-    // schema's own `min(1)`/`min(0)` floors are looser than what a blank field would land as.
-    setSubtitleError(null);
-    const stepBudget = parsePickingNumber(stepBudgetText);
-    const siteCooldownSeconds = parsePickingNumber(siteCooldownText);
-    if (stepBudget === undefined || siteCooldownSeconds === undefined) {
-      const messages = [
-        stepBudget === undefined && 'Step budget must be a number',
-        siteCooldownSeconds === undefined && 'Site cooldown must be a number',
-      ].filter((m): m is string => m !== false);
-      setSubtitleError(messages.join('; '));
-      toast.error('Browser agent fields must be numbers');
-      return;
-    }
-
-    const tags = tagsText
-      .split('\n')
-      .map((t) => t.trim())
-      .filter((t) => t.length > 0);
-
-    const languages = languagesText
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-
-    const preferredGroups = preferredGroupsText
-      .split('\n')
-      .map((g) => g.trim())
-      .filter((g) => g.length > 0);
-
-    // Drop subtitle sites left with a blank name or baseUrl — same intent as
-    // `trimAndDropBlankMappings`: a row missing either side can never match anything
-    // (the schema's `.min(1)` on both would reject the whole save anyway). `searchUrlTemplate`
-    // is optional, so an empty/whitespace value is dropped to `undefined` rather than saved
-    // as an empty string the schema would reject.
+  async function saveSubtitles(): Promise<void> {
+    if (!config) return;
     const sites: SubtitleSite[] = config.subtitle.sites
       .map((s) => ({
         name: s.name.trim(),
@@ -329,273 +323,366 @@ export default function ConfigPage() {
         searchUrlTemplate: s.searchUrlTemplate?.trim() || undefined,
       }))
       .filter((s) => s.name.length > 0 && s.baseUrl.length > 0);
-
-    // Full replace: round-trip everything from the last GET/save, with just the edited
-    // fields overlaid — llm.keys entries are rebuilt from the per-provider text fields
-    // (see `buildLlmKeys`) and the server merges sentinel values back to the stored secret.
-    const payload: Config = {
+    await persist('subtitles', {
       ...config,
-      pathMappings: trimAndDropBlankMappings(config.pathMappings),
-      picking: { tags, seederFloor, minSizeMB, maxSizeMB },
-      ingest: {
-        mountMarkers: trimAndDropBlank(config.ingest.mountMarkers),
-        downloadRoots: trimAndDropBlank(config.ingest.downloadRoots),
+      subtitle: {
+        languages: config.subtitle.languages,
+        preferredGroups: config.subtitle.preferredGroups ?? [],
+        sites,
       },
-      subtitle: { languages, preferredGroups, sites },
-      browser: { stepBudget, siteCooldownSeconds },
-      llm: { ...config.llm, profiles, keys: buildLlmKeys() },
-    };
+    });
+  }
 
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const result = await saveConfig(payload);
-      toast.success(result.restartRequired ? 'Config saved — restart required to apply' : 'Config saved');
-      const fresh = await fetchConfig();
-      loadFormState(fresh);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        const issueText = err.issues?.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
-        setSaveError(issueText ? `${err.message} — ${issueText}` : err.message);
-        toast.error(err.message);
-      } else {
-        setSaveError('failed to save config');
-        toast.error('failed to save config');
-      }
-    } finally {
-      setSaving(false);
+  async function saveBrowser(): Promise<void> {
+    if (!config) return;
+    const stepBudget = parseNumber(stepBudgetText);
+    const siteCooldownSeconds = parseNumber(siteCooldownText);
+    if (stepBudget === undefined || siteCooldownSeconds === undefined) {
+      setSectionError((prev) => ({ ...prev, browser: 'Step budget and cooldown must be numbers' }));
+      toast.error('Browser fields must be numbers');
+      return;
     }
+    await persist('browser', {
+      ...config,
+      browser: { stepBudget, siteCooldownSeconds },
+    });
+  }
+
+  async function saveLlm(): Promise<void> {
+    if (!config) return;
+    let profiles: Config['llm']['profiles'];
+    try {
+      profiles = JSON.parse(profilesText) as Config['llm']['profiles'];
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'invalid JSON';
+      setSectionError((prev) => ({ ...prev, llm: `Profiles JSON: ${message}` }));
+      toast.error('LLM profiles is not valid JSON');
+      return;
+    }
+    await persist('llm', {
+      ...config,
+      llm: { ...config.llm, profiles, keys: buildLlmKeys() },
+    });
+  }
+
+  async function saveKeys(): Promise<void> {
+    if (!config) return;
+    await persist('keys', {
+      ...config,
+      llm: { ...config.llm, keys: buildLlmKeys() },
+    });
   }
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Arr instances</CardTitle>
-          <CardDescription>
-            Leave the API key as {SECRET_PLACEHOLDER} to keep the stored value. Renaming an instance requires
-            re-entering its key.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {config.arrs.map((arr, i) => (
-            <div key={i} className="grid grid-cols-[1fr_120px_1.5fr_1.5fr_auto] items-center gap-2">
-              <Input placeholder="name" value={arr.name} onChange={(e) => updateArr(i, { name: e.target.value })} />
-              <select
-                className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
-                value={arr.kind}
-                onChange={(e) => updateArr(i, { kind: e.target.value as ArrKind })}
-              >
-                <option value="sonarr">sonarr</option>
-                <option value="radarr">radarr</option>
-              </select>
-              <Input placeholder="base URL" value={arr.baseUrl} onChange={(e) => updateArr(i, { baseUrl: e.target.value })} />
-              <Input
-                type="password"
-                placeholder="API key"
-                autoComplete="new-password"
-                value={arr.apiKey}
-                onChange={(e) => updateArr(i, { apiKey: e.target.value })}
-              />
-              <Button variant="ghost" size="sm" onClick={() => removeArr(i)}>
-                Remove
-              </Button>
-            </div>
-          ))}
-          <Button variant="outline" size="sm" onClick={addArr}>
-            Add instance
-          </Button>
-        </CardContent>
-      </Card>
+    <div className="space-y-6">
+      <PageHeader
+        title="Settings"
+        description="Connect Sonarr/Radarr, set release and subtitle preferences, and check storage access. Each section saves on its own — nothing is applied until you click Save."
+      />
 
+      {/* Connections */}
       <Card>
         <CardHeader>
-          <CardTitle>Path mappings</CardTitle>
+          <CardTitle>Connections</CardTitle>
           <CardDescription>
-            Translates a path the arr reports into Warrden's own filesystem view — needed whenever Warrden and the
-            arr see the same files under different mount points (e.g. a NAS share mounted at a different path on
-            each side).
+            Sonarr and Radarr instances Warrden talks to. Public URL is the address those apps use to reach this
+            container for webhooks.
           </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {config.pathMappings.map((m, i) => (
-            <div key={i} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2">
-              <Input placeholder="from (arr-side)" value={m.from} onChange={(e) => updatePathMapping(i, { from: e.target.value })} />
-              <Input placeholder="to (Warrden-side)" value={m.to} onChange={(e) => updatePathMapping(i, { to: e.target.value })} />
-              <Button variant="ghost" size="sm" onClick={() => removePathMapping(i)}>
-                Remove
-              </Button>
-            </div>
-          ))}
-          <Button variant="outline" size="sm" onClick={addPathMapping}>
-            Add mapping
-          </Button>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Ingest</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <StringListField
-            label="Mount markers"
-            helperText="Warrden-local paths that must exist before ingest touches the filesystem — e.g. a canary file at the root of each NAS mount. Empty means no mount verification."
-            values={config.ingest.mountMarkers}
-            onChange={(mountMarkers) => updateIngest({ mountMarkers })}
-          />
-          <StringListField
-            label="Download roots"
-            helperText="Arr-side paths of the torrent clients' download roots — used to find each torrent's own folder for bundle rescue."
-            values={config.ingest.downloadRoots}
-            onChange={(downloadRoots) => updateIngest({ downloadRoots })}
+          <div>
+            <label className="mb-1 block text-sm font-medium">Public URL</label>
+            <Input
+              value={config.server.publicUrl}
+              onChange={(e) => setConfig({ ...config, server: { ...config.server, publicUrl: e.target.value } })}
+              placeholder="http://warrden.example:9797"
+            />
+            <p className="mt-1 text-xs text-muted-foreground">
+              Must be reachable from Sonarr/Radarr. Changing it later requires deleting the “Warrden” webhook in the arr
+              so it can re-register.
+            </p>
+          </div>
+          <div className="space-y-3">
+            {config.arrs.map((arr, i) => (
+              <div key={i} className="grid gap-2 rounded-lg border p-3 md:grid-cols-[1fr_120px_1.5fr_1.5fr_auto]">
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">Name</label>
+                  <Input placeholder="sonarr" value={arr.name} onChange={(e) => updateArr(i, { name: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">Type</label>
+                  <select
+                    className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm"
+                    value={arr.kind}
+                    onChange={(e) => updateArr(i, { kind: e.target.value as ArrKind })}
+                  >
+                    <option value="sonarr">Sonarr</option>
+                    <option value="radarr">Radarr</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
+                  <Input
+                    placeholder="http://sonarr:8989"
+                    value={arr.baseUrl}
+                    onChange={(e) => updateArr(i, { baseUrl: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">API key</label>
+                  <Input
+                    type="password"
+                    placeholder="API key"
+                    autoComplete="new-password"
+                    value={arr.apiKey}
+                    onChange={(e) => updateArr(i, { apiKey: e.target.value })}
+                  />
+                  <p className="mt-1 text-[0.7rem] text-muted-foreground">Leave as {SECRET_PLACEHOLDER} to keep stored key</p>
+                </div>
+                <div className="flex items-end">
+                  <Button variant="ghost" size="sm" onClick={() => setConfig({ ...config, arrs: config.arrs.filter((_, j) => j !== i) })}>
+                    Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button variant="outline" size="sm" onClick={() => setConfig({ ...config, arrs: [...config.arrs, { ...EMPTY_ARR }] })}>
+              Add instance
+            </Button>
+          </div>
+          <SectionFooter
+            dirty={connectionsDirty}
+            saving={savingSection === 'connections'}
+            onSave={() => void saveConnections()}
+            onDiscard={() => loadFormState(baseline)}
+            error={sectionError.connections}
           />
         </CardContent>
       </Card>
 
+      {/* Storage — three fixed mounts, never editable */}
       <Card>
         <CardHeader>
-          <CardTitle>Picking</CardTitle>
+          <CardTitle>Storage mounts</CardTitle>
+          <CardDescription>
+            Warrden always expects exactly four bind mounts (Series, Anime, Movies, Downloads). Set them when you create
+            the container — this page only checks that they are reachable. Not editable here.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Tags (one per line)</label>
-            <Textarea rows={4} value={tagsText} onChange={(e) => setTagsText(e.target.value)} />
+          <div className="overflow-x-auto rounded-lg border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+                  <th className="px-3 py-2 font-medium">Role</th>
+                  <th className="px-3 py-2 font-medium">Container path</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {STANDARD_MOUNT_ROWS.map((row) => {
+                  const check = storageChecks.find((c) => c.id === row.id);
+                  const status = check?.status ?? 'missing';
+                  const detail = check?.detail ?? (storageError ?? 'Waiting for health check…');
+                  const path = check?.path ?? row.path;
+                  return (
+                    <tr key={row.id} className="border-b last:border-0">
+                      <td className="px-3 py-3">
+                        <div className="font-medium">{row.label}</div>
+                        <div className="text-xs text-muted-foreground">{row.blurb}</div>
+                      </td>
+                      <td className="px-3 py-3 font-mono text-xs">{path}</td>
+                      <td className="px-3 py-3">
+                        <Badge variant="outline" className={cn('font-medium', storageStatusClass(status))}>
+                          {storageStatusLabel(status)}
+                        </Badge>
+                        <p className="mt-1 max-w-sm text-xs text-muted-foreground">{detail}</p>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-          <div className="grid grid-cols-3 gap-3">
+          {storageError && <p className="text-sm text-destructive">{storageError}</p>}
+          <p className="text-xs text-muted-foreground">
+            Example:{' '}
+            <code className="rounded bg-muted px-1 py-0.5">
+              -v …/Series:/tv -v …/Anime:/anime -v …/Movies:/movies -v …/Downloads:/downloads
+            </code>
+            . If Sonarr/Radarr use different paths than Warrden, set <code className="rounded bg-muted px-1">pathMappings</code>{' '}
+            in <code className="rounded bg-muted px-1">config.json</code> (not here).
+          </p>
+          <Button variant="outline" size="sm" onClick={loadStorage}>
+            Re-check
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Picking */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Release picking</CardTitle>
+          <CardDescription>
+            Rules for which torrent Warrden will grab when a series or movie is added. Tags are soft preferences the
+            picker prefers to see in release titles.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium">Preferred tags</label>
+            <TagInput
+              values={config.picking.tags}
+              onChange={(tags) => setConfig({ ...config, picking: { ...config.picking, tags } })}
+              placeholder="e.g. 1080p — Enter to add"
+            />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
             <div>
-              <label className="mb-1 block text-sm font-medium">Seeder floor</label>
-              <Input
-                type="number"
-                value={seederFloorText}
-                onChange={(e) => {
-                  setSeederFloorText(e.target.value);
-                  setPickingError(null);
-                }}
-              />
+              <label className="mb-1 block text-sm font-medium">Minimum seeders</label>
+              <Input type="number" value={seederFloorText} onChange={(e) => setSeederFloorText(e.target.value)} />
+              <p className="mt-1 text-xs text-muted-foreground">Drop releases with fewer seeders than this</p>
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium">Min size (MB)</label>
-              <Input
-                type="number"
-                value={minSizeMBText}
-                onChange={(e) => {
-                  setMinSizeMBText(e.target.value);
-                  setPickingError(null);
-                }}
-              />
+              <Input type="number" value={minSizeMBText} onChange={(e) => setMinSizeMBText(e.target.value)} />
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium">Max size (MB)</label>
-              <Input
-                type="number"
-                value={maxSizeMBText}
-                onChange={(e) => {
-                  setMaxSizeMBText(e.target.value);
-                  setPickingError(null);
-                }}
-              />
+              <Input type="number" value={maxSizeMBText} onChange={(e) => setMaxSizeMBText(e.target.value)} />
             </div>
           </div>
-          {pickingError && <p className="text-sm text-destructive">{pickingError}</p>}
+          <SectionFooter
+            dirty={pickingDirty}
+            saving={savingSection === 'picking'}
+            onSave={() => void savePicking()}
+            onDiscard={() => loadFormState(baseline)}
+            error={sectionError.picking}
+          />
         </CardContent>
       </Card>
 
+      {/* Subtitles */}
       <Card>
         <CardHeader>
           <CardTitle>Subtitles</CardTitle>
           <CardDescription>
-            Languages a video "has subs" for once it carries every one (embedded or external),
-            for series and movies. Preferred fansub groups are a soft rank boost only — if none
-            appear, search continues. Sites are tried in order; the agent records discovered
-            search endpoints into each site's profile (see the Sites page).
+            Languages a video must have before it counts as “has subtitles,” soft fansub preferences, and which public
+            sites to search. Site health lives under Subtitle sources.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">Languages (one per line)</label>
-            <Textarea rows={3} value={languagesText} onChange={(e) => setLanguagesText(e.target.value)} />
+            <label className="mb-1 block text-sm font-medium">Languages</label>
+            <TagInput
+              values={config.subtitle.languages}
+              onChange={(languages) => setConfig({ ...config, subtitle: { ...config.subtitle, languages } })}
+              placeholder="e.g. en, zh"
+            />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium">Preferred fansub groups (one per line, soft)</label>
-            <Textarea
-              rows={2}
-              value={preferredGroupsText}
-              onChange={(e) => setPreferredGroupsText(e.target.value)}
-              placeholder="Airota&#10;Sumisora&#10;VCB-Studio"
+            <label className="mb-1 block text-sm font-medium">Preferred fansub groups (soft)</label>
+            <TagInput
+              values={config.subtitle.preferredGroups ?? []}
+              onChange={(preferredGroups) => setConfig({ ...config, subtitle: { ...config.subtitle, preferredGroups } })}
+              placeholder="e.g. Airota"
             />
+            <p className="mt-1 text-xs text-muted-foreground">Boosts ranking only — search continues if none match</p>
           </div>
           <div>
             <label className="mb-2 block text-sm font-medium">Sites</label>
             <div className="space-y-2">
               {config.subtitle.sites.map((site, i) => (
-                <div key={i} className="grid grid-cols-[1fr_1.5fr_1.5fr_auto] items-center gap-2">
-                  <Input placeholder="name" value={site.name} onChange={(e) => updateSubtitleSite(i, { name: e.target.value })} />
-                  <Input placeholder="base URL" value={site.baseUrl} onChange={(e) => updateSubtitleSite(i, { baseUrl: e.target.value })} />
+                <div key={i} className="grid gap-2 rounded-lg border p-3 md:grid-cols-[1fr_1.5fr_1.5fr_auto]">
+                  <Input placeholder="Name" value={site.name} onChange={(e) => updateSubtitleSite(i, { name: e.target.value })} />
                   <Input
-                    placeholder="search URL template (optional)"
+                    placeholder="Base URL"
+                    value={site.baseUrl}
+                    onChange={(e) => updateSubtitleSite(i, { baseUrl: e.target.value })}
+                  />
+                  <Input
+                    placeholder="Search URL template (optional, use {query})"
                     value={site.searchUrlTemplate ?? ''}
                     onChange={(e) => updateSubtitleSite(i, { searchUrlTemplate: e.target.value })}
                   />
-                  <Button variant="ghost" size="sm" onClick={() => removeSubtitleSite(i)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      setConfig({
+                        ...config,
+                        subtitle: { ...config.subtitle, sites: config.subtitle.sites.filter((_, j) => j !== i) },
+                      })
+                    }
+                  >
                     Remove
                   </Button>
                 </div>
               ))}
             </div>
-            <Button variant="outline" size="sm" className="mt-2" onClick={addSubtitleSite}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={() =>
+                setConfig({
+                  ...config,
+                  subtitle: { ...config.subtitle, sites: [...config.subtitle.sites, { ...EMPTY_SUBTITLE_SITE }] },
+                })
+              }
+            >
               Add site
             </Button>
           </div>
-          {subtitleError && <p className="text-sm text-destructive">{subtitleError}</p>}
+          <SectionFooter
+            dirty={subtitlesDirty}
+            saving={savingSection === 'subtitles'}
+            onSave={() => void saveSubtitles()}
+            onDiscard={() => loadFormState(baseline)}
+            error={sectionError.subtitles}
+          />
         </CardContent>
       </Card>
 
+      {/* Browser agent */}
       <Card>
         <CardHeader>
           <CardTitle>Browser agent</CardTitle>
+          <CardDescription>Limits for the subtitle site browser so a bad site can’t run forever.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-sm font-medium">Step budget</label>
-              <Input
-                type="number"
-                value={stepBudgetText}
-                onChange={(e) => {
-                  setStepBudgetText(e.target.value);
-                  setSubtitleError(null);
-                }}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">Hard ceiling on LLM steps per site-search run.</p>
+              <Input type="number" value={stepBudgetText} onChange={(e) => setStepBudgetText(e.target.value)} />
+              <p className="mt-1 text-xs text-muted-foreground">Max AI steps per site search</p>
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium">Site cooldown (seconds)</label>
-              <Input
-                type="number"
-                value={siteCooldownText}
-                onChange={(e) => {
-                  setSiteCooldownText(e.target.value);
-                  setSubtitleError(null);
-                }}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">Polite re-hit floor per site; a profile's own backoff can push it later.</p>
+              <Input type="number" value={siteCooldownText} onChange={(e) => setSiteCooldownText(e.target.value)} />
+              <p className="mt-1 text-xs text-muted-foreground">Minimum wait before hitting the same site again</p>
             </div>
           </div>
-          {subtitleError && <p className="text-sm text-destructive">{subtitleError}</p>}
+          <SectionFooter
+            dirty={browserDirty}
+            saving={savingSection === 'browser'}
+            onSave={() => void saveBrowser()}
+            onDiscard={() => loadFormState(baseline)}
+            error={sectionError.browser}
+          />
         </CardContent>
       </Card>
 
+      {/* LLM */}
       <Card>
         <CardHeader>
-          <CardTitle>LLM</CardTitle>
+          <CardTitle>AI models</CardTitle>
           <CardDescription>
-            Call-sites: {CALLSITES.join(', ')}. Each profile below must map every call-site it's used for to a
-            provider/model (with an optional fallback) — a call-site missing from the active profile fails outright
-            when it's invoked.
+            Which model handles each task. Call-sites: {CALLSITES.join(', ')}. Advanced routing stays as JSON this
+            release — each profile maps call-sites to provider/model pairs.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">Active profile</label>
             <div className="flex gap-2">
@@ -604,9 +691,7 @@ export default function ConfigPage() {
                   key={profile}
                   variant={config.llm.activeProfile === profile ? 'default' : 'outline'}
                   size="sm"
-                  onClick={() =>
-                    setConfig((prev) => (prev ? { ...prev, llm: { ...prev.llm, activeProfile: profile } } : prev))
-                  }
+                  onClick={() => setConfig({ ...config, llm: { ...config.llm, activeProfile: profile } })}
                 >
                   {profile}
                 </Button>
@@ -619,58 +704,65 @@ export default function ConfigPage() {
               rows={12}
               className="font-mono text-xs"
               value={profilesText}
-              onChange={(e) => {
-                setProfilesText(e.target.value);
-                setProfilesError(null);
-              }}
+              onChange={(e) => setProfilesText(e.target.value)}
             />
-            {profilesError && <p className="mt-1 text-sm text-destructive">{profilesError}</p>}
           </div>
+          <SectionFooter
+            dirty={llmDirty}
+            saving={savingSection === 'llm'}
+            onSave={() => void saveLlm()}
+            onDiscard={() => loadFormState(baseline)}
+            error={sectionError.llm}
+          />
         </CardContent>
       </Card>
 
+      {/* API keys */}
       <Card>
         <CardHeader>
           <CardTitle>API keys</CardTitle>
           <CardDescription>
-            Leave a key as {SECRET_PLACEHOLDER} — or blank it out — to keep the stored value unchanged; a blank
-            field only means "never set" if it was already blank. Check "Remove" to actually delete a stored key.
-            Not needed for the claude-code provider, which uses subscription auth instead.
+            Leave a key as {SECRET_PLACEHOLDER} (or blank if it was already set) to keep it. Check Remove to delete a
+            stored key. Not needed for the Claude Code provider (subscription auth).
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid grid-cols-3 gap-3">
-          {LLM_PROVIDERS.map((provider) => {
-            const field = llmKeyFields[provider];
-            return (
-              <div key={provider}>
-                <label className="mb-1 block text-sm font-medium">{LLM_PROVIDER_LABELS[provider]}</label>
-                <Input
-                  type="password"
-                  autoComplete="new-password"
-                  disabled={field.remove}
-                  value={field.text}
-                  onChange={(e) => updateLlmKeyField(provider, { text: e.target.value })}
-                />
-                {field.wasSet && (
-                  <label className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={field.remove}
-                      onChange={(e) => updateLlmKeyField(provider, { remove: e.target.checked })}
-                    />
-                    Remove stored key
-                  </label>
-                )}
-              </div>
-            );
-          })}
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            {LLM_PROVIDERS.map((provider) => {
+              const field = llmKeyFields[provider];
+              return (
+                <div key={provider}>
+                  <label className="mb-1 block text-sm font-medium">{LLM_PROVIDER_LABELS[provider]}</label>
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    disabled={field.remove}
+                    value={field.text}
+                    onChange={(e) => updateLlmKeyField(provider, { text: e.target.value })}
+                  />
+                  {field.wasSet && (
+                    <label className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={field.remove}
+                        onChange={(e) => updateLlmKeyField(provider, { remove: e.target.checked })}
+                      />
+                      Remove stored key
+                    </label>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <SectionFooter
+            dirty={keysDirty}
+            saving={savingSection === 'keys'}
+            onSave={() => void saveKeys()}
+            onDiscard={() => loadFormState(baseline)}
+            error={sectionError.keys}
+          />
         </CardContent>
       </Card>
-
-      {saveError && <p className="text-sm text-destructive">{saveError}</p>}
-      <Button onClick={() => void handleSave()} disabled={saving}>
-        {saving ? 'Saving…' : 'Save'}
-      </Button>
     </div>
   );
 }

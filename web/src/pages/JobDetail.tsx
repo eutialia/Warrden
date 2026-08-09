@@ -11,7 +11,7 @@ import {
   type SubtitleRunRow,
   type TranscriptEntry,
 } from '@/api';
-import { AcquireOutcomeBadge, StatusBadge } from '@/components/StatusBadge';
+import { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TierBadge } from '@/components/TierBadge';
 import { Badge } from '@/components/ui/badge';
@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
+import { acquireOutcomeLabel, targetKindLabel } from '@/lib/labels';
 
 // Same idea as ManagedObjects.tsx's own `KIND_LABEL` — a raw `PlacedFileKind` reads fine
 // in a log line but not as dashboard copy.
@@ -149,6 +150,10 @@ export default function JobDetail() {
 
   const { job, acquireRecord, acquireOutcome, placedFiles, subtitleRuns } = data;
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
+  const title =
+    job.targetTitle?.trim() ||
+    (typeof job.payload.title === 'string' ? job.payload.title : null) ||
+    `${targetKindLabel(job.target_kind)} #${job.target_id}`;
 
   return (
     <div className="space-y-4">
@@ -157,16 +162,16 @@ export default function JobDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            Job #{job.id} — {job.pipeline}
+          <CardTitle className="flex flex-wrap items-center gap-2 text-xl">
+            <span>{title}</span>
+            <PipelineBadge pipeline={job.pipeline} />
             <StatusBadge status={job.status} />
             <AcquireOutcomeBadge outcome={acquireOutcome} />
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-1 text-sm">
-          <p>Arr instance: {job.arr_instance}</p>
-          <p>
-            Target: {job.target_kind} #{job.target_id}
+          <p className="text-muted-foreground">
+            {job.arr_instance} · {targetKindLabel(job.target_kind)} · Job #{job.id}
           </p>
           <p>Attempts: {job.attempts}</p>
           <p>Created: {new Date(job.created_at).toLocaleString()}</p>
@@ -174,7 +179,7 @@ export default function JobDetail() {
           {job.error && <p className="text-destructive">Error: {job.error}</p>}
           {job.pipeline === 'acquire' && (
             <Button variant="outline" size="sm" className="mt-2" disabled={repicking} onClick={() => void handleRepick()}>
-              {repicking ? 'Queuing…' : 'Re-pick'}
+              {repicking ? 'Queuing…' : 'Pick a different release'}
             </Button>
           )}
         </CardContent>
@@ -183,18 +188,20 @@ export default function JobDetail() {
       {job.pipeline === 'acquire' ? (
         <Card>
           <CardHeader>
-            <CardTitle>Acquire record</CardTitle>
+            <CardTitle>Release pick</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
-            {!acquireRecord && <p className="text-muted-foreground">No acquire record for this target yet.</p>}
+            {!acquireRecord && <p className="text-muted-foreground">No pick record for this job yet.</p>}
             {acquireRecord && (
               <>
-                <p>Status: {acquireRecord.status ?? '—'}</p>
+                <p>
+                  Outcome:{' '}
+                  {acquireRecord.status ? acquireOutcomeLabel(acquireRecord.status) : '—'}
+                </p>
                 <p>Candidates considered: {candidateCount ?? '—'}</p>
-                <p>Picked GUID: {acquireRecord.picked_guid ?? '—'}</p>
                 <p>Release group: {acquireRecord.release_group ?? '—'}</p>
                 <div>
-                  <p className="mb-1 font-medium">Reasoning</p>
+                  <p className="mb-1 font-medium">Why this release</p>
                   <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">
                     {acquireRecord.reasoning ?? '—'}
                   </pre>
@@ -207,7 +214,7 @@ export default function JobDetail() {
         // Ingest and subtitle both place library sidecars; acquire does not.
         <Card>
           <CardHeader>
-            <CardTitle>Placed files</CardTitle>
+            <CardTitle>Files placed</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             {placedFiles.length === 0 && <p className="text-muted-foreground">No files placed for this job.</p>}
@@ -228,7 +235,7 @@ export default function JobDetail() {
       {subtitleRuns && subtitleRuns.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Subtitle runs</CardTitle>
+            <CardTitle>Subtitle site runs</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             {subtitleRuns.map((run) => (
@@ -260,7 +267,7 @@ function SubtitleRunCard({ run }: { run: SubtitleRunRow }): ReactNode {
 function BackLink() {
   return (
     <Button variant="outline" size="sm" render={<Link to="/" />}>
-      ← Back to Activity
+      ← Back to Jobs
     </Button>
   );
 }

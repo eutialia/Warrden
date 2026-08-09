@@ -25,6 +25,8 @@ export interface Job {
   // `AcquireRecords.outcomeForJob` (server) for why this is an aggregate, not just the
   // latest record: a multi-season series job can grab one season and not another.
   acquireOutcome?: AcquireStatus | null;
+  /** Human series/movie title resolved by the API (payload first, else arr lookup). */
+  targetTitle?: string;
 }
 
 export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
@@ -325,5 +327,22 @@ export function fetchManagedObjects(): Promise<{ objects: ManagedObject[] }> {
 
 export function deleteManagedObject(id: number): Promise<{ ok: boolean; deletedInArr: boolean }> {
   return fetchJson(`/api/managed-objects/${id}`, { method: 'DELETE' });
+}
+
+export type StorageCheckStatus = 'ok' | 'missing' | 'unreadable' | 'unwritable' | 'not-mounted';
+
+export interface StorageCheck {
+  id: string;
+  label: string;
+  path: string;
+  localPath: string;
+  role: 'series' | 'anime' | 'movies' | 'downloads';
+  status: StorageCheckStatus;
+  detail: string;
+  immutable: boolean;
+}
+
+export function fetchStorageHealth(): Promise<{ checks: StorageCheck[] }> {
+  return fetchJson('/api/health/storage');
 }
 

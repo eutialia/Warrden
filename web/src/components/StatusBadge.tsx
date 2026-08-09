@@ -1,34 +1,49 @@
 import { Badge } from '@/components/ui/badge';
 import type { AcquireStatus, JobStatus } from '@/api';
+import { acquireOutcomeLabel, jobStatusLabel, pipelineLabel, pipelineToneClass } from '@/lib/labels';
+import { cn } from '@/lib/utils';
 
-const VARIANT_BY_STATUS: Record<JobStatus, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  pending: 'outline',
-  running: 'secondary',
-  done: 'default',
-  failed: 'destructive',
+const STATUS_CLASS: Record<JobStatus, string> = {
+  pending: 'bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-900 dark:text-slate-100 dark:border-slate-700',
+  running: 'bg-blue-100 text-blue-900 border-blue-200 dark:bg-blue-950 dark:text-blue-100 dark:border-blue-800',
+  done: 'bg-emerald-100 text-emerald-900 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-100 dark:border-emerald-800',
+  failed: 'bg-red-100 text-red-900 border-red-200 dark:bg-red-950 dark:text-red-100 dark:border-red-900',
 };
 
 export function StatusBadge({ status }: { status: JobStatus }) {
-  return <Badge variant={VARIANT_BY_STATUS[status]}>{status}</Badge>;
+  return (
+    <Badge variant="outline" className={cn('font-medium', STATUS_CLASS[status])}>
+      {jobStatusLabel(status)}
+    </Badge>
+  );
 }
 
-const ACQUIRE_OUTCOME_LABEL: Record<AcquireStatus, string> = {
-  grabbed: 'grabbed',
-  'none-viable': 'none viable',
-  'no-candidates': 'no candidates',
-};
-
 /**
- * A job's job-queue status (pending/running/done/failed) alone can't distinguish a
- * successful acquire from one that "succeeded" by finding nothing to grab — a `done`
- * acquire job with no viable release looks identical to one that grabbed something. This
- * renders next to `StatusBadge` for exactly that case: `grabbed` gets the same "good"
- * variant as a plain `done`, while `none-viable`/`no-candidates` get `destructive` since
- * both are the same "needs a human to look" outcomes the backend raises as `attention`
- * events for. Renders nothing when there's no acquire outcome to show (non-acquire
- * pipeline, or the job hasn't produced one yet).
+ * A job's queue status alone can't distinguish a successful acquire from one that
+ * "succeeded" by finding nothing. Renders next to StatusBadge for that case.
  */
 export function AcquireOutcomeBadge({ outcome }: { outcome: AcquireStatus | null | undefined }) {
   if (!outcome) return null;
-  return <Badge variant={outcome === 'grabbed' ? 'default' : 'destructive'}>{ACQUIRE_OUTCOME_LABEL[outcome]}</Badge>;
+  const ok = outcome === 'grabbed';
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        'font-medium',
+        ok
+          ? 'bg-emerald-100 text-emerald-900 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-100'
+          : 'bg-red-100 text-red-900 border-red-200 dark:bg-red-950 dark:text-red-100',
+      )}
+    >
+      {acquireOutcomeLabel(outcome)}
+    </Badge>
+  );
+}
+
+export function PipelineBadge({ pipeline }: { pipeline: string }) {
+  return (
+    <Badge variant="outline" className={cn('font-medium', pipelineToneClass(pipeline))}>
+      {pipelineLabel(pipeline)}
+    </Badge>
+  );
 }

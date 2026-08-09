@@ -165,8 +165,8 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
         kind: 'subtitle.unresolved',
         level: 'attention',
         jobId: job.id,
-        message: `No subtitle found for ${label}`,
-        data: targetEventData(job, { episodeId: t.episodeId, dedupeKey: String(t.episodeId) }),
+        message: `No subtitle found for ${label} after searching configured sites`,
+        data: targetEventData(job, { episodeId: t.episodeId, dedupeKey: String(t.episodeId), title: label }),
       });
     }
   } finally {
@@ -527,7 +527,7 @@ function quarantine(ctx: AppContext, job: JobRow, entryPath: string): void {
     kind: 'subtitle.quarantined',
     level: 'attention',
     jobId: job.id,
-    message: `Quarantined "${basename(entryPath)}" — unusable (couldn't verify or resync)`,
+    message: `Set aside subtitle file "${basename(entryPath)}" — couldn't verify timing or resync it to the video`,
     // Each quarantined candidate is its own sub-target, so the candidate path is the
     // de-dup discriminator (same convention as ingest's per-sidecar attention items).
     data: targetEventData(job, { sourceFile: entryPath, quarantinedPath: dest, dedupeKey: entryPath }),

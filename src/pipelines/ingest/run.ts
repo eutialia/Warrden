@@ -24,6 +24,7 @@ import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
 import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, sidecarStem, SIDECAR_EXTS, VIDEO_EXTS } from './sidecars.js';
+import { effectiveDownloadRoots } from '../../config/standardMounts.js';
 import { resolveSourceDirsDetailed } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
@@ -95,7 +96,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
         kind: 'ingest.settle-timeout',
         level: 'attention',
         jobId: job.id,
-        message: `Gave up waiting for the arr to finish importing (still busy after ${Math.round(SETTLE_DEADLINE_MS / 3_600_000)}h)`,
+        message: `Gave up waiting for Sonarr/Radarr to finish importing (still busy after ${Math.round(SETTLE_DEADLINE_MS / 3_600_000)}h) — check the download queue there`,
         data: targetEventData(job),
       });
       return;
@@ -112,7 +113,8 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // One derivation pass feeds both the sidecar sweep's full dir set (`all`) and the
   // rescue stage's narrower, root-derived-only set (`rootDerived`) — see
   // resolveSourceDirsDetailed's own doc for why the rescue stage needs the narrower one.
-  const { all: sourceDirsArr, rootDerived: bundleFolders } = resolveSourceDirsDetailed(droppedPaths, ctx.config.ingest.downloadRoots);
+  const downloadRoots = effectiveDownloadRoots(ctx.config);
+  const { all: sourceDirsArr, rootDerived: bundleFolders } = resolveSourceDirsDetailed(droppedPaths, downloadRoots);
   let sourceDirsLocal = sourceDirsArr.map((d) => mapArrPath(ctx.config.pathMappings, d)).filter((d) => existsSync(d));
 
   // Hoisted once so the fallback derivation and the source-video identification below both
@@ -132,7 +134,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // history needed at all.
   if (sourceDirsLocal.length === 0 && movieFile) {
     const { dirs: fallbackDirs, rootsScanned } = findMovieSourceDirsBySize(
-      ctx.config.ingest.downloadRoots,
+      downloadRoots,
       ctx.config.pathMappings,
       movieFile.size,
     );
@@ -705,8 +707,11 @@ async function rescueSeries(
   const stuckDownloadIds = assessment.state === 'stuck' ? assessment.downloadIds : [];
   const seriesId = job.target_id;
 
+  // filterExistingFiles on both scopes: stuck downloadIds used to omit it, which let
+  // Sonarr re-list every already-imported library file for a lingering queue item and
+  // flood Attention with whole-series "rescues" (e.g. 409 Bleach episodes).
   const itemsByScope = await Promise.all([
-    ...stuckDownloadIds.map((downloadId) => client.listManualImport({ downloadId })),
+    ...stuckDownloadIds.map((downloadId) => client.listManualImport({ downloadId, filterExistingFiles: true })),
     ...bundleFolders.map((folder) => client.listManualImport({ folder, seriesId, filterExistingFiles: true })),
   ]);
   const items = dedupeManualImportItems(itemsByScope.flat());
@@ -719,18 +724,25 @@ async function rescueSeries(
     ctx.events.append({
       kind: 'ingest.rescued',
       jobId: job.id,
-      message: `Rescued ${plan.files.length} file(s) for "${target.seriesTitle}" via manual import`,
+      message: `Imported ${plan.files.length} leftover episode file(s) for "${target.seriesTitle}"`,
       data: targetEventData(job, { files: plan.files, skipped: plan.skipped, reasoning: plan.reasoning }),
     });
     return;
   }
 
+  const n = plan.files.length;
   ctx.events.append({
     kind: 'ingest.rescue-proposed',
     level: 'attention',
     jobId: job.id,
-    message: `Low-confidence bundle rescue for "${target.seriesTitle}" needs review before importing`,
-    data: targetEventData(job, { action: 'bundle-import', files: plan.files, reasoning: plan.reasoning }),
+    message: `Needs your OK before importing ${n} leftover episode file(s) for "${target.seriesTitle}" — match is uncertain. ${plan.reasoning}`,
+    data: targetEventData(job, {
+      action: 'bundle-import',
+      files: plan.files,
+      reasoning: plan.reasoning,
+      title: target.seriesTitle,
+      fileCount: n,
+    }),
   });
 }
 
@@ -779,7 +791,9 @@ async function rescueSeries(
 async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target: MovieTargetContext, assessment: QueueAssessment): Promise<void> {
   if (assessment.state !== 'stuck') return;
 
-  const itemsByScope = await Promise.all(assessment.downloadIds.map((downloadId) => client.listManualImport({ downloadId })));
+  const itemsByScope = await Promise.all(
+    assessment.downloadIds.map((downloadId) => client.listManualImport({ downloadId, filterExistingFiles: true })),
+  );
   const deduped = dedupeManualImportItems(itemsByScope.flat());
   if (deduped.length === 0) return;
 
@@ -794,7 +808,7 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
     ctx.events.append({
       kind: 'ingest.rescue-skipped',
       jobId: job.id,
-      message: `Rescue found ${skipped.length} leftover file(s) for movie #${job.target_id}, but none were safe to import (rejected, or a different movie)`,
+      message: `Found ${skipped.length} leftover download file(s) for this movie, but none were safe to import (already rejected by Sonarr/Radarr, or named a different movie)`,
       data: targetEventData(job, { skipped }),
     });
     return;
@@ -816,27 +830,26 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       kind: 'ingest.rescue-proposed',
       level: 'attention',
       jobId: job.id,
-      message: `Movie rescue for "${movieTitle}" needs review — ${items.length} unresolved files all claim this one movie slot`,
+      message: `Needs your OK for "${movieTitle}": ${items.length} leftover files all claim this one movie — pick which (if any) to import`,
       data: targetEventData(job, {
         action: 'bundle-import',
         files,
-        reasoning: `${items.length} files survived filtering with no episode numbers to disambiguate them — picking which one actually belongs is a human decision`,
+        reasoning: `${items.length} files survived filtering with no way to tell which one is the real movie file — that choice is yours`,
+        title: movieTitle,
+        fileCount: items.length,
       }),
     });
     return;
   }
 
+  // Movie already has a file: do not propose a replace. Incremental-only — Sonarr/Radarr
+  // own upgrades; a stuck queue item that already landed is not Warrden's re-import job.
   if (target.movieFiles.length > 0) {
     ctx.events.append({
-      kind: 'ingest.rescue-proposed',
-      level: 'attention',
+      kind: 'ingest.rescue-skipped',
       jobId: job.id,
-      message: `Movie rescue for "${movieTitle}" needs review — it already has a file on disk`,
-      data: targetEventData(job, {
-        action: 'bundle-import',
-        files,
-        reasoning: `"${movieTitle}" already has a file on disk; replacing it is a human decision`,
-      }),
+      message: `Skipped leftover file for "${movieTitle}" — the movie is already in the library`,
+      data: targetEventData(job, { skipped: files.map((f) => f.path), title: movieTitle }),
     });
     return;
   }
@@ -845,7 +858,7 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
   ctx.events.append({
     kind: 'ingest.rescued',
     jobId: job.id,
-    message: `Rescued ${files.length} file(s) for "${movieTitle}" via manual import`,
-    data: targetEventData(job, { files, skipped, reasoning: `stuck download(s) mapped 1:1 onto "${movieTitle}"` }),
+    message: `Imported leftover file for "${movieTitle}"`,
+    data: targetEventData(job, { files, skipped, reasoning: `stuck download mapped 1:1 onto "${movieTitle}"` }),
   });
 }

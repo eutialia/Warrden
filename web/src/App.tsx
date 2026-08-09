@@ -16,10 +16,10 @@ export default function App() {
       <SidebarProvider>
         <AppSidebar />
         <SidebarInset>
-          <header className="flex items-center gap-2 border-b p-3">
+          <header className="flex h-12 items-center gap-2 border-b px-3">
             <SidebarTrigger />
           </header>
-          <main className="p-6">
+          <main className="mx-auto w-full max-w-6xl p-6">
             <Routes>
               <Route path="/" element={<Activity />} />
               <Route path="/attention" element={<Attention />} />

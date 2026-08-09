@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   acceptAttention,
@@ -11,13 +12,16 @@ import {
   type AttentionItem,
   type AttentionStatus,
 } from '@/api';
+import { PageHeader } from '@/components/PageHeader';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
+import { attentionKindLabel, attentionTitle } from '@/lib/labels';
+import { cn } from '@/lib/utils';
 
 const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
   { value: 'open', label: 'Open' },
@@ -26,35 +30,46 @@ const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
 ];
 
 const EMPTY_MESSAGE: Record<AttentionStatus, string> = {
-  open: 'Nothing needs attention',
-  dismissed: 'No dismissed items',
-  resolved: 'No resolved items',
+  open: 'Nothing needs your attention right now.',
+  dismissed: 'No dismissed items.',
+  resolved: 'No resolved items.',
 };
 
-// Mirrors the server's own cap (`HINT_MAX_LENGTH` in `src/server/app.ts`) — without it the
-// input happily accepts more than the server will, and the resulting 400 gives no useful
-// explanation of why the submit just failed.
 const HINT_MAX_LENGTH = 2000;
 
 interface BundleImportData {
   reasoning?: string;
   files: { path: string }[];
+  fileCount?: number;
 }
 
-/** `data.action === 'bundle-import'` items (see `AcceptDataSchema` in `src/server/app.ts`)
- * are the only ones the "Accept import" action applies to — everything else in `data` is
- * kind-specific and not rendered here. Returns `null` for any other shape, including a
- * malformed bundle-import (no usable file paths) since there'd be nothing to show. */
 function bundleImportData(item: AttentionItem): BundleImportData | null {
   const data = item.data;
   if (data.action !== 'bundle-import' || !Array.isArray(data.files)) return null;
   const files = (data.files as { path?: unknown }[]).filter((f): f is { path: string } => typeof f?.path === 'string');
   if (files.length === 0) return null;
-  return { reasoning: typeof data.reasoning === 'string' ? data.reasoning : undefined, files };
+  return {
+    reasoning: typeof data.reasoning === 'string' ? data.reasoning : undefined,
+    files,
+    fileCount: typeof data.fileCount === 'number' ? data.fileCount : files.length,
+  };
 }
 
 function basename(path: string): string {
   return path.split('/').pop() || path;
+}
+
+/** Group file basenames by parent folder (usually Season N). */
+function groupFilesByFolder(files: { path: string }[]): { folder: string; names: string[] }[] {
+  const map = new Map<string, string[]>();
+  for (const f of files) {
+    const parts = f.path.split('/');
+    const folder = parts.length > 1 ? parts[parts.length - 2]! : 'Files';
+    const list = map.get(folder) ?? [];
+    list.push(basename(f.path));
+    map.set(folder, list);
+  }
+  return [...map.entries()].map(([folder, names]) => ({ folder, names }));
 }
 
 export default function Attention() {
@@ -65,15 +80,11 @@ export default function Attention() {
   const [pendingIds, setPendingIds] = useState<Set<number>>(new Set());
   const [repickOpenId, setRepickOpenId] = useState<number | null>(null);
   const [repickHint, setRepickHint] = useState('');
+  const [expandedFiles, setExpandedFiles] = useState<Set<number>>(new Set());
 
-  // `refetch` reads the status through this ref rather than closing over the `status`
-  // state, so its own identity stays stable across tab switches and `useSseRefetch`'s own
-  // connection isn't torn down and reopened on every toggle.
   const statusRef = useRef(status);
   statusRef.current = status;
 
-  // Guards against any overlapping request clobbering an earlier one — an SSE burst, a tab
-  // switch, a post-action refetch — not just an unmounted effect.
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
     const isStale = beginFetch();
@@ -85,7 +96,7 @@ export default function Attention() {
       })
       .catch((err: unknown) => {
         if (isStale()) return;
-        setError(apiErrorMessage(err, 'failed to load attention items'));
+        setError(apiErrorMessage(err, 'Failed to load items that need review'));
       })
       .finally(() => {
         if (isStale()) return;
@@ -95,9 +106,9 @@ export default function Attention() {
   const { disconnected, reconnect } = useSseRefetch(refetch);
 
   useEffect(() => {
-    setItems([]); // don't show the previous tab's rows while the new tab is loading
+    setItems([]);
     setLoading(true);
-    setError(null); // a previous tab's stale error must not bleed into the new tab
+    setError(null);
     setRepickOpenId(null);
     setRepickHint('');
     refetch();
@@ -126,31 +137,41 @@ export default function Attention() {
   );
 
   function handleDismiss(id: number): void {
-    void runAction(id, () => dismissAttention(id), 'Dismissed', 'failed to dismiss');
+    void runAction(id, () => dismissAttention(id), 'Dismissed', 'Failed to dismiss');
   }
 
   function handleRetry(id: number): void {
-    void runAction(id, () => retryAttention(id), 'Retry queued', 'failed to retry');
+    void runAction(id, () => retryAttention(id), 'Retry queued', 'Failed to retry');
   }
 
   function handleAccept(id: number): void {
-    void runAction(id, () => acceptAttention(id), 'Import accepted', 'failed to accept import');
+    void runAction(id, () => acceptAttention(id), 'Import approved', 'Failed to approve import');
   }
 
   async function handleRepickSubmit(id: number): Promise<void> {
     const hint = repickHint.trim();
-    const ok = await runAction(id, () => repickAttention(id, hint || undefined), 'Re-pick queued', 'failed to queue re-pick');
+    const ok = await runAction(id, () => repickAttention(id, hint || undefined), 'Re-pick queued', 'Failed to queue re-pick');
     if (ok) {
       setRepickOpenId(null);
       setRepickHint('');
     }
   }
 
+  function toggleFiles(id: number): void {
+    setExpandedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center justify-between">
-          <span>Attention</span>
+    <div>
+      <PageHeader
+        title="Needs review"
+        description="Things Warrden won't do automatically — approve an import, re-pick a release, or dismiss noise. Messages are written for humans, not agents."
+        actions={
           <div className="flex gap-1.5">
             {STATUS_TABS.map((tab) => (
               <Button
@@ -163,55 +184,121 @@ export default function Attention() {
               </Button>
             ))}
           </div>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
+        }
+      />
+
+      <div className="space-y-3">
+        {disconnected && (
+          <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />
+        )}
         {error && <StatusNotice message={error} onRetry={refetch} />}
-        {items.length === 0 && !loading && !error && <p className="text-center text-muted-foreground">{EMPTY_MESSAGE[status]}</p>}
+        {items.length === 0 && !loading && !error && (
+          <Card>
+            <CardContent className="py-10 text-center text-muted-foreground">{EMPTY_MESSAGE[status]}</CardContent>
+          </Card>
+        )}
+
         {items.map((item) => {
           const pending = pendingIds.has(item.id);
           const canRetry = item.job_id !== null;
           const canRepick = item.job_id !== null && item.kind.startsWith('acquire.');
           const bundleImport = bundleImportData(item);
           const repickOpen = repickOpenId === item.id;
+          const filesOpen = expandedFiles.has(item.id);
+          const title = attentionTitle(item);
+          const fileCount = bundleImport?.fileCount ?? bundleImport?.files.length ?? 0;
+          const groups = bundleImport ? groupFilesByFolder(bundleImport.files) : [];
 
           return (
-            <Card key={item.id}>
-              <CardContent className="space-y-2 pt-4 text-sm">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline">{item.kind}</Badge>
-                  <span className="text-xs text-muted-foreground">{new Date(item.ts).toLocaleString()}</span>
-                  {item.job_id !== null && (
-                    <Link to={`/jobs/${item.job_id}`} className="text-xs text-primary underline-offset-4 hover:underline">
-                      Job #{item.job_id}
-                    </Link>
-                  )}
+            <Card
+              key={item.id}
+              className={cn(
+                'border-l-4',
+                item.status === 'open' ? 'border-l-amber-500' : 'border-l-transparent',
+              )}
+            >
+              <CardContent className="space-y-3 pt-4 text-sm">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-base font-semibold">{title}</h2>
+                      <Badge
+                        variant="outline"
+                        className="bg-amber-50 text-amber-950 border-amber-200 dark:bg-amber-950 dark:text-amber-100 dark:border-amber-800"
+                      >
+                        {attentionKindLabel(item.kind)}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(item.ts).toLocaleString()}
+                      {item.job_id !== null && (
+                        <>
+                          {' · '}
+                          <Link to={`/jobs/${item.job_id}`} className="text-primary underline-offset-4 hover:underline">
+                            Related job
+                          </Link>
+                        </>
+                      )}
+                    </p>
+                  </div>
                 </div>
-                <p>{item.message}</p>
-                {item.resolved_at !== null && (
-                  <p className="text-xs text-muted-foreground">Resolved: {new Date(item.resolved_at).toLocaleString()}</p>
-                )}
+
+                <p className="leading-relaxed text-foreground">{item.message}</p>
 
                 {bundleImport && (
-                  <div className="space-y-1 rounded-md bg-muted p-3 text-xs">
-                    {bundleImport.reasoning && <p>{bundleImport.reasoning}</p>}
-                    <ul className="list-inside list-disc">
-                      {bundleImport.files.map((f) => (
-                        <li key={f.path}>{basename(f.path)}</li>
-                      ))}
-                    </ul>
+                  <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+                    <p className="text-sm font-medium">
+                      {fileCount} file{fileCount === 1 ? '' : 's'} proposed for import
+                      {groups.length > 1 ? ` · ${groups.length} folders` : ''}
+                    </p>
+                    {bundleImport.reasoning && (
+                      <p className="text-xs text-muted-foreground leading-relaxed">{bundleImport.reasoning}</p>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2"
+                      onClick={() => toggleFiles(item.id)}
+                    >
+                      {filesOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                      {filesOpen ? 'Hide file list' : 'Show file list'}
+                    </Button>
+                    {filesOpen && (
+                      <div className="max-h-64 space-y-2 overflow-y-auto text-xs">
+                        {groups.map((g) => (
+                          <div key={g.folder}>
+                            <div className="font-medium text-muted-foreground">
+                              {g.folder} ({g.names.length})
+                            </div>
+                            <ul className="ml-3 list-disc text-muted-foreground">
+                              {g.names.map((n) => (
+                                <li key={n} className="break-all">
+                                  {n}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
+                )}
+
+                {item.resolved_at !== null && (
+                  <p className="text-xs text-muted-foreground">
+                    Closed: {new Date(item.resolved_at).toLocaleString()}
+                  </p>
                 )}
 
                 {item.status === 'open' && (
                   <div className="flex flex-wrap items-center gap-1.5 pt-1">
                     <Button variant="outline" size="sm" disabled={pending} onClick={() => handleDismiss(item.id)}>
-                      Dismiss
+                      Ignore
                     </Button>
                     {canRetry && (
                       <Button variant="outline" size="sm" disabled={pending} onClick={() => handleRetry(item.id)}>
-                        Retry
+                        Try again
                       </Button>
                     )}
                     {canRepick && (
@@ -225,12 +312,12 @@ export default function Attention() {
                           setRepickHint('');
                         }}
                       >
-                        Re-pick…
+                        Pick a different release…
                       </Button>
                     )}
                     {bundleImport && (
                       <Button variant="default" size="sm" disabled={pending} onClick={() => handleAccept(item.id)}>
-                        Accept import
+                        Approve import
                       </Button>
                     )}
                   </div>
@@ -240,7 +327,7 @@ export default function Attention() {
                   <div className="flex items-center gap-1.5 pt-1">
                     <Input
                       autoFocus
-                      placeholder="Hint for the re-pick (optional)…"
+                      placeholder="Optional hint for the re-pick (e.g. prefer a fansub group)…"
                       value={repickHint}
                       maxLength={HINT_MAX_LENGTH}
                       disabled={pending}
@@ -258,7 +345,7 @@ export default function Attention() {
             </Card>
           );
         })}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

@@ -351,8 +351,8 @@ describe('planBundleImport', () => {
     });
   });
 
-  describe('occupied-episode confidence cap', () => {
-    it("a tier-1 item resolved by the arr onto an occupied episode caps confidence at 'low', even though tier 1 alone is normally 'high'", async () => {
+  describe('already-imported skip (incremental only)', () => {
+    it('a tier-1 item resolved onto an occupied episode is dropped; plan is null when nothing else remains', async () => {
       const episodes = [episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 1, hasFile: true })];
       const item = manualImportItem({
         path: '/downloads/Show/Show - S01E01.mkv',
@@ -363,12 +363,11 @@ describe('planBundleImport', () => {
 
       const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
 
-      expect(plan!.files).toEqual([expect.objectContaining({ episodeIds: [10] })]);
-      expect(plan!.confidence).toBe('low');
+      expect(plan).toBeNull();
       expect(llm.calls).toHaveLength(0);
     });
 
-    it("an LLM-resolved file targeting an occupied episode caps the whole plan's confidence at 'low', even when the LLM itself reported 'high'", async () => {
+    it('an LLM-resolved file targeting only an occupied episode is skipped; plan is null when nothing free remains', async () => {
       const episodes = [episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 1, hasFile: true })];
       const item = manualImportItem({ path: '/downloads/Bundle/Weird Name.mkv' });
       const llm = new FakeGenerator([
@@ -377,10 +376,35 @@ describe('planBundleImport', () => {
 
       const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [item], episodes });
 
-      expect(plan!.confidence).toBe('low');
+      expect(plan).toBeNull();
     });
 
-    it('never upgrades: a plan with no occupied targets keeps the LLM-reported confidence as-is', async () => {
+    it('keeps free-episode files and skips occupied ones in the same plan', async () => {
+      const episodes = [
+        episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 1, hasFile: true }),
+        episodeResource({ id: 11, seasonNumber: 1, episodeNumber: 2, hasFile: false }),
+      ];
+      const occupied = manualImportItem({
+        path: '/downloads/Show/Show - S01E01.mkv',
+        episodes: [{ id: 10 }],
+        rejections: [],
+      });
+      const free = manualImportItem({
+        path: '/downloads/Show/Show - S01E02.mkv',
+        episodes: [{ id: 11 }],
+        rejections: [],
+      });
+      const llm = new FakeGenerator([]);
+
+      const plan = await planBundleImport({ llm, seriesTitle, seriesId, items: [occupied, free], episodes });
+
+      expect(plan!.files).toEqual([expect.objectContaining({ path: free.path, episodeIds: [11] })]);
+      expect(plan!.skipped).toContain(occupied.path);
+      expect(plan!.confidence).toBe('high');
+      expect(plan!.reasoning).toContain('already imported');
+    });
+
+    it('a plan with only free targets keeps the LLM-reported confidence as-is', async () => {
       const episodes = [episodeResource({ id: 10, seasonNumber: 1, episodeNumber: 1, hasFile: false })];
       const item = manualImportItem({ path: '/downloads/Bundle/Weird Name.mkv' });
       const llm = new FakeGenerator([bundleResponse({ mappings: [{ file: 1, episodeIds: [10] }], confidence: 'medium', reasoning: 'inferred' })]);

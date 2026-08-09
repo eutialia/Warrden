@@ -25,11 +25,24 @@ docker run -d \
   --name warrden \
   -p 9797:9797 \
   -v warrden-data:/data \
+  -v /path/to/Series:/tv \
+  -v /path/to/Anime:/anime \
+  -v /path/to/Movies:/movies \
+  -v /path/to/Downloads:/downloads \
   warrden
 ```
 
-Using a named volume (`warrden-data` above) rather than a bind mount lets Docker set its
-ownership to match the container's non-root user automatically; a bind-mounted host
+Warrden always expects **exactly four media mounts** (not editable in the dashboard):
+
+| Role | Container path | What to bind |
+| --- | --- | --- |
+| **Series** | `/tv` | Sonarr Series root folder |
+| **Anime** | `/anime` | Sonarr Anime root folder |
+| **Movies** | `/movies` | Radarr library root |
+| **Downloads** | `/downloads` | Torrent client download / completed root |
+
+Using a named volume (`warrden-data` above) rather than a bind mount for `/data` lets Docker
+set its ownership to match the container's non-root user automatically; a bind-mounted host
 directory needs to be pre-owned by uid/gid `1000` for the same reason.
 
 On first start, Warrden writes a default `config.json` into the data volume and serves a
@@ -48,8 +61,9 @@ changing `publicUrl` afterward does **not** re-point it — delete the "Warrden"
 the arr's own settings first if you need to move it. If a delete-then-recreate fails
 partway (the delete lands but the create doesn't, even after one immediate retry), the
 instance is left with no Warrden webhook at all until the next startup tries again. Then
-add your arr instances (name, kind, base URL, API key), set picking and ingest
-preferences, and choose an LLM provider.
+add your arr instances (name, kind, base URL, API key), set picking preferences, and choose
+an LLM provider. Storage mounts are fixed at container create time — check them under
+**Settings → Storage mounts**.
 
 Every config save requires a container restart to fully take effect (the save
 confirmation says so) — some fields are read live, but arr connections and the LLM
@@ -212,9 +226,9 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `arrs[].kind` | — | `sonarr` or `radarr`. |
 | `arrs[].baseUrl` | — | Base URL of the arr instance. |
 | `arrs[].apiKey` | — | API key for the arr instance. |
-| `pathMappings[].from` / `.to` | `[]` | Translates a path the arr reports (`.from`) into Warrden's own filesystem view (`.to`) — needed whenever Ingest's filesystem work sees the same files under a different mount point than the arr does. Not used by Acquire, which never touches files directly. |
-| `ingest.mountMarkers` | `[]` | Warrden-local paths that must exist before Ingest touches the filesystem — typically a canary file at the root of each mounted share. Empty means no mount verification. |
-| `ingest.downloadRoots` | `[]` | Arr-side paths of the torrent clients' download roots, used to find each torrent's own folder. Effectively required for bundle rescue (see [Ingest](#ingest) above) — without it, bundle rescue never fires. Also required for the movie no-import-history size-match fallback: without it, a history-less (or history-folder-vanished) movie's sidecar rescue never fires either. |
+| `pathMappings[].from` / `.to` | `[]` | **config.json only** (not in the web UI). Translates a path the arr reports (`.from`) into Warrden's container path (`.to`). `to` should be one of `/tv`, `/anime`, `/movies`, `/downloads`. Empty means Sonarr/Radarr already use those same paths. |
+| `ingest.mountMarkers` | `[]` | **Legacy/test only.** Empty → enforce the four standard mounts `/tv`, `/anime`, `/movies`, `/downloads`. Non-empty overrides that list (not exposed in the UI). |
+| `ingest.downloadRoots` | `[]` | **Legacy/test only.** Empty → derive the arr-side download root from `pathMappings` targeting `/downloads`, else `/downloads`. Used to find each torrent's own folder for bundle rescue and the movie size-match fallback. |
 | `subtitle.languages` | `[]` | Target subtitle languages for the subtitle pipeline, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). A video is considered covered only when it carries *every* one as an embedded or external track. |
 | `subtitle.preferredGroups` | `[]` | Soft rank boost for fansub/release group names when browsing packs. Never exclusive — if none match, search continues with other groups. |
 | `subtitle.sites[].name` | — | Unique label for a subtitle fan site the pipeline searches. |
@@ -239,26 +253,29 @@ that field's "Remove stored key" checkbox. (`arrs[].apiKey` has no such checkbox
 required field, so blanking it is rejected outright rather than treated as a deletion;
 remove the whole arr instance to drop it.)
 
-### Example: mount markers and path mappings
+### Example: path mappings (config.json only)
 
-A NAS share mounted at `/mnt/media` on the machine running Warrden, but seen as `/data`
-by Sonarr (a common split when the arr runs in its own container with a different bind
-mount):
+Warrden always uses `/tv`, `/anime`, `/movies`, and `/downloads` inside the container. If
+Sonarr/Radarr see those libraries at different paths, map them in `config.json` (Settings
+will not edit this):
 
 ```json
 {
-  "pathMappings": [{ "from": "/data", "to": "/mnt/media" }],
-  "ingest": {
-    "mountMarkers": ["/mnt/media/.warrden-mount-ok"],
-    "downloadRoots": ["/data/torrents"]
-  }
+  "pathMappings": [
+    { "from": "/mnt/nas/Media/Series", "to": "/tv" },
+    { "from": "/mnt/nas/Media/Anime", "to": "/anime" },
+    { "from": "/mnt/nas/Media/Movies", "to": "/movies" },
+    { "from": "/mnt/nas/Downloads", "to": "/downloads" }
+  ]
 }
 ```
 
-`/mnt/media/.warrden-mount-ok` is any file that only exists once the share is actually
-mounted — an empty placeholder dropped at the mount root works fine. `/data/torrents` is
-the download client's root as Sonarr sees it, not as Warrden sees it: `downloadRoots` is
-matched against arr-reported paths before `pathMappings` translates them.
+With that mapping, the arr-side download root used for torrent-folder detection is
+`/mnt/nas/Downloads` automatically. Prefer matching Sonarr/Radarr bind mounts to the
+same four paths so `pathMappings` can stay empty.
+
+Dev / non-Docker path overrides (not in the UI): `WARRDEN_MOUNT_SERIES`,
+`WARRDEN_MOUNT_ANIME`, `WARRDEN_MOUNT_MOVIES`, `WARRDEN_MOUNT_DOWNLOADS`.
 
 ## More detail
 

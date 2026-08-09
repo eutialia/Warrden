@@ -146,8 +146,8 @@ async function runSeriesAcquire(
       kind: 'acquire.no-candidates',
       level: 'attention',
       jobId: job.id,
-      message: `No monitored seasons for "${title}"`,
-      data: targetEventData(job),
+      message: `Nothing to grab for "${title}" — no monitored seasons (specials alone don't count)`,
+      data: targetEventData(job, { title }),
     });
     return;
   }
@@ -302,8 +302,8 @@ function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string
       kind: 'acquire.no-candidates',
       level: 'attention',
       jobId: job.id,
-      message: `No candidates survived prefilter for "${label}"`,
-      data: targetEventData(job, extra),
+      message: `No usable releases found for "${label}" after filtering (seeders, size, tags)`,
+      data: targetEventData(job, { ...extra, title: label }),
     });
     return;
   }
@@ -311,8 +311,8 @@ function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string
     kind: 'acquire.none-viable',
     level: 'attention',
     jobId: job.id,
-    message: `No candidate judged viable for "${label}": ${result.reasoning}`,
-    data: targetEventData(job, extra),
+    message: `Couldn't pick a release for "${label}": ${result.reasoning}`,
+    data: targetEventData(job, { ...extra, title: label, reasoning: result.reasoning }),
   });
 }
 

@@ -618,7 +618,10 @@ export function ingestFixture(opts?: {
         { from: downloadsDir, to: downloadsDir },
         { from: libraryDir, to: libraryDir },
       ],
-      ingest: { mountMarkers: opts?.mountMarkers ?? [], downloadRoots: [downloadsDir] },
+      // Non-empty mountMarkers is a test override so we don't require the real standard
+      // `/tv` `/anime` `/movies` `/downloads` paths on the developer machine. Production
+      // leaves mountMarkers empty and enforces those four.
+      ingest: { mountMarkers: opts?.mountMarkers ?? [downloadsDir], downloadRoots: [downloadsDir] },
     }),
     // Ingest now enqueues a follow-on subtitle job for series targets; the real runner
     // (e2e.test.ts) picks that job up and runSubtitleJob requires ctx.media for its
@@ -903,6 +906,8 @@ export function subtitleFixture(opts?: {
     clients: new Map([[arrInstanceName, client]]),
     config: ConfigSchema.parse({
       pathMappings: [{ from: libraryDir, to: libraryDir }],
+      // Test override so assertMounted does not require real /tv /anime /movies /downloads.
+      ingest: { mountMarkers: [libraryDir], downloadRoots: [] },
       subtitle: {
         languages: opts?.languages ?? ['zh-Hans'],
         preferredGroups: opts?.preferredGroups ?? [],

@@ -77,6 +77,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Owned by `node` (the image's built-in non-root user) before it's declared as a volume,
 # so a fresh named volume inherits that ownership instead of root's.
+# Do NOT pre-create media mount dirs here — empty dirs would always "exist" and the
+# Storage health panel would lie. Docker creates the mount point when you bind-mount:
+#   -v host/Series:/tv  -v host/Anime:/anime  -v host/Movies:/movies  -v host/Downloads:/downloads
 RUN mkdir -p /data && chown node:node /data
 USER node
 

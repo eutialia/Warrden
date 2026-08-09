@@ -837,7 +837,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toEqual(
+    expect(proposed[0]!.data).toMatchObject(
       bundleImportPayload({
         instance: fx.arrInstance,
         targetKind: fx.targetKind,
@@ -846,6 +846,8 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         reasoning: 'guessing from context',
       }),
     );
+    expect(proposed[0]!.data).toMatchObject({ title: expect.any(String), fileCount: 1 });
+    expect(proposed[0]!.message).toMatch(/Needs your OK/i);
   });
 
   it('stuck download (series): assessQueue -> stuck with a downloadId -> listManualImport({downloadId}) feeds the same planning path as a bundle folder', async () => {
@@ -862,7 +864,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     await runIngestJob(fx.ctx, job);
 
-    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1' });
+    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1', filterExistingFiles: true });
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, episodeIds: [2] })], 'copy');
     expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(true);
   });
@@ -905,7 +907,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     await runIngestJob(fx.ctx, job);
 
-    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1' });
+    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1', filterExistingFiles: true });
     expect(fx.client.listManualImport).not.toHaveBeenCalledWith(expect.objectContaining({ folder: expect.anything() }));
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: stuckItem.path })], 'copy');
   });
@@ -935,7 +937,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     // queries a folder scope, so a leftover (non-stuck) movie-folder video can never
     // surface here at all.
     expect(fx.client.listManualImport).toHaveBeenCalledTimes(1);
-    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-movie-1' });
+    expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-movie-1', filterExistingFiles: true });
     expect(fx.client.executeManualImport).toHaveBeenCalledWith(
       [{ path: item.path, folderName: item.folderName, movieId: 7, quality, languages, releaseGroup: item.releaseGroup }],
       'copy',
@@ -1027,7 +1029,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
     expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toEqual(
+    expect(proposed[0]!.data).toMatchObject(
       bundleImportPayload({
         instance: fx.arrInstance,
         files: [
@@ -1037,6 +1039,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         reasoning: expect.any(String),
       }),
     );
+    expect(proposed[0]!.data).toMatchObject({ title: expect.any(String), fileCount: 2 });
   });
 
   it("the producer's actual ingest.rescue-proposed payload parses through AcceptDataSchema — the two shapes can never silently drift apart", async () => {
@@ -1059,8 +1062,9 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(result.success).toBe(true);
   });
 
-  it('movie occupied-guard: a movie that already has a file on disk proposes an attention item instead of executing', async () => {
-    // ingestFixture's default movieFiles seeds one entry — occupied.
+  it('movie already-imported: a movie that already has a file on disk skips quietly instead of proposing a replace', async () => {
+    // ingestFixture's default movieFiles seeds one entry — occupied. Incremental-only:
+    // re-import/replace is not Warrden's job once the library already has the movie.
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
     fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
@@ -1070,18 +1074,13 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     await runIngestJob(fx.ctx, job);
 
     expect(fx.client.executeManualImport).not.toHaveBeenCalled();
-    const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
-    expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toEqual(
-      bundleImportPayload({
-        instance: fx.arrInstance,
-        files: [expect.objectContaining({ path: item.path })],
-        reasoning: expect.any(String),
-      }),
-    );
+    expect(fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed')).toHaveLength(0);
+    const skipped = findEvent(fx.ctx.events.list(), 'ingest.rescue-skipped');
+    expect(skipped).toBeTruthy();
+    expect(skipped!.message).toMatch(/already in the library/i);
   });
 
-  it('movie occupied-guard breaks the re-execution loop: once the movie has a file (post-import), a lingering stuck record proposes instead of re-executing', async () => {
+  it('movie already-imported breaks the re-execution loop: once the movie has a file (post-import), a lingering stuck record skips instead of re-executing', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
     fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
@@ -1099,9 +1098,9 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     await runIngestJob(fx.ctx, job2);
 
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1); // NOT re-executed
-    const proposed = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed');
-    expect(proposed).toHaveLength(1);
-    expect(proposed[0]!.data).toMatchObject({ action: 'bundle-import', instance: fx.arrInstance, targetKind: 'movie', targetId: 7 });
+    expect(fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'ingest.rescue-proposed')).toHaveLength(0);
+    const skipped = fx.ctx.events.list().filter((e) => e.kind === 'ingest.rescue-skipped');
+    expect(skipped.length).toBeGreaterThanOrEqual(1);
   });
 
   it('nothing leftover: listManualImport returns nothing for every scope -> no manual-import command, no attention, no rescue event noise', async () => {
@@ -1179,7 +1178,8 @@ describe('runIngestJob — mapArrPath boundary', () => {
           { from: '/data/dl', to: downloadsDir },
           { from: '/data/tv', to: libraryDir },
         ],
-        ingest: { downloadRoots: ['/data/dl'] },
+        // Test override — production leaves mountMarkers empty and uses /tv,/anime,/movies,/downloads.
+        ingest: { mountMarkers: [downloadsDir, libraryDir], downloadRoots: ['/data/dl'] },
       }) });
 
     const job = enqueueAndClaim(ctx, { pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });

@@ -19,6 +19,8 @@ import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '
 import { SubtitleRuns } from '../db/subtitleRuns.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
+import { probeStorage } from './storageHealth.js';
+import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
 const DEFAULT_JOBS_LIMIT = 50;
@@ -298,13 +300,23 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       );
     }
 
-    app.get('/api/jobs', (c) => {
+    app.get('/api/jobs', async (c) => {
       const limit = parseLimit(c.req.query('limit'), DEFAULT_JOBS_LIMIT);
       const jobs = queue.list({ limit });
-      return c.json(jobs.map((job) => ({ ...job, acquireOutcome: acquireOutcome(job) })));
+      const clients = ctx.clients ?? new Map();
+      const titles = await resolveJobTitles(jobs, clients);
+      return c.json(
+        jobs.map((job) => ({
+          ...job,
+          acquireOutcome: acquireOutcome(job),
+          targetTitle:
+            titles.get(jobTitleKey(job.arr_instance, job.target_kind, job.target_id)) ??
+            fallbackTargetLabel(job.target_kind, job.target_id),
+        })),
+      );
     });
 
-    app.get('/api/jobs/:id', (c) => {
+    app.get('/api/jobs/:id', async (c) => {
       const id = Number(c.req.param('id'));
       const job = Number.isInteger(id) ? queue.get(id) : null;
       if (!job) return c.json({ error: 'job not found' }, 404);
@@ -318,8 +330,15 @@ export function createApp(ctx: Partial<AppContext>): Hono {
           since: job.created_at,
           until: isTerminal(job) ? job.updated_at : undefined,
         })[0] ?? null;
+      const targetTitle = await resolveJobTitle({
+        client: ctx.clients?.get(job.arr_instance),
+        arrInstance: job.arr_instance,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+        payload: job.payload,
+      });
       return c.json({
-        job,
+        job: { ...job, targetTitle, acquireOutcome: acquireOutcome(job) },
         acquireRecord,
         acquireOutcome: acquireOutcome(job),
         placedFiles: placedFiles.listByJob(job.id),
@@ -624,6 +643,9 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
   if (ctx.config && ctx.dataDir) {
     const dataDir = ctx.dataDir;
+
+    // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
+    app.get('/api/health/storage', (c) => c.json({ checks: probeStorage() }));
 
     app.get('/api/config', (c) => {
       return c.json(redactConfig(requireConfig(ctx)));

@@ -5,8 +5,8 @@ import {
   deleteManagedObject,
   fetchManagedObjects,
   type ManagedObject,
-  type ManagedObjectKind,
 } from '@/api';
+import { PageHeader } from '@/components/PageHeader';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,12 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-
-const KIND_LABEL: Record<ManagedObjectKind, string> = {
-  notification: 'Notification',
-  tag: 'Tag',
-  release_profile: 'Release profile',
-};
+import { managedKindLabel } from '@/lib/labels';
 
 function groupByArrInstance(objects: ManagedObject[]): [string, ManagedObject[]][] {
   const groups = new Map<string, ManagedObject[]>();
@@ -36,8 +31,6 @@ export default function ManagedObjects() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingIds, setPendingIds] = useState<Set<number>>(new Set());
-  // Two-click delete: first click on a row arms it, a second click on the same row's
-  // "Confirm?" button actually deletes — nothing here uses the browser's own `confirm()`.
   const [confirmId, setConfirmId] = useState<number | null>(null);
 
   const beginFetch = useFetchGeneration();
@@ -47,11 +40,11 @@ export default function ManagedObjects() {
       .then((res) => {
         if (isStale()) return;
         setObjects(res.objects);
-        setError(null); // a transient failure must not stick once a later load succeeds
+        setError(null);
       })
       .catch((err: unknown) => {
         if (isStale()) return;
-        setError(apiErrorMessage(err, 'failed to load managed objects'));
+        setError(apiErrorMessage(err, 'Failed to load Arr objects'));
       })
       .finally(() => {
         if (isStale()) return;
@@ -66,11 +59,15 @@ export default function ManagedObjects() {
     setPendingIds((prev) => new Set(prev).add(id));
     try {
       const { deletedInArr } = await deleteManagedObject(id);
-      toast.success(deletedInArr ? `Deleted from ${arrInstance}` : 'Removed from registry (arr object left in place)');
+      toast.success(
+        deletedInArr
+          ? `Removed from ${arrInstance} and Warrden's registry`
+          : 'Removed from Warrden registry (live object left in Sonarr/Radarr)',
+      );
       setConfirmId(null);
       refetch();
     } catch (err) {
-      toast.error(apiErrorMessage(err, 'failed to delete'));
+      toast.error(apiErrorMessage(err, 'Failed to delete'));
     } finally {
       setPendingIds((prev) => {
         const next = new Set(prev);
@@ -83,36 +80,37 @@ export default function ManagedObjects() {
   const groups = groupByArrInstance(objects);
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Managed objects</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
-        {/* A fetch failure keeps whatever rows are already on screen (stale, but still
-            useful) rather than blanking the table out from under the user — same
-            convention as Activity/Attention. Registry rows only change on startup
-            registration and the occasional GC pass, so a page left open after a failed
-            load could sit stale for a long time before any SSE event happens to trigger a
-            fresh refetch — a Retry button is the reliable way back, not a reload. */}
+    <div>
+      <PageHeader
+        title="Arr objects"
+        description="Tags, release profiles, and webhooks Warrden created inside Sonarr/Radarr so future grabs stay correct. Safe to review; delete only if you want Warrden to stop managing that object."
+      />
+
+      <div className="space-y-4">
+        {disconnected && (
+          <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />
+        )}
         {error && <StatusNotice message={error} onRetry={refetch} />}
         {loading && objects.length === 0 && <p className="text-muted-foreground">Loading…</p>}
         {!loading && groups.length === 0 && !error && (
-          <p className="text-center text-muted-foreground">No managed objects yet.</p>
+          <Card>
+            <CardContent className="py-10 text-center text-muted-foreground">
+              Nothing registered yet. Warrden adds tags and release profiles when it pins a series, and a webhook on each arr instance at startup.
+            </CardContent>
+          </Card>
         )}
         {groups.map(([arrInstance, rows]) => (
           <Card key={arrInstance}>
-            <CardHeader>
-              <CardTitle>{arrInstance}</CardTitle>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">{arrInstance}</CardTitle>
             </CardHeader>
             <CardContent>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Kind</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead>Name</TableHead>
-                    <TableHead>External ID</TableHead>
-                    <TableHead>Registered at</TableHead>
+                    <TableHead>Added</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -123,16 +121,18 @@ export default function ManagedObjects() {
                     return (
                       <TableRow key={row.id}>
                         <TableCell>
-                          <Badge variant="outline">{KIND_LABEL[row.kind]}</Badge>
+                          <Badge variant="outline">{managedKindLabel(row.kind)}</Badge>
                         </TableCell>
-                        <TableCell>{row.name ?? '—'}</TableCell>
-                        <TableCell>{row.external_id}</TableCell>
-                        <TableCell>{new Date(row.created_at).toLocaleString()}</TableCell>
+                        <TableCell className="font-medium">{row.name ?? '—'}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {new Date(row.created_at).toLocaleString()}
+                        </TableCell>
                         <TableCell className="text-right">
                           {confirming ? (
                             <div className="flex flex-col items-end gap-1">
-                              <p className="text-xs text-muted-foreground">
-                                Deletes the live {KIND_LABEL[row.kind].toLowerCase()} in {arrInstance} too, not just this registry entry.
+                              <p className="max-w-xs text-xs text-muted-foreground">
+                                Also deletes the live {managedKindLabel(row.kind).toLowerCase()} in {arrInstance}, not
+                                just this registry entry.
                               </p>
                               <div className="flex justify-end gap-1.5">
                                 <Button variant="outline" size="sm" disabled={pending} onClick={() => setConfirmId(null)}>
@@ -144,7 +144,7 @@ export default function ManagedObjects() {
                                   disabled={pending}
                                   onClick={() => void handleDelete(row.id, arrInstance)}
                                 >
-                                  {pending ? 'Deleting…' : 'Confirm?'}
+                                  {pending ? 'Deleting…' : 'Confirm delete'}
                                 </Button>
                               </div>
                             </div>
@@ -162,7 +162,7 @@ export default function ManagedObjects() {
             </CardContent>
           </Card>
         ))}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

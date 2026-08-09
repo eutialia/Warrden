@@ -78,15 +78,14 @@ export const ConfigSchema = z
       }),
     ingest: z
       .object({
-        // Local (mapped) paths that must exist before any filesystem work — e.g. a marker
-        // file at the root of each NAS mount. Empty list = no mount verification. `.min(1)`
-        // per entry: a blank marker would trivially "exist" as a no-op check, defeating the
-        // point of listing it at all.
+        // Legacy/test override only. Empty = use the four standard mounts
+        // (/tv, /anime, /movies, /downloads — see `standardMounts.ts`). The web UI never edits this.
+        // `.min(1)` per entry: a blank marker would trivially "exist" as a no-op check.
         mountMarkers: z.array(z.string().min(1)).default(() => []),
-        // ARR-side paths of the torrent clients' download roots. Used to derive a torrent's
-        // root folder from an imported file's path, and as a hard "never sweep this dir
-        // itself" guard. `.min(1)` per entry: a blank root would match every path's
-        // longest-prefix check in `resolveSourceDirsDetailed`, corrupting bundle rescue.
+        // Legacy/test override only. Empty = derive from pathMappings targeting the
+        // standard Downloads mount, else `/downloads`. The web UI never edits this.
+        // `.min(1)` per entry: a blank root would match every path's longest-prefix check
+        // in `resolveSourceDirsDetailed`, corrupting bundle rescue.
         downloadRoots: z.array(z.string().min(1)).default(() => []),
       })
       .prefault({}),

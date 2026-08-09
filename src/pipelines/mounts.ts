@@ -1,3 +1,4 @@
+import { effectiveMountMarkers } from '../config/standardMounts.js';
 import type { AppContext } from '../context.js';
 import { targetEventData } from '../events/target.js';
 import { ensureMounts, MountError } from '../fs/files.js';
@@ -21,14 +22,14 @@ export const MOUNT_RETRY_MS = 5 * 60_000;
  */
 export function assertMounted(ctx: AppContext, job: JobRow, scope: 'ingest' | 'subtitle'): void {
   try {
-    ensureMounts(ctx.config.ingest.mountMarkers);
+    ensureMounts(effectiveMountMarkers(ctx.config));
   } catch (err) {
     if (!(err instanceof MountError)) throw err;
     ctx.events.append({
       kind: `${scope}.mount-missing`,
       level: 'attention',
       jobId: job.id,
-      message: `${scope === 'ingest' ? 'Ingest' : 'Subtitle'} paused — missing mount marker(s): ${err.missing.join(', ')}`,
+      message: `${scope === 'ingest' ? 'Import cleanup' : 'Subtitle search'} paused — storage not reachable (${err.missing.join(', ')}). Check container mounts.`,
       data: targetEventData(job, { missing: err.missing }),
     });
     throw new RescheduleError('mount marker(s) missing', MOUNT_RETRY_MS);
