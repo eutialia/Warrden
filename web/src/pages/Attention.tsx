@@ -36,7 +36,7 @@ import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { attentionKindLabel, attentionKindTone, attentionTitle } from '@/lib/labels';
-import { cn, formatRelativeTime } from '@/lib/utils';
+import { cn, formatElapsed, formatRelativeTime } from '@/lib/utils';
 
 const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
   { value: 'open', label: 'Open' },
@@ -237,8 +237,8 @@ export default function Attention() {
                   <ToneBadge tone={item.status === 'open' ? tone : 'neutral'} dot={item.status === 'open'}>
                     {attentionKindLabel(item.kind)}
                   </ToneBadge>
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {formatRelativeTime(item.ts)}
+                  <span className="ml-auto font-mono text-xs text-muted-foreground">
+                    {item.status === 'open' ? `held ${formatElapsed(item.ts)}` : formatRelativeTime(item.ts)}
                     {item.job_id !== null && (
                       <>
                         {' · '}

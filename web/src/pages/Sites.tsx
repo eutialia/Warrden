@@ -13,9 +13,10 @@ import {
 } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionStack } from '@/components/SectionStack';
+import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TagInput } from '@/components/TagInput';
-import { ToneBadge } from '@/components/ToneBadge';
+import { StatusDot, ToneBadge } from '@/components/ToneBadge';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -46,7 +47,16 @@ import { Textarea } from '@/components/ui/textarea';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { tierLabel } from '@/lib/labels';
+import type { Tone } from '@/lib/tone';
 import { formatRelativeTime } from '@/lib/utils';
+
+/** A site's health at a glance: green once it has worked and has no failures on
+ * record, amber while failures stand, neutral for one Warrden has never used. */
+function siteTone(profile: SiteProfileRow | undefined): Tone {
+  if (!profile) return 'neutral';
+  if (profile.fail_count > 0) return 'warning';
+  return profile.last_success_at === null ? 'neutral' : 'success';
+}
 
 const EMPTY_SITE: SubtitleSite = { name: '', baseUrl: '', searchUrlTemplate: '' };
 
@@ -173,6 +183,7 @@ export default function Sites() {
     }
   }
 
+  const failingCount = profiles.filter((p) => p.fail_count > 0).length;
   const prefsDirty =
     config !== null &&
     (JSON.stringify(languages) !== JSON.stringify(config.subtitle.languages) ||
@@ -190,6 +201,18 @@ export default function Sites() {
 
       {config && (
         <SectionStack>
+          <StatBand>
+            <StatTile label="Languages wanted" value={languages.length} hint="Before a video counts as covered" />
+            <StatTile label="Preferred groups" value={groups.length} hint="Ranking boost only" />
+            <StatTile label="Sites" value={config.subtitle.sites.length} hint="Tried in order, top first" />
+            <StatTile
+              label="Sites failing"
+              value={failingCount}
+              hint={failingCount > 0 ? 'Recent failures on record' : 'None on record'}
+              tone={failingCount > 0 ? 'warning' : 'neutral'}
+            />
+          </StatBand>
+
           <Card>
             <CardHeader>
               <CardTitle>What counts as covered</CardTitle>
@@ -261,14 +284,20 @@ export default function Sites() {
                 </Empty>
               )}
 
-              {config.subtitle.sites.map((site) => {
+              {config.subtitle.sites.map((site, rank) => {
                 const profile = profiles.find((p) => p.name === site.name);
                 const failing = (profile?.fail_count ?? 0) > 0;
                 return (
                   <div key={site.name} className="border-t pt-4">
                     <div className="flex flex-wrap items-start gap-3">
+                      {/* The order they sit in is the order they are tried, so it is worth
+                          showing rather than leaving to be inferred. */}
+                      <span className="mt-0.5 w-4 shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+                        {rank + 1}
+                      </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
+                          <StatusDot tone={siteTone(profile)} />
                           <span className="font-medium">{site.name}</span>
                           <Badge variant="outline" className="text-muted-foreground">
                             {tierLabel(profile?.last_working_tier ?? null)}

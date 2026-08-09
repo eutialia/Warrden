@@ -4,9 +4,9 @@ import { ListChecks, Search } from 'lucide-react';
 import { apiErrorMessage, fetchJobs, type Job, type JobStatus } from '@/api';
 import { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from '@/components/StatusBadge';
 import { PageHeader } from '@/components/PageHeader';
+import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import {
@@ -21,9 +21,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { jobDuration, jobTitle } from '@/lib/jobs';
+import { groupJobsByDay, jobDuration, jobTitle } from '@/lib/jobs';
 import { jobStatusLabel, pipelineLabel, targetKindLabel } from '@/lib/labels';
-import { formatRelativeTime } from '@/lib/utils';
+import { formatTimeOfDay } from '@/lib/utils';
 
 const PAGE_SIZE = 50;
 const PIPELINES = ['acquire', 'ingest', 'subtitle'] as const;
@@ -88,6 +88,7 @@ export default function Activity() {
     });
   }, [jobs, query, pipeline, status]);
 
+  const days = useMemo(() => groupJobsByDay(visible), [visible]);
   const filtered = query.trim() !== '' || pipeline !== ALL || status !== ALL;
 
   return (
@@ -134,8 +135,7 @@ export default function Activity() {
       </div>
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
-      <Card>
-        <CardContent>
+      <div>
           {loading && jobs.length === 0 ? (
             <div className="space-y-3 py-4">
               {Array.from({ length: 6 }, (_, i) => (
@@ -172,50 +172,62 @@ export default function Activity() {
               )}
             </Empty>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead>Title</TableHead>
-                  <TableHead className="w-40">Work</TableHead>
-                  <TableHead className="w-56">Status</TableHead>
-                  <TableHead className="w-20 text-right">Took</TableHead>
-                  <TableHead className="w-28 text-right">Updated</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {visible.map((job) => (
-                  <TableRow key={job.id} className="cursor-pointer" onClick={() => navigate(`/jobs/${job.id}`)}>
-                    <TableCell>
-                      <div className="font-medium">{jobTitle(job)}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {job.arr_instance} · {targetKindLabel(job.target_kind)}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <PipelineBadge pipeline={job.pipeline} />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <StatusBadge status={job.status} />
-                        <AcquireOutcomeBadge outcome={job.acquireOutcome} />
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right text-xs text-muted-foreground tabular-nums">
-                      {jobDuration(job) ?? '—'}
-                    </TableCell>
-                    <TableCell className="text-right text-xs text-muted-foreground">
-                      <Tooltip>
-                        <TooltipTrigger render={<span>{formatRelativeTime(job.updated_at)}</span>} />
-                        <TooltipContent>{new Date(job.updated_at).toLocaleString()}</TooltipContent>
-                      </Tooltip>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <SectionStack>
+              {days.map((day) => (
+                <div key={day.key}>
+                  <div className="flex items-baseline justify-between gap-4">
+                    <h2 className="font-serif text-xl">{day.label}</h2>
+                    <span className="text-xs text-muted-foreground">
+                      {day.jobs.length} run{day.jobs.length === 1 ? '' : 's'}
+                      {day.failed > 0 ? ` · ${day.failed} failed` : ''}
+                    </span>
+                  </div>
+                  <Table className="mt-3">
+                    <TableHeader>
+                      <TableRow className="hover:bg-transparent">
+                        <TableHead className="w-16">Time</TableHead>
+                        <TableHead>Title</TableHead>
+                        <TableHead className="w-40">Work</TableHead>
+                        <TableHead className="w-56">Status</TableHead>
+                        <TableHead className="w-20 text-right">Took</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {day.jobs.map((job) => (
+                        <TableRow key={job.id} className="cursor-pointer" onClick={() => navigate(`/jobs/${job.id}`)}>
+                          <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
+                            <Tooltip>
+                              <TooltipTrigger render={<span>{formatTimeOfDay(job.updated_at)}</span>} />
+                              <TooltipContent>{new Date(job.updated_at).toLocaleString()}</TooltipContent>
+                            </Tooltip>
+                          </TableCell>
+                          <TableCell>
+                            <div className="font-medium">{jobTitle(job)}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {job.arr_instance} · {targetKindLabel(job.target_kind)}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <PipelineBadge pipeline={job.pipeline} />
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <StatusBadge status={job.status} />
+                              <AcquireOutcomeBadge outcome={job.acquireOutcome} />
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground tabular-nums">
+                            {jobDuration(job) ?? '—'}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ))}
+            </SectionStack>
           )}
-        </CardContent>
-      </Card>
+      </div>
 
       {/* Only offered when the server actually filled the window — otherwise there is
           demonstrably nothing more to fetch. */}

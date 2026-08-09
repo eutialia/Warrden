@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -10,13 +10,14 @@ import { StatusDot, ToneBadge } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { jobTitle } from '@/lib/jobs';
-import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
+import { storageStatusLabel, storageStatusTone, targetKindLabel } from '@/lib/labels';
 import { TONE_SOFT, TONE_TEXT, type Tone } from '@/lib/tone';
-import { cn, formatRelativeTime } from '@/lib/utils';
+import { cn, formatElapsed } from '@/lib/utils';
 
 const RECENT_JOBS = 6;
 
@@ -75,6 +76,7 @@ function verdictOf(data: OverviewData): Verdict {
 }
 
 export default function Overview() {
+  const navigate = useNavigate();
   const { data, error, loading, refetch } = useOverview();
   const [jobs, setJobs] = useState<Job[]>([]);
 
@@ -169,71 +171,88 @@ export default function Overview() {
         <StatTile label="Files delivered" value={placed} hint="Subtitles and audio, last 7 days" loading={loading} />
       </StatBand>
 
-      {/* Storage */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <HardDrive className="size-4 text-muted-foreground" />
-            Storage mounts
-          </CardTitle>
-          {data && (
+      {/* The queue reads as the page's subject, so it takes the wide column and the
+          mounts sit beside it rather than under it. */}
+      <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Latest activity</CardTitle>
             <CardAction>
-              <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
-                {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
-              </ToneBadge>
+              <Button variant="ghost" size="sm" render={<Link to="/activity" />}>
+                See all
+                <ArrowRight />
+              </Button>
             </CardAction>
-          )}
-        </CardHeader>
-        <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
-          {loading && <Skeleton className="h-24 w-full" />}
-          {data?.storage.map((check) => (
-            <div key={check.id} className="flex items-center gap-3 py-2.5">
-              <StatusDot tone={storageStatusTone(check.status)} />
-              <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                <span className="shrink-0 text-sm font-medium">{check.label}</span>
-                <code className="truncate text-xs text-muted-foreground">{check.path}</code>
-              </div>
-              <span className={cn('shrink-0 text-xs font-medium', TONE_TEXT[storageStatusTone(check.status)])}>
-                {storageStatusLabel(check.status)}
-              </span>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
+          </CardHeader>
+          <CardContent>
+            {jobs.length === 0 ? (
+              <p className="border-t py-6 text-sm text-muted-foreground">
+                Nothing yet. Add a series or movie in Sonarr/Radarr and Warrden will pick it up.
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead>Title</TableHead>
+                    <TableHead className="w-36">Work</TableHead>
+                    <TableHead className="w-32">State</TableHead>
+                    <TableHead className="w-16 text-right">Age</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {jobs.map((job) => (
+                    <TableRow key={job.id} className="cursor-pointer" onClick={() => navigate(`/jobs/${job.id}`)}>
+                      <TableCell className="max-w-0">
+                        <div className="truncate font-medium">{jobTitle(job)}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {job.arr_instance} · {targetKindLabel(job.target_kind)}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <PipelineBadge pipeline={job.pipeline} />
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={job.status} />
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs text-muted-foreground tabular-nums">
+                        {formatElapsed(job.updated_at)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
 
-      {/* Recent activity */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Latest activity</CardTitle>
-          <CardAction>
-            <Button variant="ghost" size="sm" render={<Link to="/activity" />}>
-              See all
-              <ArrowRight />
-            </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
-          {jobs.length === 0 && (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Nothing yet. Add a series or movie in Sonarr/Radarr and Warrden will pick it up.
-            </p>
-          )}
-          {jobs.map((job) => (
-            <Link
-              key={job.id}
-              to={`/jobs/${job.id}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 hover:bg-accent/40"
-            >
-              <span className="min-w-0 flex-1 truncate text-sm font-medium">{jobTitle(job)}</span>
-              <PipelineBadge pipeline={job.pipeline} />
-              <StatusBadge status={job.status} />
-              <span className="w-16 shrink-0 text-right text-xs text-muted-foreground">
-                {formatRelativeTime(job.updated_at)}
-              </span>
-            </Link>
-          ))}
-        </CardContent>
-      </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <HardDrive className="size-4 text-muted-foreground" />
+              Storage
+            </CardTitle>
+            {data && (
+              <CardAction>
+                <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
+                  {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
+                </ToneBadge>
+              </CardAction>
+            )}
+          </CardHeader>
+          <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
+            {loading && <Skeleton className="h-24 w-full" />}
+            {data?.storage.map((check) => (
+              <div key={check.id} className="flex items-center gap-3 py-2.5">
+                <StatusDot tone={storageStatusTone(check.status)} />
+                <code className="min-w-0 flex-1 truncate text-xs">{check.path}</code>
+                <span className={cn('shrink-0 text-xs font-medium', TONE_TEXT[storageStatusTone(check.status)])}>
+                  {storageStatusLabel(check.status)}
+                </span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

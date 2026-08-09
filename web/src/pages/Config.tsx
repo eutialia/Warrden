@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
+import { useTheme } from 'next-themes';
 import { toast } from 'sonner';
 import {
   ApiError,
@@ -53,7 +54,14 @@ const STANDARD_MOUNT_ROWS = [
   { id: 'downloads', label: 'Downloads', path: '/downloads', blurb: 'Torrent download / completed root' },
 ] as const;
 
+const THEME_OPTIONS = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'Follow system' },
+] as const;
+
 const SECTIONS = [
+  { id: 'appearance', label: 'Appearance' },
   { id: 'connections', label: 'Connections' },
   { id: 'storage', label: 'Storage' },
   { id: 'picking', label: 'Release picking' },
@@ -105,6 +113,7 @@ export default function ConfigPage() {
   const [saving, setSaving] = useState(false);
   const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
   const [activeProfileTab, setActiveProfileTab] = useState('dev');
+  const { theme, setTheme } = useTheme();
 
   const loadStorage = useCallback(() => {
     fetchStorageHealth()
@@ -264,6 +273,29 @@ export default function ConfigPage() {
         </nav>
 
         <SectionStack className="min-w-0 flex-1">
+          {/* Appearance. The header keeps its own toggle for reach, but the choice is a
+              setting, so it belongs here too rather than only behind an icon. */}
+          <Card id="appearance" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>Appearance</CardTitle>
+              <CardDescription>Dark is the default. Follow system takes the choice from your OS instead.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap items-center gap-2">
+                {THEME_OPTIONS.map((option) => (
+                  <Button
+                    key={option.value}
+                    variant={theme === option.value ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setTheme(option.value)}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Connections */}
           <Card id="connections" className="scroll-mt-20">
             <CardHeader>
