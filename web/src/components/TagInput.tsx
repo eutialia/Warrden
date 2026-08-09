@@ -54,9 +54,11 @@ export function TagInput({
         className,
       )}
     >
+      {/* Picking preferences are written as whole sentences, so a chip has to be able
+          to wrap rather than truncate the policy mid-word. */}
       {values.map((v) => (
-        <Badge key={v} variant="secondary" className="gap-1 pr-1 font-normal">
-          <span className="max-w-[14rem] truncate">{v}</span>
+        <Badge key={v} variant="secondary" className="h-auto max-w-full gap-1 py-1 pr-1 font-normal whitespace-normal">
+          <span className="min-w-0 text-left">{v}</span>
           {!disabled && (
             <button
               type="button"

@@ -14,6 +14,7 @@ import type { AppContext } from '../context.js';
 import { AcquireRecords } from '../db/acquireRecords.js';
 import { AttentionItems, type AttentionStatus } from '../db/attention.js';
 import { ManagedObjects } from '../db/managedObjects.js';
+import { Overview } from '../db/overview.js';
 import { PlacedFiles } from '../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '../db/siteProfiles.js';
 import { SubtitleRuns } from '../db/subtitleRuns.js';
@@ -639,6 +640,15 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // Return the post-update row: the dashboard replaces its table row with the response.
       return c.json(profiles.get(name));
     });
+  }
+
+  if (ctx.db) {
+    const overview = new Overview(ctx.db);
+
+    // Everything the dashboard home needs to answer "is Warrden healthy right now?"
+    // in one request: queue depth, the review backlog, recent outcomes, and the mount
+    // probe that would otherwise be a second round-trip.
+    app.get('/api/overview', (c) => c.json({ ...overview.counts(), storage: probeStorage() }));
   }
 
   if (ctx.config && ctx.dataDir) {

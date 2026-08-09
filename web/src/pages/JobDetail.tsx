@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { ArrowLeft, FileCheck2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -14,12 +15,18 @@ import {
 import { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TierBadge } from '@/components/TierBadge';
+import { ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { acquireOutcomeLabel, targetKindLabel } from '@/lib/labels';
+import { jobDuration, jobTitle } from '@/lib/jobs';
+import { acquireOutcomeLabel, subtitleRunLabel, subtitleRunTone, targetKindLabel } from '@/lib/labels';
+import { TONE_SOLID } from '@/lib/tone';
+import { cn, formatRelativeTime } from '@/lib/utils';
 
 // Same idea as ManagedObjects.tsx's own `KIND_LABEL` — a raw `PlacedFileKind` reads fine
 // in a log line but not as dashboard copy.
@@ -28,33 +35,45 @@ const PLACED_FILE_KIND_LABEL: Record<PlacedFileKind, string> = {
   subtitle: 'Subtitle',
 };
 
-/** Renders one subtitle agent run as a chronological step list — each entry's tier badge,
- * action, and detail on its own line, ordered oldest-first (the transcript's own array
- * order). `detail` can be long, so it breaks across lines rather than truncating. */
-function TranscriptList({ entries }: { entries: TranscriptEntry[] }): ReactNode {
-  if (entries.length === 0) return <p className="text-xs text-muted-foreground">No steps recorded.</p>;
+/** One labelled fact in the job's summary grid. */
+function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <ol className="space-y-1.5 text-xs">
-      {entries.map((e, i) => (
-        <li key={i} className="flex items-start gap-1.5">
-          <TierBadge tier={e.tier} className="shrink-0" />
-          <span>
-            <span className="font-medium">{e.action}</span>
-            {e.detail && <span className="text-muted-foreground"> — {e.detail}</span>}
-          </span>
+    <div className="space-y-0.5">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="text-sm font-medium">{children}</dd>
+    </div>
+  );
+}
+
+/**
+ * A site-search run as a vertical timeline. This is the most interesting thing the
+ * dashboard has to show — the agent narrating its own navigation — so it gets a
+ * rail, per-step timestamps, and room to breathe rather than a dense inline list.
+ */
+function TranscriptTimeline({ entries }: { entries: TranscriptEntry[] }): ReactNode {
+  if (entries.length === 0) {
+    return <p className="text-sm text-muted-foreground">No steps recorded yet.</p>;
+  }
+  return (
+    <ol className="relative space-y-4 border-l pl-5">
+      {entries.map((entry, i) => (
+        <li key={i} className="relative">
+          <span
+            className={cn(
+              'absolute top-1.5 -left-[1.6rem] size-2 rounded-full ring-4 ring-card',
+              TONE_SOLID[i === entries.length - 1 ? 'brand' : 'neutral'],
+            )}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">{entry.action}</span>
+            <TierBadge tier={entry.tier} />
+            <span className="ml-auto text-xs text-muted-foreground">{formatRelativeTime(entry.ts)}</span>
+          </div>
+          {entry.detail && <p className="mt-1 text-xs break-words text-muted-foreground">{entry.detail}</p>}
         </li>
       ))}
     </ol>
   );
-}
-
-/** A subtitle run's status badge — same destructive/secondary/default ladder as the
- * job-status badge, keyed off the run's own `done`/`failed` (and any in-flight status the
- * agent recorded before finishing). */
-function RunStatusBadge({ status }: { status: string }): ReactNode {
-  const variant: 'default' | 'secondary' | 'destructive' =
-    status === 'done' ? 'default' : status === 'failed' ? 'destructive' : 'secondary';
-  return <Badge variant={variant}>{status}</Badge>;
 }
 
 export default function JobDetail() {
@@ -74,7 +93,7 @@ export default function JobDetail() {
         })
         .catch((err: unknown) => {
           if (opts?.isStale()) return;
-          setError(apiErrorMessage(err, 'failed to load job'));
+          setError(apiErrorMessage(err, 'Failed to load job'));
         });
     },
     [id],
@@ -105,12 +124,10 @@ export default function JobDetail() {
   }, [id, load, beginFetch]);
 
   // Any event can mean this job (or its acquire record) changed — refetch wholesale rather
-  // than trying to reconcile individual fields. `debounceMs: 0` — unlike Activity/Attention/
-  // ManagedObjects's own lists, SSE traffic about one job is never a "burst" worth
-  // coalescing. `load()` is called with no staleness guard here, same as before this was
-  // pulled into the shared hook: the per-`id` guard above is what actually matters, and a
-  // late-resolving SSE-triggered load for the *same* `id` is harmless to apply. `enabled:
-  // Boolean(id)` — no point opening a connection whose `onEvent` (`load`) would just no-op.
+  // than trying to reconcile individual fields. `debounceMs: 0` — unlike the list pages,
+  // SSE traffic about one job is never a "burst" worth coalescing. `load()` is called with
+  // no staleness guard here: the per-`id` guard above is what actually matters, and a
+  // late-resolving SSE-triggered load for the *same* `id` is harmless to apply.
   const { disconnected, reconnect } = useSseRefetch(() => load(), 0, Boolean(id));
 
   async function handleRepick(): Promise<void> {
@@ -124,7 +141,7 @@ export default function JobDetail() {
       });
       toast.success('Re-pick queued');
     } catch (err) {
-      toast.error(apiErrorMessage(err, 'failed to queue re-pick'));
+      toast.error(apiErrorMessage(err, 'Failed to queue re-pick'));
     } finally {
       setRepicking(false);
     }
@@ -143,17 +160,14 @@ export default function JobDetail() {
     return (
       <div className="space-y-4">
         <BackLink />
-        <p className="text-muted-foreground">Loading…</p>
+        <Skeleton className="h-40 w-full" />
+        <Skeleton className="h-64 w-full" />
       </div>
     );
   }
 
   const { job, acquireRecord, acquireOutcome, placedFiles, subtitleRuns } = data;
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
-  const title =
-    job.targetTitle?.trim() ||
-    (typeof job.payload.title === 'string' ? job.payload.title : null) ||
-    `${targetKindLabel(job.target_kind)} #${job.target_id}`;
 
   return (
     <div className="space-y-4">
@@ -163,24 +177,37 @@ export default function JobDetail() {
       <Card>
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center gap-2 text-xl">
-            <span>{title}</span>
+            <span>{jobTitle(job)}</span>
             <PipelineBadge pipeline={job.pipeline} />
             <StatusBadge status={job.status} />
             <AcquireOutcomeBadge outcome={acquireOutcome} />
           </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1 text-sm">
-          <p className="text-muted-foreground">
-            {job.arr_instance} · {targetKindLabel(job.target_kind)} · Job #{job.id}
-          </p>
-          <p>Attempts: {job.attempts}</p>
-          <p>Created: {new Date(job.created_at).toLocaleString()}</p>
-          <p>Updated: {new Date(job.updated_at).toLocaleString()}</p>
-          {job.error && <p className="text-destructive">Error: {job.error}</p>}
           {job.pipeline === 'acquire' && (
-            <Button variant="outline" size="sm" className="mt-2" disabled={repicking} onClick={() => void handleRepick()}>
-              {repicking ? 'Queuing…' : 'Pick a different release'}
-            </Button>
+            <CardAction>
+              <Button variant="outline" size="sm" disabled={repicking} onClick={() => void handleRepick()}>
+                {repicking ? 'Queuing…' : 'Pick a different release'}
+              </Button>
+            </CardAction>
+          )}
+        </CardHeader>
+        <CardContent>
+          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            <Fact label="Instance">{job.arr_instance}</Fact>
+            <Fact label="Target">{targetKindLabel(job.target_kind)}</Fact>
+            <Fact label="Job">#{job.id}</Fact>
+            <Fact label="Attempts">{job.attempts}</Fact>
+            <Fact label="Started">
+              <Tooltip>
+                <TooltipTrigger render={<span>{formatRelativeTime(job.created_at)}</span>} />
+                <TooltipContent>{new Date(job.created_at).toLocaleString()}</TooltipContent>
+              </Tooltip>
+            </Fact>
+            <Fact label="Took">{jobDuration(job) ?? '—'}</Fact>
+          </dl>
+          {job.error && (
+            <p className="mt-4 rounded-lg border border-destructive-border bg-destructive-muted p-3 text-sm text-destructive-foreground">
+              {job.error}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -190,21 +217,22 @@ export default function JobDetail() {
           <CardHeader>
             <CardTitle>Release pick</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2 text-sm">
-            {!acquireRecord && <p className="text-muted-foreground">No pick record for this job yet.</p>}
+          <CardContent className="space-y-4">
+            {!acquireRecord && <p className="text-sm text-muted-foreground">No pick record for this job yet.</p>}
             {acquireRecord && (
               <>
-                <p>
-                  Outcome:{' '}
-                  {acquireRecord.status ? acquireOutcomeLabel(acquireRecord.status) : '—'}
-                </p>
-                <p>Candidates considered: {candidateCount ?? '—'}</p>
-                <p>Release group: {acquireRecord.release_group ?? '—'}</p>
+                <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                  <Fact label="Outcome">
+                    {acquireRecord.status ? acquireOutcomeLabel(acquireRecord.status) : '—'}
+                  </Fact>
+                  <Fact label="Candidates considered">{candidateCount ?? '—'}</Fact>
+                  <Fact label="Release group">{acquireRecord.release_group ?? '—'}</Fact>
+                </dl>
                 <div>
-                  <p className="mb-1 font-medium">Why this release</p>
-                  <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">
-                    {acquireRecord.reasoning ?? '—'}
-                  </pre>
+                  <p className="mb-2 text-xs text-muted-foreground">Why this release</p>
+                  <p className="rounded-lg border bg-muted/40 p-3 text-sm leading-relaxed whitespace-pre-wrap">
+                    {acquireRecord.reasoning ?? 'No reasoning recorded.'}
+                  </p>
                 </div>
               </>
             )}
@@ -215,17 +243,29 @@ export default function JobDetail() {
         <Card>
           <CardHeader>
             <CardTitle>Files placed</CardTitle>
+            {placedFiles.length > 0 && (
+              <CardAction>
+                <Badge variant="outline" className="text-muted-foreground">
+                  {placedFiles.length}
+                </Badge>
+              </CardAction>
+            )}
           </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            {placedFiles.length === 0 && <p className="text-muted-foreground">No files placed for this job.</p>}
+          <CardContent className="space-y-2">
+            {placedFiles.length === 0 && (
+              <p className="text-sm text-muted-foreground">No files placed for this job.</p>
+            )}
             {placedFiles.map((f) => (
-              <div key={f.id} className="space-y-1 rounded-md border p-3">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline">{PLACED_FILE_KIND_LABEL[f.kind]}</Badge>
-                  {typeof f.data.matchedBy === 'string' && <Badge variant="secondary">{f.data.matchedBy}</Badge>}
+              <div key={f.id} className="space-y-1.5 rounded-lg border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <FileCheck2 className="size-4 text-muted-foreground" />
+                  <Badge variant="outline" className="text-muted-foreground">
+                    {PLACED_FILE_KIND_LABEL[f.kind]}
+                  </Badge>
+                  {typeof f.data.matchedBy === 'string' && <ToneBadge tone="neutral">{f.data.matchedBy}</ToneBadge>}
                 </div>
-                <p className="break-all">Placed: {f.placed_path}</p>
-                <p className="break-all text-muted-foreground">Source: {f.source_path}</p>
+                <code className="block text-xs break-all">{f.placed_path}</code>
+                <code className="block text-xs break-all text-muted-foreground">from {f.source_path}</code>
               </div>
             ))}
           </CardContent>
@@ -237,7 +277,7 @@ export default function JobDetail() {
           <CardHeader>
             <CardTitle>Subtitle site runs</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3 text-sm">
+          <CardContent className="space-y-4">
             {subtitleRuns.map((run) => (
               <SubtitleRunCard key={run.id} run={run} />
             ))}
@@ -250,24 +290,27 @@ export default function JobDetail() {
 
 function SubtitleRunCard({ run }: { run: SubtitleRunRow }): ReactNode {
   return (
-    <div className="space-y-2 rounded-md border p-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="rounded-lg border p-4">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <span className="font-medium">{run.site}</span>
-        <RunStatusBadge status={run.status} />
-        <span className="text-xs text-muted-foreground">
-          Started {new Date(run.created_at).toLocaleString()}
-          {run.updated_at !== run.created_at && ` · updated ${new Date(run.updated_at).toLocaleString()}`}
+        <ToneBadge tone={subtitleRunTone(run.status)} dot pulse={subtitleRunTone(run.status) === 'info'}>
+          {subtitleRunLabel(run.status)}
+        </ToneBadge>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {run.transcript.length} step{run.transcript.length === 1 ? '' : 's'} · started{' '}
+          {formatRelativeTime(run.created_at)}
         </span>
       </div>
-      <TranscriptList entries={run.transcript} />
+      <TranscriptTimeline entries={run.transcript} />
     </div>
   );
 }
 
 function BackLink() {
   return (
-    <Button variant="outline" size="sm" render={<Link to="/" />}>
-      ← Back to Jobs
+    <Button variant="ghost" size="sm" className="-ml-2" render={<Link to="/activity" />}>
+      <ArrowLeft />
+      Back to Activity
     </Button>
   );
 }

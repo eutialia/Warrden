@@ -346,3 +346,17 @@ export function fetchStorageHealth(): Promise<{ checks: StorageCheck[] }> {
   return fetchJson('/api/health/storage');
 }
 
+/** Everything the home screen needs in one request. Mirrors `OverviewCounts` in
+ * `src/db/overview.ts` plus the storage probe the same route folds in. */
+export interface Overview {
+  attention: { open: number };
+  jobs: { running: number; pending: number; failedRecent: number; doneRecent: number };
+  placed: { subtitle: number; audio: number };
+  sites: { known: number; failing: number };
+  storage: StorageCheck[];
+}
+
+export function fetchOverview(): Promise<Overview> {
+  return fetchJson<Overview>('/api/overview');
+}
+

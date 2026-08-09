@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   ApiError,
-  CALLSITES,
   fetchConfig,
   fetchStorageHealth,
   saveConfig,
@@ -11,19 +11,30 @@ import {
   type ArrKind,
   type Config,
   type StorageCheck,
-  type SubtitleSite,
 } from '@/api';
+import { LlmProfileEditor } from '@/components/LlmProfileEditor';
+import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
+import { StatusNotice } from '@/components/StatusNotice';
 import { TagInput } from '@/components/TagInput';
-import { Badge } from '@/components/ui/badge';
+import { StatusDot, ToneBadge } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
+import { TONE_TEXT } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
-const EMPTY_SUBTITLE_SITE: SubtitleSite = { name: '', baseUrl: '' };
+
+// base-ui renders the raw value in a select trigger unless the root gets a
+// value→label map.
+const ARR_KIND_ITEMS: Record<string, string> = { sonarr: 'Sonarr', radarr: 'Radarr' };
 
 const LLM_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const;
 type LlmProvider = (typeof LLM_PROVIDERS)[number];
@@ -33,15 +44,6 @@ const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = {
   anthropic: 'Anthropic',
 };
 
-interface LlmKeyFieldState {
-  text: string;
-  wasSet: boolean;
-  remove: boolean;
-}
-const EMPTY_KEY_FIELD: LlmKeyFieldState = { text: '', wasSet: false, remove: false };
-
-type SectionId = 'connections' | 'picking' | 'subtitles' | 'browser' | 'llm' | 'keys';
-
 /** Mirrors server `standardMounts` — web has no shared package with the backend. */
 const STANDARD_MOUNT_ROWS = [
   { id: 'series', label: 'Series', path: '/tv', blurb: 'Sonarr Series root folder' },
@@ -50,115 +52,76 @@ const STANDARD_MOUNT_ROWS = [
   { id: 'downloads', label: 'Downloads', path: '/downloads', blurb: 'Torrent download / completed root' },
 ] as const;
 
-function SectionFooter({
-  dirty,
-  saving,
-  onSave,
-  onDiscard,
-  error,
-}: {
-  dirty: boolean;
-  saving: boolean;
-  onSave: () => void;
-  onDiscard: () => void;
-  error?: string | null;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-      <Button onClick={onSave} disabled={!dirty || saving}>
-        {saving ? 'Saving…' : 'Save section'}
-      </Button>
-      <Button variant="ghost" onClick={onDiscard} disabled={!dirty || saving}>
-        Discard
-      </Button>
-      {dirty && (
-        <Badge variant="outline" className="bg-amber-50 text-amber-950 border-amber-200">
-          Unsaved changes
-        </Badge>
-      )}
-      {error && <p className="w-full text-sm text-destructive">{error}</p>}
-    </div>
-  );
+const SECTIONS = [
+  { id: 'connections', label: 'Connections' },
+  { id: 'storage', label: 'Storage' },
+  { id: 'picking', label: 'Release picking' },
+  { id: 'browser', label: 'Browser agent' },
+  { id: 'models', label: 'AI models' },
+  { id: 'keys', label: 'API keys' },
+] as const;
+
+/** Numeric settings are held as text while editing so a half-typed value stays
+ * typable; they are parsed once, at save. */
+interface NumericDraft {
+  seederFloor: string;
+  minSizeMB: string;
+  maxSizeMB: string;
+  stepBudget: string;
+  siteCooldownSeconds: string;
+  reconcileIntervalMinutes: string;
 }
 
-function storageStatusClass(status: StorageCheck['status']): string {
-  switch (status) {
-    case 'ok':
-      return 'bg-emerald-100 text-emerald-900 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-100';
-    case 'missing':
-    case 'not-mounted':
-      return 'bg-red-100 text-red-900 border-red-200 dark:bg-red-950 dark:text-red-100';
-    default:
-      return 'bg-amber-100 text-amber-950 border-amber-200 dark:bg-amber-950 dark:text-amber-100';
-  }
+function numericFrom(c: Config): NumericDraft {
+  return {
+    seederFloor: String(c.picking.seederFloor),
+    minSizeMB: String(c.picking.minSizeMB),
+    maxSizeMB: String(c.picking.maxSizeMB),
+    stepBudget: String(c.browser.stepBudget),
+    siteCooldownSeconds: String(c.browser.siteCooldownSeconds),
+    reconcileIntervalMinutes: String(c.reconcileIntervalMinutes),
+  };
 }
 
-function storageStatusLabel(status: StorageCheck['status']): string {
-  switch (status) {
-    case 'ok':
-      return 'OK';
-    case 'missing':
-      return 'Missing';
-    case 'not-mounted':
-      return 'Not mounted';
-    case 'unreadable':
-      return 'Not readable';
-    case 'unwritable':
-      return 'Not writable';
-    default:
-      return status;
-  }
+function parseNumber(text: string): number | undefined {
+  const trimmed = text.trim();
+  const value = Number(trimmed);
+  return trimmed === '' || Number.isNaN(value) ? undefined : value;
 }
 
 export default function ConfigPage() {
   const [baseline, setBaseline] = useState<Config | null>(null);
-  const [config, setConfig] = useState<Config | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
-  const [storageError, setStorageError] = useState<string | null>(null);
-
-  const [seederFloorText, setSeederFloorText] = useState('');
-  const [minSizeMBText, setMinSizeMBText] = useState('');
-  const [maxSizeMBText, setMaxSizeMBText] = useState('');
-  const [profilesText, setProfilesText] = useState('');
-  const [stepBudgetText, setStepBudgetText] = useState('');
-  const [siteCooldownText, setSiteCooldownText] = useState('');
-  const [llmKeyFields, setLlmKeyFields] = useState<Record<LlmProvider, LlmKeyFieldState>>({
-    openrouter: EMPTY_KEY_FIELD,
-    openai: EMPTY_KEY_FIELD,
-    anthropic: EMPTY_KEY_FIELD,
+  const [draft, setDraft] = useState<Config | null>(null);
+  const [numeric, setNumeric] = useState<NumericDraft | null>(null);
+  const [baseNumeric, setBaseNumeric] = useState<NumericDraft | null>(null);
+  const [removeKeys, setRemoveKeys] = useState<Record<LlmProvider, boolean>>({
+    openrouter: false,
+    openai: false,
+    anthropic: false,
   });
-
-  const [savingSection, setSavingSection] = useState<SectionId | null>(null);
-  const [sectionError, setSectionError] = useState<Partial<Record<SectionId, string>>>({});
-
-  function loadFormState(c: Config): void {
-    setBaseline(structuredClone(c));
-    setConfig(structuredClone(c));
-    setSeederFloorText(String(c.picking.seederFloor));
-    setMinSizeMBText(String(c.picking.minSizeMB));
-    setMaxSizeMBText(String(c.picking.maxSizeMB));
-    setProfilesText(JSON.stringify(c.llm.profiles, null, 2));
-    setStepBudgetText(String(c.browser.stepBudget));
-    setSiteCooldownText(String(c.browser.siteCooldownSeconds));
-    setLlmKeyFields({
-      openrouter: { text: c.llm.keys.openrouter ?? '', wasSet: c.llm.keys.openrouter !== undefined, remove: false },
-      openai: { text: c.llm.keys.openai ?? '', wasSet: c.llm.keys.openai !== undefined, remove: false },
-      anthropic: { text: c.llm.keys.anthropic ?? '', wasSet: c.llm.keys.anthropic !== undefined, remove: false },
-    });
-    setSectionError({});
-  }
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
+  const [activeProfileTab, setActiveProfileTab] = useState('dev');
 
   const loadStorage = useCallback(() => {
-    setStorageError(null);
     fetchStorageHealth()
       .then((res) => setStorageChecks(res.checks))
-      .catch((err: unknown) => {
-        setStorageError(err instanceof ApiError ? err.message : 'Failed to check storage');
-      });
+      .catch(() => setStorageChecks([]));
   }, []);
 
-  function loadConfigFromServer(): void {
+  const loadFormState = useCallback((c: Config) => {
+    setBaseline(structuredClone(c));
+    setDraft(structuredClone(c));
+    setNumeric(numericFrom(c));
+    setBaseNumeric(numericFrom(c));
+    setRemoveKeys({ openrouter: false, openai: false, anthropic: false });
+    setSaveError(null);
+    setActiveProfileTab(c.llm.activeProfile);
+  }, []);
+
+  const load = useCallback(() => {
     setLoadError(null);
     fetchConfig()
       .then((c) => {
@@ -168,601 +131,471 @@ export default function ConfigPage() {
       .catch((err: unknown) => {
         const message = err instanceof ApiError ? err.message : 'Failed to load settings';
         setLoadError(message);
-        toast.error(message);
       });
+  }, [loadFormState, loadStorage]);
+
+  useEffect(load, [load]);
+
+  // One dirty flag for the whole page. The API saves the config atomically anyway,
+  // so per-section saves were both more clicks and a lie about the granularity.
+  const dirty = useMemo(() => {
+    if (!draft || !baseline || !numeric || !baseNumeric) return false;
+    return (
+      JSON.stringify(draft) !== JSON.stringify(baseline) ||
+      JSON.stringify(numeric) !== JSON.stringify(baseNumeric) ||
+      Object.values(removeKeys).some(Boolean)
+    );
+  }, [draft, baseline, numeric, baseNumeric, removeKeys]);
+
+  function patch(next: Partial<Config>): void {
+    setDraft((prev) => (prev ? { ...prev, ...next } : prev));
   }
 
-  useEffect(loadConfigFromServer, [loadStorage]);
+  async function handleSave(): Promise<void> {
+    if (!draft || !numeric || !baseline) return;
 
-  function updateLlmKeyField(provider: LlmProvider, patch: Partial<LlmKeyFieldState>): void {
-    setLlmKeyFields((prev) => ({ ...prev, [provider]: { ...prev[provider], ...patch } }));
-  }
+    const parsed = {
+      seederFloor: parseNumber(numeric.seederFloor),
+      minSizeMB: parseNumber(numeric.minSizeMB),
+      maxSizeMB: parseNumber(numeric.maxSizeMB),
+      stepBudget: parseNumber(numeric.stepBudget),
+      siteCooldownSeconds: parseNumber(numeric.siteCooldownSeconds),
+      reconcileIntervalMinutes: parseNumber(numeric.reconcileIntervalMinutes),
+    };
+    if (Object.values(parsed).some((v) => v === undefined)) {
+      setSaveError('Every numeric setting needs a number.');
+      toast.error('Some numeric settings are not numbers');
+      return;
+    }
 
-  function buildLlmKeys(): Config['llm']['keys'] {
+    // Deleting a key is an explicit act (the switch below), never a side effect of
+    // emptying the box — so a cleared field on an already-stored key round-trips the
+    // redaction sentinel and keeps what the server has.
     const keys: Config['llm']['keys'] = {};
     for (const provider of LLM_PROVIDERS) {
-      const field = llmKeyFields[provider];
-      if (field.remove) continue;
-      if (field.text !== '') {
-        keys[provider] = field.text;
-      } else if (field.wasSet) {
-        keys[provider] = SECRET_PLACEHOLDER;
-      }
+      if (removeKeys[provider]) continue;
+      const typed = draft.llm.keys[provider];
+      const stored = baseline.llm.keys[provider] !== undefined;
+      if (typed !== undefined && typed !== '') keys[provider] = typed;
+      else if (stored) keys[provider] = SECRET_PLACEHOLDER;
     }
-    return keys;
-  }
 
-  function parseNumber(text: string): number | undefined {
-    const trimmed = text.trim();
-    const value = Number(trimmed);
-    return trimmed === '' || Number.isNaN(value) ? undefined : value;
-  }
+    const payload: Config = {
+      ...draft,
+      // Mounts and path mappings are fixed outside the UI — never let a save rewrite them.
+      ingest: baseline.ingest,
+      pathMappings: baseline.pathMappings,
+      server: { ...draft.server, publicUrl: draft.server.publicUrl.trim() },
+      arrs: draft.arrs
+        .map((a) => ({ ...a, name: a.name.trim(), baseUrl: a.baseUrl.trim() }))
+        .filter((a) => a.name.length > 0 && a.baseUrl.length > 0),
+      picking: {
+        tags: draft.picking.tags,
+        seederFloor: parsed.seederFloor!,
+        minSizeMB: parsed.minSizeMB!,
+        maxSizeMB: parsed.maxSizeMB!,
+      },
+      browser: { stepBudget: parsed.stepBudget!, siteCooldownSeconds: parsed.siteCooldownSeconds! },
+      llm: { ...draft.llm, keys },
+      reconcileIntervalMinutes: parsed.reconcileIntervalMinutes!,
+    };
 
-  async function persist(section: SectionId, next: Config): Promise<void> {
-    if (!baseline) return;
-    // Mounts are fixed outside the UI — never let a section save rewrite them.
-    const payload: Config = { ...next, ingest: baseline.ingest, pathMappings: baseline.pathMappings };
-    setSavingSection(section);
-    setSectionError((prev) => ({ ...prev, [section]: undefined }));
+    setSaving(true);
+    setSaveError(null);
     try {
       const result = await saveConfig(payload);
-      toast.success(result.restartRequired ? 'Saved — restart the container to apply fully' : 'Saved');
-      const fresh = await fetchConfig();
-      loadFormState(fresh);
-      if (section === 'connections') loadStorage();
+      toast.success(result.restartRequired ? 'Saved — restart the container to apply fully' : 'Settings saved');
+      loadFormState(await fetchConfig());
+      loadStorage();
     } catch (err) {
       if (err instanceof ApiError) {
         const issueText = err.issues?.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
-        const message = issueText ? `${err.message} — ${issueText}` : err.message;
-        setSectionError((prev) => ({ ...prev, [section]: message }));
+        setSaveError(issueText ? `${err.message} — ${issueText}` : err.message);
         toast.error(err.message);
       } else {
-        setSectionError((prev) => ({ ...prev, [section]: 'Failed to save' }));
+        setSaveError('Failed to save');
         toast.error('Failed to save');
       }
     } finally {
-      setSavingSection(null);
+      setSaving(false);
     }
   }
 
   if (loadError) {
     return (
-      <div className="space-y-2">
+      <div className="space-y-4">
         <PageHeader title="Settings" description="Connections and preferences for Warrden." />
-        <p className="text-sm text-destructive">{loadError}</p>
-        <Button variant="outline" size="sm" onClick={loadConfigFromServer}>
-          Retry
-        </Button>
+        <StatusNotice message={loadError} onRetry={load} />
       </div>
     );
   }
 
-  if (!config || !baseline) {
-    return <p className="text-muted-foreground">Loading…</p>;
-  }
-
-  // --- dirty helpers (section-local) ---
-  const connectionsDirty =
-    JSON.stringify(config.arrs) !== JSON.stringify(baseline.arrs) ||
-    config.server.publicUrl !== baseline.server.publicUrl ||
-    config.server.port !== baseline.server.port;
-
-  const pickingDirty =
-    JSON.stringify(config.picking.tags) !== JSON.stringify(baseline.picking.tags) ||
-    seederFloorText !== String(baseline.picking.seederFloor) ||
-    minSizeMBText !== String(baseline.picking.minSizeMB) ||
-    maxSizeMBText !== String(baseline.picking.maxSizeMB);
-
-  const subtitlesDirty =
-    JSON.stringify(config.subtitle.languages) !== JSON.stringify(baseline.subtitle.languages) ||
-    JSON.stringify(config.subtitle.preferredGroups ?? []) !== JSON.stringify(baseline.subtitle.preferredGroups ?? []) ||
-    JSON.stringify(config.subtitle.sites) !== JSON.stringify(baseline.subtitle.sites);
-
-  const browserDirty =
-    stepBudgetText !== String(baseline.browser.stepBudget) ||
-    siteCooldownText !== String(baseline.browser.siteCooldownSeconds);
-
-  const llmDirty =
-    config.llm.activeProfile !== baseline.llm.activeProfile ||
-    profilesText !== JSON.stringify(baseline.llm.profiles, null, 2);
-
-  const keysDirty = LLM_PROVIDERS.some((p) => {
-    const field = llmKeyFields[p];
-    const base = baseline.llm.keys[p] ?? '';
-    if (field.remove) return true;
-    if (field.text === SECRET_PLACEHOLDER || field.text === base) return false;
-    if (field.text === '' && !field.wasSet) return false;
-    return field.text !== base;
-  });
-
-  function updateArr(index: number, patch: Partial<ArrInstance>): void {
-    setConfig((prev) => (prev ? { ...prev, arrs: prev.arrs.map((a, i) => (i === index ? { ...a, ...patch } : a)) } : prev));
-  }
-
-  function updateSubtitleSite(index: number, patch: Partial<SubtitleSite>): void {
-    setConfig((prev) =>
-      prev
-        ? { ...prev, subtitle: { ...prev.subtitle, sites: prev.subtitle.sites.map((s, i) => (i === index ? { ...s, ...patch } : s)) } }
-        : prev,
+  if (!draft || !numeric || !baseline) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Settings" description="Connections and preferences for Warrden." />
+        <Skeleton className="h-96 w-full" />
+      </div>
     );
   }
 
-  async function saveConnections(): Promise<void> {
-    if (!config) return;
-    await persist( 'connections', {
-      ...config,
-      arrs: config.arrs
-        .map((a) => ({ ...a, name: a.name.trim(), baseUrl: a.baseUrl.trim() }))
-        .filter((a) => a.name.length > 0 && a.baseUrl.length > 0),
-      server: { ...config.server, publicUrl: config.server.publicUrl.trim() },
-    });
-  }
-
-  async function savePicking(): Promise<void> {
-    if (!config) return;
-    const seederFloor = parseNumber(seederFloorText);
-    const minSizeMB = parseNumber(minSizeMBText);
-    const maxSizeMB = parseNumber(maxSizeMBText);
-    if (seederFloor === undefined || minSizeMB === undefined || maxSizeMB === undefined) {
-      setSectionError((prev) => ({ ...prev, picking: 'Seeder floor and size limits must be numbers' }));
-      toast.error('Picking fields must be numbers');
-      return;
-    }
-    await persist('picking', {
-      ...config,
-      picking: { tags: config.picking.tags, seederFloor, minSizeMB, maxSizeMB },
-    });
-  }
-
-  async function saveSubtitles(): Promise<void> {
-    if (!config) return;
-    const sites: SubtitleSite[] = config.subtitle.sites
-      .map((s) => ({
-        name: s.name.trim(),
-        baseUrl: s.baseUrl.trim(),
-        searchUrlTemplate: s.searchUrlTemplate?.trim() || undefined,
-      }))
-      .filter((s) => s.name.length > 0 && s.baseUrl.length > 0);
-    await persist('subtitles', {
-      ...config,
-      subtitle: {
-        languages: config.subtitle.languages,
-        preferredGroups: config.subtitle.preferredGroups ?? [],
-        sites,
-      },
-    });
-  }
-
-  async function saveBrowser(): Promise<void> {
-    if (!config) return;
-    const stepBudget = parseNumber(stepBudgetText);
-    const siteCooldownSeconds = parseNumber(siteCooldownText);
-    if (stepBudget === undefined || siteCooldownSeconds === undefined) {
-      setSectionError((prev) => ({ ...prev, browser: 'Step budget and cooldown must be numbers' }));
-      toast.error('Browser fields must be numbers');
-      return;
-    }
-    await persist('browser', {
-      ...config,
-      browser: { stepBudget, siteCooldownSeconds },
-    });
-  }
-
-  async function saveLlm(): Promise<void> {
-    if (!config) return;
-    let profiles: Config['llm']['profiles'];
-    try {
-      profiles = JSON.parse(profilesText) as Config['llm']['profiles'];
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'invalid JSON';
-      setSectionError((prev) => ({ ...prev, llm: `Profiles JSON: ${message}` }));
-      toast.error('LLM profiles is not valid JSON');
-      return;
-    }
-    await persist('llm', {
-      ...config,
-      llm: { ...config.llm, profiles, keys: buildLlmKeys() },
-    });
-  }
-
-  async function saveKeys(): Promise<void> {
-    if (!config) return;
-    await persist('keys', {
-      ...config,
-      llm: { ...config.llm, keys: buildLlmKeys() },
-    });
-  }
+  const badMounts = storageChecks.filter((c) => c.status !== 'ok').length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <PageHeader
         title="Settings"
-        description="Connect Sonarr/Radarr, set release and subtitle preferences, and check storage access. Each section saves on its own — nothing is applied until you click Save."
+        description="Connect Sonarr and Radarr, tune how releases are picked, and choose which model handles each task. Subtitle languages and sites live under Subtitle sources."
       />
 
-      {/* Connections */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Connections</CardTitle>
-          <CardDescription>
-            Sonarr and Radarr instances Warrden talks to. Public URL is the address those apps use to reach this
-            container for webhooks.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Public URL</label>
-            <Input
-              value={config.server.publicUrl}
-              onChange={(e) => setConfig({ ...config, server: { ...config.server, publicUrl: e.target.value } })}
-              placeholder="http://warrden.example:9797"
-            />
-            <p className="mt-1 text-xs text-muted-foreground">
-              Must be reachable from Sonarr/Radarr. Changing it later requires deleting the “Warrden” webhook in the arr
-              so it can re-register.
-            </p>
-          </div>
-          <div className="space-y-3">
-            {config.arrs.map((arr, i) => (
-              <div key={i} className="grid gap-2 rounded-lg border p-3 md:grid-cols-[1fr_120px_1.5fr_1.5fr_auto]">
-                <div>
-                  <label className="mb-1 block text-xs text-muted-foreground">Name</label>
-                  <Input placeholder="sonarr" value={arr.name} onChange={(e) => updateArr(i, { name: e.target.value })} />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs text-muted-foreground">Type</label>
-                  <select
-                    className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm"
-                    value={arr.kind}
-                    onChange={(e) => updateArr(i, { kind: e.target.value as ArrKind })}
-                  >
-                    <option value="sonarr">Sonarr</option>
-                    <option value="radarr">Radarr</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
-                  <Input
-                    placeholder="http://sonarr:8989"
-                    value={arr.baseUrl}
-                    onChange={(e) => updateArr(i, { baseUrl: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs text-muted-foreground">API key</label>
-                  <Input
-                    type="password"
-                    placeholder="API key"
-                    autoComplete="new-password"
-                    value={arr.apiKey}
-                    onChange={(e) => updateArr(i, { apiKey: e.target.value })}
-                  />
-                  <p className="mt-1 text-[0.7rem] text-muted-foreground">Leave as {SECRET_PLACEHOLDER} to keep stored key</p>
-                </div>
-                <div className="flex items-end">
-                  <Button variant="ghost" size="sm" onClick={() => setConfig({ ...config, arrs: config.arrs.filter((_, j) => j !== i) })}>
-                    Remove
-                  </Button>
-                </div>
-              </div>
-            ))}
-            <Button variant="outline" size="sm" onClick={() => setConfig({ ...config, arrs: [...config.arrs, { ...EMPTY_ARR }] })}>
-              Add instance
-            </Button>
-          </div>
-          <SectionFooter
-            dirty={connectionsDirty}
-            saving={savingSection === 'connections'}
-            onSave={() => void saveConnections()}
-            onDiscard={() => loadFormState(baseline)}
-            error={sectionError.connections}
-          />
-        </CardContent>
-      </Card>
+      <div className="flex gap-8">
+        {/* In-page nav: the page is long and every section is independently interesting. */}
+        <nav className="sticky top-20 hidden h-fit w-40 shrink-0 space-y-1 lg:block">
+          {SECTIONS.map((section) => (
+            <a
+              key={section.id}
+              href={`#${section.id}`}
+              className="block rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              {section.label}
+            </a>
+          ))}
+        </nav>
 
-      {/* Storage — three fixed mounts, never editable */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Storage mounts</CardTitle>
-          <CardDescription>
-            Warrden always expects exactly four bind mounts (Series, Anime, Movies, Downloads). Set them when you create
-            the container — this page only checks that they are reachable. Not editable here.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="overflow-x-auto rounded-lg border">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
-                  <th className="px-3 py-2 font-medium">Role</th>
-                  <th className="px-3 py-2 font-medium">Container path</th>
-                  <th className="px-3 py-2 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
+        <div className="min-w-0 flex-1 space-y-6">
+          {/* Connections */}
+          <Card id="connections" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>Connections</CardTitle>
+              <CardDescription>
+                The Sonarr and Radarr instances Warrden talks to. Public URL is the address those apps use to reach this
+                container for webhooks.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="public-url">Public URL</Label>
+                <Input
+                  id="public-url"
+                  value={draft.server.publicUrl}
+                  onChange={(e) => patch({ server: { ...draft.server, publicUrl: e.target.value } })}
+                  placeholder="http://warrden.example:9797"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Must be reachable from Sonarr/Radarr. Changing it later means deleting the “Warrden” webhook in the arr
+                  so it can re-register.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                {draft.arrs.map((arr, i) => (
+                  <div key={i} className="grid gap-3 rounded-lg border p-3 md:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Name</Label>
+                      <Input
+                        placeholder="sonarr"
+                        value={arr.name}
+                        onChange={(e) =>
+                          patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, name: e.target.value } : a)) })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Type</Label>
+                      <Select
+                        items={ARR_KIND_ITEMS}
+                        value={arr.kind}
+                        onValueChange={(v) =>
+                          v && patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, kind: v as ArrKind } : a)) })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="sonarr">Sonarr</SelectItem>
+                          <SelectItem value="radarr">Radarr</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Base URL</Label>
+                      <Input
+                        placeholder="http://sonarr:8989"
+                        value={arr.baseUrl}
+                        onChange={(e) =>
+                          patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, baseUrl: e.target.value } : a)) })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">API key</Label>
+                      <Input
+                        type="password"
+                        autoComplete="new-password"
+                        value={arr.apiKey}
+                        onChange={(e) =>
+                          patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, apiKey: e.target.value } : a)) })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">Leave as {SECRET_PLACEHOLDER} to keep the stored key</p>
+                    </div>
+                    <div className="flex items-end">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Remove ${arr.name || 'instance'}`}
+                        onClick={() => patch({ arrs: draft.arrs.filter((_, j) => j !== i) })}
+                      >
+                        <Trash2 />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" onClick={() => patch({ arrs: [...draft.arrs, { ...EMPTY_ARR }] })}>
+                  <Plus />
+                  Add instance
+                </Button>
+              </div>
+
+              <NumberField
+                id="reconcile-interval"
+                label="Reconcile every (minutes)"
+                hint="How often Warrden re-checks arr history in case a webhook was missed."
+                value={numeric.reconcileIntervalMinutes}
+                onChange={(v) => setNumeric({ ...numeric, reconcileIntervalMinutes: v })}
+                invalid={parseNumber(numeric.reconcileIntervalMinutes) === undefined}
+              />
+            </CardContent>
+          </Card>
+
+          {/* Storage — four fixed mounts, never editable */}
+          <Card id="storage" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>Storage mounts</CardTitle>
+              <CardDescription>
+                Warrden expects exactly four bind mounts. Set them when you create the container — this page only checks
+                that they are reachable.
+              </CardDescription>
+              <CardAction>
+                <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
+                  {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
+                </ToneBadge>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-1">
                 {STANDARD_MOUNT_ROWS.map((row) => {
                   const check = storageChecks.find((c) => c.id === row.id);
                   const status = check?.status ?? 'missing';
-                  const detail = check?.detail ?? (storageError ?? 'Waiting for health check…');
-                  const path = check?.path ?? row.path;
                   return (
-                    <tr key={row.id} className="border-b last:border-0">
-                      <td className="px-3 py-3">
-                        <div className="font-medium">{row.label}</div>
-                        <div className="text-xs text-muted-foreground">{row.blurb}</div>
-                      </td>
-                      <td className="px-3 py-3 font-mono text-xs">{path}</td>
-                      <td className="px-3 py-3">
-                        <Badge variant="outline" className={cn('font-medium', storageStatusClass(status))}>
-                          {storageStatusLabel(status)}
-                        </Badge>
-                        <p className="mt-1 max-w-sm text-xs text-muted-foreground">{detail}</p>
-                      </td>
-                    </tr>
+                    <div key={row.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
+                      <StatusDot tone={storageStatusTone(status)} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-baseline gap-2">
+                          <span className="text-sm font-medium">{row.label}</span>
+                          <code className="text-xs text-muted-foreground">{check?.path ?? row.path}</code>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{check?.detail ?? row.blurb}</p>
+                      </div>
+                      <span className={cn('text-xs font-medium', TONE_TEXT[storageStatusTone(status)])}>
+                        {storageStatusLabel(status)}
+                      </span>
+                    </div>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-          {storageError && <p className="text-sm text-destructive">{storageError}</p>}
-          <p className="text-xs text-muted-foreground">
-            Example:{' '}
-            <code className="rounded bg-muted px-1 py-0.5">
-              -v …/Series:/tv -v …/Anime:/anime -v …/Movies:/movies -v …/Downloads:/downloads
-            </code>
-            . If Sonarr/Radarr use different paths than Warrden, set <code className="rounded bg-muted px-1">pathMappings</code>{' '}
-            in <code className="rounded bg-muted px-1">config.json</code> (not here).
-          </p>
-          <Button variant="outline" size="sm" onClick={loadStorage}>
-            Re-check
-          </Button>
-        </CardContent>
-      </Card>
+              </div>
+              <Button variant="outline" size="sm" onClick={loadStorage}>
+                Re-check now
+              </Button>
+            </CardContent>
+          </Card>
 
-      {/* Picking */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Release picking</CardTitle>
-          <CardDescription>
-            Rules for which torrent Warrden will grab when a series or movie is added. Tags are soft preferences the
-            picker prefers to see in release titles.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Preferred tags</label>
-            <TagInput
-              values={config.picking.tags}
-              onChange={(tags) => setConfig({ ...config, picking: { ...config.picking, tags } })}
-              placeholder="e.g. 1080p — Enter to add"
-            />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div>
-              <label className="mb-1 block text-sm font-medium">Minimum seeders</label>
-              <Input type="number" value={seederFloorText} onChange={(e) => setSeederFloorText(e.target.value)} />
-              <p className="mt-1 text-xs text-muted-foreground">Drop releases with fewer seeders than this</p>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium">Min size (MB)</label>
-              <Input type="number" value={minSizeMBText} onChange={(e) => setMinSizeMBText(e.target.value)} />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium">Max size (MB)</label>
-              <Input type="number" value={maxSizeMBText} onChange={(e) => setMaxSizeMBText(e.target.value)} />
-            </div>
-          </div>
-          <SectionFooter
-            dirty={pickingDirty}
-            saving={savingSection === 'picking'}
-            onSave={() => void savePicking()}
-            onDiscard={() => loadFormState(baseline)}
-            error={sectionError.picking}
-          />
-        </CardContent>
-      </Card>
+          {/* Release picking */}
+          <Card id="picking" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>Release picking</CardTitle>
+              <CardDescription>
+                Which torrent Warrden grabs when a series or movie is added. Preferences are written in plain language
+                and handed to the picker as policy — they are not hard filters.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Preferences</Label>
+                <TagInput
+                  values={draft.picking.tags}
+                  onChange={(tags) => patch({ picking: { ...draft.picking, tags } })}
+                  placeholder="e.g. prefer 1080p — Enter to add"
+                />
+              </div>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <NumberField
+                  id="seeder-floor"
+                  label="Minimum seeders"
+                  hint="Drop releases below this"
+                  value={numeric.seederFloor}
+                  onChange={(v) => setNumeric({ ...numeric, seederFloor: v })}
+                  invalid={parseNumber(numeric.seederFloor) === undefined}
+                />
+                <NumberField
+                  id="min-size"
+                  label="Min size (MB)"
+                  value={numeric.minSizeMB}
+                  onChange={(v) => setNumeric({ ...numeric, minSizeMB: v })}
+                  invalid={parseNumber(numeric.minSizeMB) === undefined}
+                />
+                <NumberField
+                  id="max-size"
+                  label="Max size (MB)"
+                  value={numeric.maxSizeMB}
+                  onChange={(v) => setNumeric({ ...numeric, maxSizeMB: v })}
+                  invalid={parseNumber(numeric.maxSizeMB) === undefined}
+                />
+              </div>
+            </CardContent>
+          </Card>
 
-      {/* Subtitles */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Subtitles</CardTitle>
-          <CardDescription>
-            Languages a video must have before it counts as “has subtitles,” soft fansub preferences, and which public
-            sites to search. Site health lives under Subtitle sources.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Languages</label>
-            <TagInput
-              values={config.subtitle.languages}
-              onChange={(languages) => setConfig({ ...config, subtitle: { ...config.subtitle, languages } })}
-              placeholder="e.g. en, zh"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">Preferred fansub groups (soft)</label>
-            <TagInput
-              values={config.subtitle.preferredGroups ?? []}
-              onChange={(preferredGroups) => setConfig({ ...config, subtitle: { ...config.subtitle, preferredGroups } })}
-              placeholder="e.g. Airota"
-            />
-            <p className="mt-1 text-xs text-muted-foreground">Boosts ranking only — search continues if none match</p>
-          </div>
-          <div>
-            <label className="mb-2 block text-sm font-medium">Sites</label>
-            <div className="space-y-2">
-              {config.subtitle.sites.map((site, i) => (
-                <div key={i} className="grid gap-2 rounded-lg border p-3 md:grid-cols-[1fr_1.5fr_1.5fr_auto]">
-                  <Input placeholder="Name" value={site.name} onChange={(e) => updateSubtitleSite(i, { name: e.target.value })} />
-                  <Input
-                    placeholder="Base URL"
-                    value={site.baseUrl}
-                    onChange={(e) => updateSubtitleSite(i, { baseUrl: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Search URL template (optional, use {query})"
-                    value={site.searchUrlTemplate ?? ''}
-                    onChange={(e) => updateSubtitleSite(i, { searchUrlTemplate: e.target.value })}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      setConfig({
-                        ...config,
-                        subtitle: { ...config.subtitle, sites: config.subtitle.sites.filter((_, j) => j !== i) },
-                      })
-                    }
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))}
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-2"
-              onClick={() =>
-                setConfig({
-                  ...config,
-                  subtitle: { ...config.subtitle, sites: [...config.subtitle.sites, { ...EMPTY_SUBTITLE_SITE }] },
-                })
-              }
-            >
-              Add site
-            </Button>
-          </div>
-          <SectionFooter
-            dirty={subtitlesDirty}
-            saving={savingSection === 'subtitles'}
-            onSave={() => void saveSubtitles()}
-            onDiscard={() => loadFormState(baseline)}
-            error={sectionError.subtitles}
-          />
-        </CardContent>
-      </Card>
+          {/* Browser agent */}
+          <Card id="browser" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>Browser agent</CardTitle>
+              <CardDescription>Limits on the subtitle site browser so one bad site can't run forever.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <NumberField
+                  id="step-budget"
+                  label="Step budget"
+                  hint="Most AI steps allowed per site search"
+                  value={numeric.stepBudget}
+                  onChange={(v) => setNumeric({ ...numeric, stepBudget: v })}
+                  invalid={parseNumber(numeric.stepBudget) === undefined}
+                />
+                <NumberField
+                  id="site-cooldown"
+                  label="Site cooldown (seconds)"
+                  hint="Least time to wait before hitting the same site again"
+                  value={numeric.siteCooldownSeconds}
+                  onChange={(v) => setNumeric({ ...numeric, siteCooldownSeconds: v })}
+                  invalid={parseNumber(numeric.siteCooldownSeconds) === undefined}
+                />
+              </div>
+            </CardContent>
+          </Card>
 
-      {/* Browser agent */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Browser agent</CardTitle>
-          <CardDescription>Limits for the subtitle site browser so a bad site can’t run forever.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-sm font-medium">Step budget</label>
-              <Input type="number" value={stepBudgetText} onChange={(e) => setStepBudgetText(e.target.value)} />
-              <p className="mt-1 text-xs text-muted-foreground">Max AI steps per site search</p>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium">Site cooldown (seconds)</label>
-              <Input type="number" value={siteCooldownText} onChange={(e) => setSiteCooldownText(e.target.value)} />
-              <p className="mt-1 text-xs text-muted-foreground">Minimum wait before hitting the same site again</p>
-            </div>
-          </div>
-          <SectionFooter
-            dirty={browserDirty}
-            saving={savingSection === 'browser'}
-            onSave={() => void saveBrowser()}
-            onDiscard={() => loadFormState(baseline)}
-            error={sectionError.browser}
-          />
-        </CardContent>
-      </Card>
-
-      {/* LLM */}
-      <Card>
-        <CardHeader>
-          <CardTitle>AI models</CardTitle>
-          <CardDescription>
-            Which model handles each task. Call-sites: {CALLSITES.join(', ')}. Advanced routing stays as JSON this
-            release — each profile maps call-sites to provider/model pairs.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Active profile</label>
-            <div className="flex gap-2">
-              {(['dev', 'prod'] as const).map((profile) => (
-                <Button
-                  key={profile}
-                  variant={config.llm.activeProfile === profile ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => setConfig({ ...config, llm: { ...config.llm, activeProfile: profile } })}
+          {/* AI models */}
+          <Card id="models" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>AI models</CardTitle>
+              <CardDescription>
+                Which model handles each task. Profiles let you keep a cheap development setup beside the one you
+                actually run.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Active profile</Label>
+                <Select
+                  value={draft.llm.activeProfile}
+                  onValueChange={(v) => v && patch({ llm: { ...draft.llm, activeProfile: v as 'dev' | 'prod' } })}
                 >
-                  {profile}
-                </Button>
-              ))}
+                  <SelectTrigger className="w-48">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="dev">dev</SelectItem>
+                    <SelectItem value="prod">prod</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  The profile Warrden runs with. You can edit either profile below without switching to it.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <Tabs value={activeProfileTab} onValueChange={(v) => setActiveProfileTab(v ?? 'dev')}>
+                  <TabsList>
+                    <TabsTrigger value="dev">
+                      dev{draft.llm.activeProfile === 'dev' && <span className="ml-1.5 text-xs">· active</span>}
+                    </TabsTrigger>
+                    <TabsTrigger value="prod">
+                      prod{draft.llm.activeProfile === 'prod' && <span className="ml-1.5 text-xs">· active</span>}
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
+                <LlmProfileEditor
+                  profile={activeProfileTab}
+                  profiles={draft.llm.profiles}
+                  onChange={(profiles) => patch({ llm: { ...draft.llm, profiles } })}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* API keys */}
+          <Card id="keys" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>API keys</CardTitle>
+              <CardDescription>
+                Left as {SECRET_PLACEHOLDER}, a stored key is kept as-is. The Claude Code provider uses subscription auth
+                and needs no key.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-3">
+              {LLM_PROVIDERS.map((provider) => {
+                const stored = baseline.llm.keys[provider] !== undefined;
+                return (
+                  <div key={provider} className="space-y-2">
+                    <Label htmlFor={`key-${provider}`}>{LLM_PROVIDER_LABELS[provider]}</Label>
+                    <Input
+                      id={`key-${provider}`}
+                      type="password"
+                      autoComplete="new-password"
+                      disabled={removeKeys[provider]}
+                      value={draft.llm.keys[provider] ?? ''}
+                      onChange={(e) =>
+                        patch({ llm: { ...draft.llm, keys: { ...draft.llm.keys, [provider]: e.target.value } } })
+                      }
+                    />
+                    {stored && (
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          id={`remove-${provider}`}
+                          checked={removeKeys[provider]}
+                          onCheckedChange={(checked) => setRemoveKeys((prev) => ({ ...prev, [provider]: checked }))}
+                        />
+                        <Label htmlFor={`remove-${provider}`} className="text-xs font-normal text-muted-foreground">
+                          Delete stored key on save
+                        </Label>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* One save bar for the whole page — the API writes config atomically, so
+          per-section saves were both more clicks and a lie about the granularity. */}
+      {dirty && (
+        <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-background/95 backdrop-blur">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6 lg:px-8">
+            <ToneBadge tone="warning">Unsaved changes</ToneBadge>
+            {saveError && <p className="text-sm text-destructive-foreground">{saveError}</p>}
+            <div className="ml-auto flex items-center gap-2">
+              <Button variant="ghost" disabled={saving} onClick={() => loadFormState(baseline)}>
+                Discard
+              </Button>
+              <Button disabled={saving} onClick={() => void handleSave()}>
+                {saving ? 'Saving…' : 'Save changes'}
+              </Button>
             </div>
           </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">Profiles (JSON)</label>
-            <Textarea
-              rows={12}
-              className="font-mono text-xs"
-              value={profilesText}
-              onChange={(e) => setProfilesText(e.target.value)}
-            />
-          </div>
-          <SectionFooter
-            dirty={llmDirty}
-            saving={savingSection === 'llm'}
-            onSave={() => void saveLlm()}
-            onDiscard={() => loadFormState(baseline)}
-            error={sectionError.llm}
-          />
-        </CardContent>
-      </Card>
-
-      {/* API keys */}
-      <Card>
-        <CardHeader>
-          <CardTitle>API keys</CardTitle>
-          <CardDescription>
-            Leave a key as {SECRET_PLACEHOLDER} (or blank if it was already set) to keep it. Check Remove to delete a
-            stored key. Not needed for the Claude Code provider (subscription auth).
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-3">
-            {LLM_PROVIDERS.map((provider) => {
-              const field = llmKeyFields[provider];
-              return (
-                <div key={provider}>
-                  <label className="mb-1 block text-sm font-medium">{LLM_PROVIDER_LABELS[provider]}</label>
-                  <Input
-                    type="password"
-                    autoComplete="new-password"
-                    disabled={field.remove}
-                    value={field.text}
-                    onChange={(e) => updateLlmKeyField(provider, { text: e.target.value })}
-                  />
-                  {field.wasSet && (
-                    <label className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <input
-                        type="checkbox"
-                        checked={field.remove}
-                        onChange={(e) => updateLlmKeyField(provider, { remove: e.target.checked })}
-                      />
-                      Remove stored key
-                    </label>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <SectionFooter
-            dirty={keysDirty}
-            saving={savingSection === 'keys'}
-            onSave={() => void saveKeys()}
-            onDiscard={() => loadFormState(baseline)}
-            error={sectionError.keys}
-          />
-        </CardContent>
-      </Card>
+        </div>
+      )}
     </div>
   );
 }
