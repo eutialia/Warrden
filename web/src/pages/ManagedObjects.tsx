@@ -3,6 +3,7 @@ import { Boxes } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiErrorMessage, deleteManagedObject, fetchManagedObjects, type ManagedObject } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
+import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
 import {
   AlertDialog,
@@ -100,41 +101,39 @@ export default function ManagedObjects() {
       {loading && objects.length === 0 && <Skeleton className="h-48 w-full" />}
 
       {!loading && groups.length === 0 && !error && (
-        <Card>
-          <Empty className="py-12">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Boxes />
-              </EmptyMedia>
-              <EmptyTitle>Nothing registered yet</EmptyTitle>
-              <EmptyDescription>
-                Warrden adds a webhook to each arr at startup, then tags and release profiles as it pins series.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        </Card>
+        <Empty className="py-12">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Boxes />
+            </EmptyMedia>
+            <EmptyTitle>Nothing registered yet</EmptyTitle>
+            <EmptyDescription>
+              Warrden adds a webhook to each arr at startup, then tags and release profiles as it pins series.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       )}
 
-      <div className="space-y-4">
+      <SectionStack>
         {groups.map(([arrInstance, rows]) => (
-          <Card key={arrInstance} className="overflow-hidden">
+          <Card key={arrInstance}>
             <CardHeader>
               <CardTitle>{arrInstance}</CardTitle>
             </CardHeader>
-            <CardContent className="px-0">
+            <CardContent>
               <Table>
                 <TableHeader>
                   <TableRow className="hover:bg-transparent">
-                    <TableHead className="w-40 pl-4">Type</TableHead>
+                    <TableHead className="w-40">Type</TableHead>
                     <TableHead>Name</TableHead>
                     <TableHead className="w-28 text-right">Added</TableHead>
-                    <TableHead className="w-24 pr-4 text-right">Actions</TableHead>
+                    <TableHead className="w-24 text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {rows.map((row) => (
                     <TableRow key={row.id}>
-                      <TableCell className="pl-4">
+                      <TableCell>
                         <Badge variant="outline" className="text-muted-foreground">
                           {managedKindLabel(row.kind)}
                         </Badge>
@@ -146,7 +145,7 @@ export default function ManagedObjects() {
                           <TooltipContent>{new Date(row.created_at).toLocaleString()}</TooltipContent>
                         </Tooltip>
                       </TableCell>
-                      <TableCell className="pr-4 text-right">
+                      <TableCell className="text-right">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -163,7 +162,7 @@ export default function ManagedObjects() {
             </CardContent>
           </Card>
         ))}
-      </div>
+      </SectionStack>
 
       <AlertDialog open={confirming !== null} onOpenChange={(open) => !open && setConfirming(null)}>
         <AlertDialogContent>

@@ -12,6 +12,7 @@ import {
   type SubtitleSite,
 } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
+import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TagInput } from '@/components/TagInput';
 import { ToneBadge } from '@/components/ToneBadge';
@@ -188,7 +189,7 @@ export default function Sites() {
       {loading && !config && <Skeleton className="h-64 w-full" />}
 
       {config && (
-        <>
+        <SectionStack>
           <Card>
             <CardHeader>
               <CardTitle>What counts as covered</CardTitle>
@@ -264,7 +265,7 @@ export default function Sites() {
                 const profile = profiles.find((p) => p.name === site.name);
                 const failing = (profile?.fail_count ?? 0) > 0;
                 return (
-                  <div key={site.name} className="rounded-lg border p-4">
+                  <div key={site.name} className="border-t pt-4">
                     <div className="flex flex-wrap items-start gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
@@ -323,7 +324,7 @@ export default function Sites() {
               })}
             </CardContent>
           </Card>
-        </>
+        </SectionStack>
       )}
 
       {/* Add / edit site */}

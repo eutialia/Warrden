@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, CheckCircle2, FileDown, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
+import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
-import { StatTile } from '@/components/StatTile';
+import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusBadge, PipelineBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { StatusDot, ToneBadge } from '@/components/ToneBadge';
@@ -106,48 +106,46 @@ export default function Overview() {
       />
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
-      {/* The verdict banner. One sentence, sized so it is readable across a room.
-          The tone lives in the icon badge rather than an accent rail — the eye goes
-          to the icon anyway, so a rail would only repeat it. */}
-      <Card>
-        <CardContent className="flex flex-wrap items-center gap-4 p-5">
-          {loading || !verdict ? (
-            <div className="space-y-2">
-              <Skeleton className="h-6 w-64" />
-              <Skeleton className="h-4 w-80" />
-            </div>
-          ) : (
-            <>
-              <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-full border', TONE_SOFT[verdict.tone])}>
-                {verdict.tone === 'success' ? (
-                  <CheckCircle2 className="size-5" />
-                ) : verdict.tone === 'info' ? (
-                  <Loader2 className="size-5 animate-spin" />
-                ) : (
-                  <TriangleAlert className="size-5" />
-                )}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-lg font-semibold tracking-tight">{verdict.headline}</p>
-                <p className="text-sm text-muted-foreground">{verdict.detail}</p>
-              </div>
-              {verdict.action && (
-                <Button render={<Link to={verdict.action.to} />}>
-                  {verdict.action.label}
-                  <ArrowRight />
-                </Button>
+      {/* The verdict. One sentence, sized so it is readable across a room, in the
+          serif that carries every title. The tone lives in the icon badge rather
+          than an accent rail — the eye goes to the icon anyway, so a rail would
+          only repeat it. */}
+      <div className="flex flex-wrap items-center gap-4">
+        {loading || !verdict ? (
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-64" />
+            <Skeleton className="h-4 w-80" />
+          </div>
+        ) : (
+          <>
+            <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-full border', TONE_SOFT[verdict.tone])}>
+              {verdict.tone === 'success' ? (
+                <CheckCircle2 className="size-5" />
+              ) : verdict.tone === 'info' ? (
+                <Loader2 className="size-5 animate-spin" />
+              ) : (
+                <TriangleAlert className="size-5" />
               )}
-            </>
-          )}
-        </CardContent>
-      </Card>
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="font-serif text-xl leading-snug">{verdict.headline}</p>
+              <p className="text-sm text-muted-foreground">{verdict.detail}</p>
+            </div>
+            {verdict.action && (
+              <Button render={<Link to={verdict.action.to} />}>
+                {verdict.action.label}
+                <ArrowRight />
+              </Button>
+            )}
+          </>
+        )}
+      </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <StatBand>
         <StatTile
           label="Needs review"
           value={data?.attention.open ?? 0}
           hint={data?.attention.open ? 'Waiting on a decision' : 'Queue is clear'}
-          icon={TriangleAlert}
           tone={data && data.attention.open > 0 ? 'warning' : 'neutral'}
           to="/attention"
           loading={loading}
@@ -156,7 +154,6 @@ export default function Overview() {
           label="In flight"
           value={inFlight}
           hint={data ? `${data.jobs.running} running · ${data.jobs.pending} waiting` : undefined}
-          icon={Loader2}
           tone={inFlight > 0 ? 'info' : 'neutral'}
           to="/activity"
           loading={loading}
@@ -165,20 +162,12 @@ export default function Overview() {
           label="Failed today"
           value={data?.jobs.failedRecent ?? 0}
           hint={data ? `${data.jobs.doneRecent} finished cleanly` : undefined}
-          icon={TriangleAlert}
           tone={data && data.jobs.failedRecent > 0 ? 'danger' : 'neutral'}
           to="/activity"
           loading={loading}
         />
-        <StatTile
-          label="Files delivered"
-          value={placed}
-          hint="Subtitles and audio, last 7 days"
-          icon={FileDown}
-          tone="neutral"
-          loading={loading}
-        />
-      </div>
+        <StatTile label="Files delivered" value={placed} hint="Subtitles and audio, last 7 days" loading={loading} />
+      </StatBand>
 
       {/* Storage */}
       <Card>
@@ -195,10 +184,10 @@ export default function Overview() {
             </CardAction>
           )}
         </CardHeader>
-        <CardContent className="space-y-1">
+        <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
           {loading && <Skeleton className="h-24 w-full" />}
           {data?.storage.map((check) => (
-            <div key={check.id} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-muted/50">
+            <div key={check.id} className="flex items-center gap-3 py-2.5">
               <StatusDot tone={storageStatusTone(check.status)} />
               <div className="flex min-w-0 flex-1 items-baseline gap-2">
                 <span className="shrink-0 text-sm font-medium">{check.label}</span>
@@ -223,7 +212,7 @@ export default function Overview() {
             </Button>
           </CardAction>
         </CardHeader>
-        <CardContent className="space-y-1">
+        <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
           {jobs.length === 0 && (
             <p className="py-6 text-center text-sm text-muted-foreground">
               Nothing yet. Add a series or movie in Sonarr/Radarr and Warrden will pick it up.
@@ -233,7 +222,7 @@ export default function Overview() {
             <Link
               key={job.id}
               to={`/jobs/${job.id}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg px-2 py-2.5 hover:bg-muted/50"
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5 hover:bg-accent/40"
             >
               <span className="min-w-0 flex-1 truncate text-sm font-medium">{jobTitle(job)}</span>
               <PipelineBadge pipeline={job.pipeline} />

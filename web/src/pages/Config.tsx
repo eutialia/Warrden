@@ -15,6 +15,7 @@ import {
 import { LlmProfileEditor } from '@/components/LlmProfileEditor';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
+import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TagInput } from '@/components/TagInput';
 import { StatusDot, ToneBadge } from '@/components/ToneBadge';
@@ -262,7 +263,7 @@ export default function ConfigPage() {
           ))}
         </nav>
 
-        <div className="min-w-0 flex-1 space-y-6">
+        <SectionStack className="min-w-0 flex-1">
           {/* Connections */}
           <Card id="connections" className="scroll-mt-20">
             <CardHeader>
@@ -289,7 +290,7 @@ export default function ConfigPage() {
 
               <div className="space-y-3">
                 {draft.arrs.map((arr, i) => (
-                  <div key={i} className="grid gap-3 rounded-lg border p-3 md:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
+                  <div key={i} className="grid gap-3 border-t pt-3 md:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
                     <div className="space-y-1.5">
                       <Label className="text-xs">Name</Label>
                       <Input
@@ -389,7 +390,7 @@ export default function ConfigPage() {
                   const check = storageChecks.find((c) => c.id === row.id);
                   const status = check?.status ?? 'missing';
                   return (
-                    <div key={row.id} className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
+                    <div key={row.id} className="flex flex-wrap items-center gap-3 border-t py-3">
                       <StatusDot tone={storageStatusTone(status)} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-baseline gap-2">
@@ -575,7 +576,7 @@ export default function ConfigPage() {
               })}
             </CardContent>
           </Card>
-        </div>
+        </SectionStack>
       </div>
 
       {/* One save bar for the whole page — the API writes config atomically, so

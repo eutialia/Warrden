@@ -55,7 +55,7 @@ export function LlmProfileEditor({
         const entry = current[callsite];
         const configured = entry !== undefined;
         return (
-          <div key={callsite} className="rounded-lg border p-3">
+          <div key={callsite} className="border-t pt-3">
             <div className="flex flex-wrap items-center gap-2">
               <code className="text-sm font-medium">{callsite}</code>
               {!configured && <span className="text-xs text-muted-foreground">not routed — falls back to defaults</span>}

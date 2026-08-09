@@ -1,20 +1,38 @@
-import type { LucideIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { TONE_TEXT, type Tone } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
 /**
- * One number plus what it means. Tiles stay neutral when the number is
- * unremarkable and only take a tone when it's worth a human's eye — a permanently
- * amber dashboard trains people to ignore amber.
+ * The band a row of stats sits in: one rule above, one below, a hairline between
+ * the figures. No boxes — the rules do the work, so the numbers stay the only
+ * thing the eye lands on.
+ */
+export function StatBand({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        'grid grid-cols-2 border-y sm:grid-cols-4',
+        '[&>*]:border-l [&>*]:pl-5 [&>*:nth-child(odd)]:border-l-0 [&>*:nth-child(odd)]:pl-0',
+        'sm:[&>*:nth-child(odd)]:border-l sm:[&>*:nth-child(odd)]:pl-5 sm:[&>*:first-child]:border-l-0 sm:[&>*:first-child]:pl-0'
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * One number plus what it means. Numbers are set in the serif at tabular figures
+ * — they are the thing people scan from across a room. Tiles stay neutral when
+ * the number is unremarkable and only take a tone when it's worth a human's eye:
+ * a permanently amber dashboard trains people to ignore amber.
  */
 export function StatTile({
   label,
   value,
   hint,
-  icon: Icon,
   tone = 'neutral',
   to,
   loading = false,
@@ -22,38 +40,35 @@ export function StatTile({
   label: string;
   value: number | string;
   hint?: string;
-  icon: LucideIcon;
   tone?: Tone;
   /** Makes the whole tile a link when there's a page that explains the number. */
   to?: string;
   loading?: boolean;
 }) {
   const body = (
-    <CardContent className="flex items-start justify-between gap-3 p-4">
-      <div className="min-w-0 space-y-1">
-        <p className="text-xs font-medium text-muted-foreground">{label}</p>
-        {loading ? (
-          <Skeleton className="h-8 w-12" />
-        ) : (
-          <p className={cn('text-3xl font-semibold tabular-nums tracking-tight', tone !== 'neutral' && TONE_TEXT[tone])}>
-            {value}
-          </p>
-        )}
-        {hint && <p className="truncate text-xs text-muted-foreground">{hint}</p>}
-      </div>
-      <Icon className={cn('size-4.5 shrink-0', tone === 'neutral' ? 'text-muted-foreground' : TONE_TEXT[tone])} />
-    </CardContent>
+    <>
+      {loading ? (
+        <Skeleton className="h-7 w-12" />
+      ) : (
+        <span className={cn('font-serif text-3xl leading-none tabular-nums', tone !== 'neutral' && TONE_TEXT[tone])}>
+          {value}
+        </span>
+      )}
+      <span className="text-xs text-muted-foreground group-hover/stat:text-foreground">{label}</span>
+      {hint && <span className="truncate text-xs text-muted-foreground">{hint}</span>}
+    </>
   );
 
-  const card = (
-    <Card className={cn('h-full py-0 transition-colors', to && 'hover:border-ring/60 hover:bg-accent/40')}>{body}</Card>
-  );
+  const shell = 'flex min-w-0 flex-col gap-1.5 py-4 pr-5';
 
   return to ? (
-    <Link to={to} className="block rounded-xl focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none">
-      {card}
+    <Link
+      to={to}
+      className={cn(shell, 'group/stat transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none')}
+    >
+      {body}
     </Link>
   ) : (
-    card
+    <div className={shell}>{body}</div>
   );
 }

@@ -42,7 +42,7 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
     <tfoot
       data-slot="table-footer"
       className={cn(
-        "border-t bg-muted/50 font-medium [&>tr]:last:border-b-0",
+        "border-t font-medium [&>tr]:last:border-b-0",
         className
       )}
       {...props}
@@ -68,7 +68,9 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
     <th
       data-slot="table-head"
       className={cn(
-        "h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",
+        // Column headings are labels, not content: small, uppercase and quiet, so
+        // the rule under them is what separates head from body.
+        "h-10 px-2 text-left align-middle text-[0.6875rem] font-normal tracking-[0.11em] whitespace-nowrap text-muted-foreground uppercase first:pl-0 last:pr-0 [&:has([role=checkbox])]:pr-0",
         className
       )}
       {...props}
@@ -81,7 +83,7 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
     <td
       data-slot="table-cell"
       className={cn(
-        "p-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0",
+        "p-2 align-middle whitespace-nowrap first:pl-0 last:pr-0 [&:has([role=checkbox])]:pr-0",
         className
       )}
       {...props}

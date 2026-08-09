@@ -2,7 +2,7 @@
 // reference. Kept as a script rather than a chain of shell commands because the
 // two halves have to stay in step: `ds.css` compiles the utilities *without* the
 // token values, so the token file has to travel with it or nothing resolves.
-import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 const DIST = 'ds-dist';
@@ -14,6 +14,9 @@ const DIST = 'ds-dist';
 // an error.
 const TOKENS = 'ds-tokens';
 
+// Emptied first: a face that has been swapped out would otherwise linger here and
+// ship as a font nothing references.
+rmSync(`${DIST}/files`, { recursive: true, force: true });
 mkdirSync(`${DIST}/files`, { recursive: true });
 mkdirSync(TOKENS, { recursive: true });
 
@@ -30,6 +33,6 @@ writeFileSync(
 );
 
 // 3. Font binaries, so the @font-face urls in the compiled CSS resolve locally.
-for (const family of ['geist', 'geist-mono']) {
+for (const family of ['instrument-sans', 'newsreader', 'geist-mono']) {
   cpSync(`node_modules/@fontsource-variable/${family}/files`, `${DIST}/files`, { recursive: true });
 }

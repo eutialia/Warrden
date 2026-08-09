@@ -31,6 +31,6 @@
 @source inline("text-{foreground,muted-foreground,card-foreground,primary-foreground,secondary-foreground}");
 @source inline("border-{border,input}");
 @source inline("ring-ring");
-@source inline("font-{sans,mono}");
+@source inline("font-{sans,serif,mono}");
 @source inline("tabular-nums");
 @source inline("rounded-{md,lg,xl}");

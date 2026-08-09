@@ -205,17 +205,15 @@ export default function Attention() {
         )}
 
         {!loading && items.length === 0 && !error && (
-          <Card>
-            <Empty className="py-12">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <Inbox />
-                </EmptyMedia>
-                <EmptyTitle>{EMPTY_COPY[status].title}</EmptyTitle>
-                <EmptyDescription>{EMPTY_COPY[status].description}</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          </Card>
+          <Empty className="py-12">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Inbox />
+              </EmptyMedia>
+              <EmptyTitle>{EMPTY_COPY[status].title}</EmptyTitle>
+              <EmptyDescription>{EMPTY_COPY[status].description}</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         )}
 
         {items.map((item) => {
@@ -231,10 +229,11 @@ export default function Attention() {
           return (
             // Closed items stay in the list but recede — a whole card of full-strength
             // colour for something already dealt with competes with what still needs you.
-            <Card key={item.id} className={cn(item.status !== 'open' && 'text-muted-foreground')}>
+            // A rule above each item is what separates one from the next.
+            <Card key={item.id} className={cn('border-t pt-4', item.status !== 'open' && 'text-muted-foreground')}>
               <CardContent className="space-y-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className={cn('text-base font-semibold', item.status !== 'open' && 'font-medium')}>{title}</h2>
+                  <h2 className={cn('text-base font-medium', item.status !== 'open' && 'font-normal')}>{title}</h2>
                   <ToneBadge tone={item.status === 'open' ? tone : 'neutral'} dot={item.status === 'open'}>
                     {attentionKindLabel(item.kind)}
                   </ToneBadge>
@@ -254,8 +253,8 @@ export default function Attention() {
                 <p className="leading-relaxed">{item.message}</p>
 
                 {bundleImport && (
-                  <Collapsible className="rounded-lg border bg-muted/40">
-                    <div className="space-y-2 p-3">
+                  <Collapsible className="border-t">
+                    <div className="space-y-2 pt-3">
                       <p className="font-medium">
                         {fileCount} file{fileCount === 1 ? '' : 's'} proposed for import
                         {groups.length > 1 ? ` · ${groups.length} folders` : ''}

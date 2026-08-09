@@ -12,6 +12,7 @@ import {
   type SubtitleRunRow,
   type TranscriptEntry,
 } from '@/api';
+import { SectionStack } from '@/components/SectionStack';
 import { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TierBadge } from '@/components/TierBadge';
@@ -170,7 +171,7 @@ export default function JobDetail() {
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
 
   return (
-    <div className="space-y-4">
+    <SectionStack>
       <BackLink />
 
       <Card>
@@ -229,7 +230,7 @@ export default function JobDetail() {
                 </dl>
                 <div>
                   <p className="mb-2 text-xs text-muted-foreground">Why this release</p>
-                  <p className="rounded-lg border bg-muted/40 p-3 text-sm leading-relaxed whitespace-pre-wrap">
+                  <p className="border-l pl-3 text-sm leading-relaxed whitespace-pre-wrap">
                     {acquireRecord.reasoning ?? 'No reasoning recorded.'}
                   </p>
                 </div>
@@ -255,7 +256,7 @@ export default function JobDetail() {
               <p className="text-sm text-muted-foreground">No files placed for this job.</p>
             )}
             {placedFiles.map((f) => (
-              <div key={f.id} className="space-y-1.5 rounded-lg border p-3">
+              <div key={f.id} className="space-y-1.5 border-t pt-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <FileCheck2 className="size-4 text-muted-foreground" />
                   <Badge variant="outline" className="text-muted-foreground">
@@ -283,13 +284,13 @@ export default function JobDetail() {
           </CardContent>
         </Card>
       )}
-    </div>
+    </SectionStack>
   );
 }
 
 function SubtitleRunCard({ run }: { run: SubtitleRunRow }): ReactNode {
   return (
-    <div className="rounded-lg border p-4">
+    <div className="border-t pt-4">
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <span className="font-medium">{run.site}</span>
         <ToneBadge tone={subtitleRunTone(run.status)} dot pulse={subtitleRunTone(run.status) === 'info'}>

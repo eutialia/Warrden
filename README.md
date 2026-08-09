@@ -277,6 +277,29 @@ same four paths so `pathMappings` can stay empty.
 Dev / non-Docker path overrides (not in the UI): `WARRDEN_MOUNT_SERIES`,
 `WARRDEN_MOUNT_ANIME`, `WARRDEN_MOUNT_MOVIES`, `WARRDEN_MOUNT_DOWNLOADS`.
 
+## Design rules
+
+The dashboard is an operator tool: dense, quiet when things are fine, loud only when a
+human has to decide something. Three rules carry the look, and breaking any one of them
+is what makes a screen stop matching the rest.
+
+1. **Colour means state, never decoration.** Warm greige is the whole surface palette. Hue
+   appears only for success / warning / info / destructive, and only through `ToneBadge`,
+   `StatusBadge`, `StatusDot` or `PipelineBadge`. Categories — which pipeline a job belongs
+   to, what kind of object a row is — get an icon and a neutral chip. A screen that colours
+   categories reads as a rainbow and destroys the signal.
+2. **Cards have no fill, no shadow, no corner.** Separation comes from a hairline rule and
+   whitespace, never a box. If a surface genuinely needs to lift off the page it is a
+   popover, not a card.
+3. **Newsreader for titles and numbers, Instrument Sans for everything else, Geist Mono for
+   machine strings.** Titles sit at weight 400 — the serif carries the emphasis. Never mono
+   for prose, never sans for a large number or a release name.
+
+Both themes are complete, so never hand-write a `dark:` colour override. The full contract,
+including the class vocabulary, lives in
+[`.design-sync/conventions.md`](.design-sync/conventions.md), which also ships as the
+design system's README.
+
 ## More detail
 
 See [`docs/specs/2026-08-05-warrden-design.md`](docs/specs/2026-08-05-warrden-design.md)

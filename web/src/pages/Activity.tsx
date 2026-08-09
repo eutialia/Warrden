@@ -134,10 +134,10 @@ export default function Activity() {
       </div>
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
-      <Card className="overflow-hidden py-0">
-        <CardContent className="p-0">
+      <Card>
+        <CardContent>
           {loading && jobs.length === 0 ? (
-            <div className="space-y-3 p-4">
+            <div className="space-y-3 py-4">
               {Array.from({ length: 6 }, (_, i) => (
                 <Skeleton key={i} className="h-12 w-full" />
               ))}

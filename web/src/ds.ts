@@ -64,7 +64,8 @@ export { Tooltip, TooltipContent, TooltipTrigger } from './components/ui/tooltip
 // rather than generic interaction.
 export { NumberField } from './components/NumberField';
 export { PageHeader } from './components/PageHeader';
-export { StatTile } from './components/StatTile';
+export { SectionStack } from './components/SectionStack';
+export { StatBand, StatTile } from './components/StatTile';
 export { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from './components/StatusBadge';
 export { StatusNotice } from './components/StatusNotice';
 export { TagInput } from './components/TagInput';
