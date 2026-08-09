@@ -40,13 +40,3 @@ export const TONE_TEXT: Record<Tone, string> = {
   info: 'text-info-foreground',
   danger: 'text-destructive-foreground',
 };
-
-/** Left accent rail on cards (attention items, timeline steps). */
-export const TONE_RAIL: Record<Tone, string> = {
-  neutral: 'border-l-border',
-  brand: 'border-l-brand',
-  success: 'border-l-success',
-  warning: 'border-l-warning',
-  info: 'border-l-info',
-  danger: 'border-l-destructive',
-};

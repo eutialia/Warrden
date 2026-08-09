@@ -36,7 +36,6 @@ import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { attentionKindLabel, attentionKindTone, attentionTitle } from '@/lib/labels';
-import { TONE_RAIL } from '@/lib/tone';
 import { cn, formatRelativeTime } from '@/lib/utils';
 
 const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
@@ -231,11 +230,15 @@ export default function Attention() {
           const groups = bundleImport ? groupFilesByFolder(bundleImport.files) : [];
 
           return (
-            <Card key={item.id} className={cn('border-l-4', item.status === 'open' ? TONE_RAIL[tone] : 'border-l-border')}>
+            // Closed items stay in the list but recede — a whole card of full-strength
+            // colour for something already dealt with competes with what still needs you.
+            <Card key={item.id} className={cn(item.status !== 'open' && 'text-muted-foreground')}>
               <CardContent className="space-y-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-base font-semibold">{title}</h2>
-                  <ToneBadge tone={item.status === 'open' ? tone : 'neutral'}>{attentionKindLabel(item.kind)}</ToneBadge>
+                  <h2 className={cn('text-base font-semibold', item.status !== 'open' && 'font-medium')}>{title}</h2>
+                  <ToneBadge tone={item.status === 'open' ? tone : 'neutral'} dot={item.status === 'open'}>
+                    {attentionKindLabel(item.kind)}
+                  </ToneBadge>
                   <span className="ml-auto text-xs text-muted-foreground">
                     {formatRelativeTime(item.ts)}
                     {item.job_id !== null && (

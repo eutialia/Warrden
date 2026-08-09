@@ -15,7 +15,7 @@ import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { jobTitle } from '@/lib/jobs';
 import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
-import { TONE_RAIL, TONE_TEXT, type Tone } from '@/lib/tone';
+import { TONE_SOFT, TONE_TEXT, type Tone } from '@/lib/tone';
 import { cn, formatRelativeTime } from '@/lib/utils';
 
 const RECENT_JOBS = 6;
@@ -108,8 +108,10 @@ export default function Overview() {
       {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
-      {/* The verdict banner. One sentence, sized so it is readable across a room. */}
-      <Card className={cn('border-l-4', verdict ? TONE_RAIL[verdict.tone] : 'border-l-border')}>
+      {/* The verdict banner. One sentence, sized so it is readable across a room.
+          The tone lives in the icon badge rather than an accent rail — the eye goes
+          to the icon anyway, so a rail would only repeat it. */}
+      <Card>
         <CardContent className="flex flex-wrap items-center gap-4 p-5">
           {loading || !verdict ? (
             <div className="space-y-2">
@@ -118,7 +120,7 @@ export default function Overview() {
             </div>
           ) : (
             <>
-              <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-full bg-muted', TONE_TEXT[verdict.tone])}>
+              <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-full border', TONE_SOFT[verdict.tone])}>
                 {verdict.tone === 'success' ? (
                   <CheckCircle2 className="size-5" />
                 ) : verdict.tone === 'info' ? (
