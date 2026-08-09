@@ -61,7 +61,7 @@ export default function ManagedObjects() {
         setLoading(false);
       });
   }, [beginFetch]);
-  const { disconnected, reconnect } = useSseRefetch(refetch);
+  useSseRefetch(refetch);
 
   useEffect(refetch, [refetch]);
 
@@ -95,8 +95,6 @@ export default function ManagedObjects() {
         title="Arr objects"
         description="Tags, release profiles, and webhooks Warrden created inside Sonarr/Radarr so future grabs stay correct. Safe to review — delete only if you want Warrden to stop managing that object."
       />
-
-      {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       {loading && objects.length === 0 && <Skeleton className="h-48 w-full" />}

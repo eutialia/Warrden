@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, CheckCircle2, FileDown, Globe, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
+import { ArrowRight, CheckCircle2, FileDown, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
 import { StatTile } from '@/components/StatTile';
@@ -75,7 +75,7 @@ function verdictOf(data: OverviewData): Verdict {
 }
 
 export default function Overview() {
-  const { data, error, loading, refetch, disconnected, reconnect } = useOverview();
+  const { data, error, loading, refetch } = useOverview();
   const [jobs, setJobs] = useState<Job[]>([]);
 
   const beginFetch = useFetchGeneration();
@@ -104,8 +104,6 @@ export default function Overview() {
         title="Overview"
         description="Warrden at a glance — what it is working on, what it finished, and anything it could not decide alone."
       />
-
-      {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       {/* The verdict banner. One sentence, sized so it is readable across a room.
@@ -182,82 +180,37 @@ export default function Overview() {
         />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* Storage */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <HardDrive className="size-4 text-muted-foreground" />
-              Storage mounts
-            </CardTitle>
-            {data && (
-              <CardAction>
-                <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
-                  {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
-                </ToneBadge>
-              </CardAction>
-            )}
-          </CardHeader>
-          <CardContent className="space-y-1">
-            {loading && <Skeleton className="h-24 w-full" />}
-            {data?.storage.map((check) => (
-              <div key={check.id} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-muted/50">
-                <StatusDot tone={storageStatusTone(check.status)} />
-                <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                  <span className="shrink-0 text-sm font-medium">{check.label}</span>
-                  <code className="truncate text-xs text-muted-foreground">{check.path}</code>
-                </div>
-                <span className={cn('shrink-0 text-xs font-medium', TONE_TEXT[storageStatusTone(check.status)])}>
-                  {storageStatusLabel(check.status)}
-                </span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        {/* Subtitle sources */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Globe className="size-4 text-muted-foreground" />
-              Subtitle sources
-            </CardTitle>
+      {/* Storage */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <HardDrive className="size-4 text-muted-foreground" />
+            Storage mounts
+          </CardTitle>
+          {data && (
             <CardAction>
-              <Button variant="ghost" size="sm" render={<Link to="/sites" />}>
-                Manage
-                <ArrowRight />
-              </Button>
+              <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
+                {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
+              </ToneBadge>
             </CardAction>
-          </CardHeader>
-          <CardContent>
-            {loading && <Skeleton className="h-16 w-full" />}
-            {data && data.sites.known === 0 && (
-              <p className="py-4 text-sm text-muted-foreground">
-                No sites configured yet — Warrden can't search for subtitles until one is added.
-              </p>
-            )}
-            {data && data.sites.known > 0 && (
-              <div className="flex items-baseline gap-6">
-                <div>
-                  <p className="text-2xl font-semibold tabular-nums">{data.sites.known}</p>
-                  <p className="text-xs text-muted-foreground">configured</p>
-                </div>
-                <div>
-                  <p
-                    className={cn(
-                      'text-2xl font-semibold tabular-nums',
-                      data.sites.failing > 0 && TONE_TEXT.warning,
-                    )}
-                  >
-                    {data.sites.failing}
-                  </p>
-                  <p className="text-xs text-muted-foreground">with recent failures</p>
-                </div>
+          )}
+        </CardHeader>
+        <CardContent className="space-y-1">
+          {loading && <Skeleton className="h-24 w-full" />}
+          {data?.storage.map((check) => (
+            <div key={check.id} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-muted/50">
+              <StatusDot tone={storageStatusTone(check.status)} />
+              <div className="flex min-w-0 flex-1 items-baseline gap-2">
+                <span className="shrink-0 text-sm font-medium">{check.label}</span>
+                <code className="truncate text-xs text-muted-foreground">{check.path}</code>
               </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              <span className={cn('shrink-0 text-xs font-medium', TONE_TEXT[storageStatusTone(check.status)])}>
+                {storageStatusLabel(check.status)}
+              </span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
 
       {/* Recent activity */}
       <Card>

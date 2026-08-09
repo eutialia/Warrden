@@ -128,7 +128,7 @@ export default function JobDetail() {
   // SSE traffic about one job is never a "burst" worth coalescing. `load()` is called with
   // no staleness guard here: the per-`id` guard above is what actually matters, and a
   // late-resolving SSE-triggered load for the *same* `id` is harmless to apply.
-  const { disconnected, reconnect } = useSseRefetch(() => load(), 0, Boolean(id));
+  useSseRefetch(() => load(), 0, Boolean(id));
 
   async function handleRepick(): Promise<void> {
     if (!data) return;
@@ -172,7 +172,6 @@ export default function JobDetail() {
   return (
     <div className="space-y-4">
       <BackLink />
-      {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
 
       <Card>
         <CardHeader>

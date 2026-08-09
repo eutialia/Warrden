@@ -22,12 +22,6 @@ export interface OverviewCounts {
     subtitle: number;
     audio: number;
   };
-  sites: {
-    /** Sites the browse agent has a memory row for. */
-    known: number;
-    /** Sites carrying at least one unresolved failure. */
-    failing: number;
-  };
 }
 
 /**
@@ -58,10 +52,6 @@ export class Overview {
       placed: {
         subtitle: countOf(`SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'subtitle' AND created_at >= ?`, placedSince),
         audio: countOf(`SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'audio' AND created_at >= ?`, placedSince),
-      },
-      sites: {
-        known: countOf(`SELECT COUNT(*) AS n FROM site_profiles`),
-        failing: countOf(`SELECT COUNT(*) AS n FROM site_profiles WHERE fail_count > 0`),
       },
     };
   }

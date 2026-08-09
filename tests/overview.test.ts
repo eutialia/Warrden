@@ -3,7 +3,6 @@ import type Database from 'better-sqlite3';
 import { Overview } from '../src/db/overview.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
-import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { freshDb } from './helpers.js';
 
 const NOW = 1_800_000_000_000;
@@ -85,23 +84,12 @@ describe('Overview.counts', () => {
     expect(counts.placed).toEqual({ subtitle: 1, audio: 1 });
   });
 
-  it('reports site memory and how many sites are currently failing', () => {
-    const db = freshDb();
-    const profiles = new SiteProfiles(db);
-    profiles.upsert({ name: 'alpha', baseUrl: 'https://a.example' });
-    profiles.upsert({ name: 'beta', baseUrl: 'https://b.example' });
-    profiles.update('beta', { failCount: 3 });
-
-    expect(new Overview(db).counts(NOW).sites).toEqual({ known: 2, failing: 1 });
-  });
-
   it('returns zeroes rather than throwing on an empty database', () => {
     const counts = new Overview(freshDb()).counts(NOW);
     expect(counts).toEqual({
       attention: { open: 0 },
       jobs: { running: 0, pending: 0, failedRecent: 0, doneRecent: 0 },
       placed: { subtitle: 0, audio: 0 },
-      sites: { known: 0, failing: 0 },
     });
   });
 });

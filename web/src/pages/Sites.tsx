@@ -93,7 +93,7 @@ export default function Sites() {
         setLoading(false);
       });
   }, [beginFetch]);
-  const { disconnected, reconnect } = useSseRefetch(refetch);
+  useSseRefetch(refetch);
 
   useEffect(refetch, [refetch]);
 
@@ -183,8 +183,6 @@ export default function Sites() {
         title="Subtitle sources"
         description="Everything about finding subtitles: which languages count as covered, which fansub groups to favour, and the public sites Warrden browses."
       />
-
-      {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       {loading && !config && <Skeleton className="h-64 w-full" />}

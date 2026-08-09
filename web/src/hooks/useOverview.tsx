@@ -8,8 +8,6 @@ interface OverviewState {
   error: string | null;
   loading: boolean;
   refetch: () => void;
-  disconnected: boolean;
-  reconnect: () => void;
 }
 
 const OverviewContext = createContext<OverviewState | null>(null);
@@ -43,13 +41,10 @@ export function OverviewProvider({ children }: { children: ReactNode }) {
       });
   }, [beginFetch]);
 
-  const { disconnected, reconnect } = useSseRefetch(refetch);
+  useSseRefetch(refetch);
   useEffect(refetch, [refetch]);
 
-  const value = useMemo(
-    () => ({ data, error, loading, refetch, disconnected, reconnect }),
-    [data, error, loading, refetch, disconnected, reconnect],
-  );
+  const value = useMemo(() => ({ data, error, loading, refetch }), [data, error, loading, refetch]);
 
   return <OverviewContext value={value}>{children}</OverviewContext>;
 }

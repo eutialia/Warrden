@@ -352,7 +352,6 @@ export interface Overview {
   attention: { open: number };
   jobs: { running: number; pending: number; failedRecent: number; doneRecent: number };
   placed: { subtitle: number; audio: number };
-  sites: { known: number; failing: number };
   storage: StorageCheck[];
 }
 

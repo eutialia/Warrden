@@ -71,7 +71,7 @@ export default function Activity() {
       });
   }, [beginFetch, limit]);
 
-  const { disconnected, reconnect } = useSseRefetch(refetch);
+  useSseRefetch(refetch);
 
   useEffect(refetch, [refetch]);
 
@@ -132,8 +132,6 @@ export default function Activity() {
           </SelectContent>
         </Select>
       </div>
-
-      {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       <Card className="overflow-hidden py-0">

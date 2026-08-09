@@ -121,7 +121,7 @@ export default function Attention() {
         setLoading(false);
       });
   }, [beginFetch]);
-  const { disconnected, reconnect } = useSseRefetch(refetch);
+  useSseRefetch(refetch);
 
   useEffect(() => {
     setItems([]);
@@ -194,7 +194,6 @@ export default function Attention() {
       </Tabs>
 
       <div className="space-y-3">
-        {disconnected && <StatusNotice tone="muted" message="Live updates disconnected — retrying…" onRetry={reconnect} />}
         {error && <StatusNotice message={error} onRetry={refetch} />}
 
         {loading && items.length === 0 && (
