@@ -84,12 +84,47 @@ describe('Overview.counts', () => {
     expect(counts.placed).toEqual({ subtitle: 1, audio: 1 });
   });
 
+  it('counts each stage of the last day, and the week split behind the clean rate', () => {
+    const db = freshDb();
+    // One of each inside the window, one of each outside it.
+    const event = db.prepare(`INSERT INTO events (ts, kind, level, message) VALUES (?, ?, 'info', '')`);
+    event.run(NOW - HOUR, 'webhook.received');
+    event.run(NOW - 2 * DAY, 'webhook.received');
+    event.run(NOW - HOUR, 'ingest.placed'); // a different kind must not count as a webhook
+
+    const record = db.prepare(
+      `INSERT INTO acquire_records (arr_instance, target_kind, target_id, created_at) VALUES ('sonarr', 'series', ?, ?)`,
+    );
+    record.run(1, NOW - HOUR);
+    record.run(2, NOW - 2 * DAY);
+
+    const attention = new AttentionItems(db);
+    attention.open({ kind: 'subtitle.unresolved', message: 'a', data: { targetId: 1 } });
+    const old = attention.open({ kind: 'subtitle.unresolved', message: 'b', data: { targetId: 2 } });
+    db.prepare(`UPDATE attention_items SET ts = ? WHERE id = ?`).run(NOW - 2 * DAY, old.id);
+    db.prepare(`UPDATE attention_items SET ts = ? WHERE id != ?`).run(NOW - HOUR, old.id);
+
+    insertJobs(db, [
+      { status: 'done', updatedAt: NOW - 2 * DAY },
+      { status: 'done', updatedAt: NOW - 3 * DAY },
+      { status: 'failed', updatedAt: NOW - 4 * DAY },
+      // Older than the week — outside both the rate and the day counters.
+      { status: 'done', updatedAt: NOW - 30 * DAY },
+    ]);
+
+    const counts = new Overview(db).counts(NOW);
+    expect(counts.recent).toEqual({ webhooks: 1, refined: 1, subtitles: 0, escalated: 1 });
+    expect(counts.week).toEqual({ done: 2, failed: 1 });
+  });
+
   it('returns zeroes rather than throwing on an empty database', () => {
     const counts = new Overview(freshDb()).counts(NOW);
     expect(counts).toEqual({
       attention: { open: 0 },
       jobs: { running: 0, pending: 0, failedRecent: 0, doneRecent: 0 },
       placed: { subtitle: 0, audio: 0 },
+      recent: { webhooks: 0, refined: 0, subtitles: 0, escalated: 0 },
+      week: { done: 0, failed: 0 },
     });
   });
 });

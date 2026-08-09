@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { standardMounts, type StandardMountId } from '../config/standardMounts.js';
 
@@ -18,6 +18,10 @@ export interface StorageCheck {
   detail: string;
   /** Always true for the four standard mounts — UI must not offer an editor. */
   immutable: boolean;
+  /** How full the volume is. Absent when the mount is unreachable, or when the
+   * filesystem won't answer — a missing number is not the same as a full disk, so
+   * the UI has to be able to tell the two apart. */
+  usage?: { totalBytes: number; usedBytes: number };
 }
 
 /**
@@ -29,15 +33,37 @@ export interface StorageCheck {
  * leftover directory never reports as OK.
  */
 export function probeStorage(): StorageCheck[] {
-  return standardMounts().map((mount) => ({
-    id: mount.id,
-    label: mount.label,
-    path: mount.path,
-    localPath: mount.path,
-    role: mount.id,
-    immutable: true,
-    ...probeAccess(mount.path, mount.label, /* requireMountPoint */ true),
-  }));
+  return standardMounts().map((mount) => {
+    const access = probeAccess(mount.path, mount.label, /* requireMountPoint */ true);
+    return {
+      id: mount.id,
+      label: mount.label,
+      path: mount.path,
+      localPath: mount.path,
+      role: mount.id,
+      immutable: true,
+      ...access,
+      ...(access.status === 'ok' ? { usage: diskUsage(mount.path) } : {}),
+    };
+  });
+}
+
+/**
+ * How much of the volume behind `p` is in use. Uses the free space available to an
+ * unprivileged process, which is what actually limits Warrden — on most filesystems
+ * a slice is reserved for root, and counting it would promise room that isn't there.
+ */
+function diskUsage(p: string): StorageCheck['usage'] {
+  try {
+    const fs = statfsSync(p);
+    const total = fs.blocks * fs.bsize;
+    if (total <= 0) return undefined;
+    return { totalBytes: total, usedBytes: total - fs.bavail * fs.bsize };
+  } catch {
+    // Network filesystems can refuse statfs while still being readable. The mount is
+    // fine; we just have nothing to say about its size.
+    return undefined;
+  }
 }
 
 /**

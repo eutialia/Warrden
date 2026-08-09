@@ -30,7 +30,7 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
 import { TONE_TEXT } from '@/lib/tone';
-import { cn } from '@/lib/utils';
+import { cn, formatUsage } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
 
@@ -431,9 +431,14 @@ export default function ConfigPage() {
                         </div>
                         <p className="text-xs text-muted-foreground">{check?.detail ?? row.blurb}</p>
                       </div>
-                      <span className={cn('text-xs font-medium', TONE_TEXT[storageStatusTone(status)])}>
-                        {storageStatusLabel(status)}
-                      </span>
+                      <div className="flex items-baseline gap-3">
+                        {check?.usage && (
+                          <span className="font-mono text-xs text-muted-foreground">{formatUsage(check.usage)}</span>
+                        )}
+                        <span className={cn('text-xs font-medium', TONE_TEXT[storageStatusTone(status)])}>
+                          {storageStatusLabel(status)}
+                        </span>
+                      </div>
                     </div>
                   );
                 })}

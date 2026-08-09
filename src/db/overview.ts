@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 
 /** Rolling window for the "what happened lately" counters on the dashboard home. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
-const PLACED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const WEEK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface OverviewCounts {
   attention: {
@@ -22,6 +22,21 @@ export interface OverviewCounts {
     subtitle: number;
     audio: number;
   };
+  /** What the last day of work consisted of — one line per stage of the pipeline,
+   * so the dashboard can say what Warrden has been doing, not just how much. */
+  recent: {
+    webhooks: number;
+    refined: number;
+    subtitles: number;
+    escalated: number;
+  };
+  /** Terminal job outcomes over the week, for the share that finished cleanly. Both
+   * counts travel rather than a ratio: a percentage of nothing is not 100%, and only
+   * the caller knows how it wants to say so. */
+  week: {
+    done: number;
+    failed: number;
+  };
 }
 
 /**
@@ -34,7 +49,7 @@ export class Overview {
 
   counts(now = Date.now()): OverviewCounts {
     const recentSince = now - RECENT_WINDOW_MS;
-    const placedSince = now - PLACED_WINDOW_MS;
+    const weekSince = now - WEEK_WINDOW_MS;
 
     const countOf = (sql: string, ...params: unknown[]): number =>
       (this.db.prepare(sql).get(...params) as { n: number }).n;
@@ -50,8 +65,21 @@ export class Overview {
         doneRecent: countOf(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'done' AND updated_at >= ?`, recentSince),
       },
       placed: {
-        subtitle: countOf(`SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'subtitle' AND created_at >= ?`, placedSince),
-        audio: countOf(`SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'audio' AND created_at >= ?`, placedSince),
+        subtitle: countOf(`SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'subtitle' AND created_at >= ?`, weekSince),
+        audio: countOf(`SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'audio' AND created_at >= ?`, weekSince),
+      },
+      recent: {
+        webhooks: countOf(`SELECT COUNT(*) AS n FROM events WHERE kind = 'webhook.received' AND ts >= ?`, recentSince),
+        refined: countOf(`SELECT COUNT(*) AS n FROM acquire_records WHERE created_at >= ?`, recentSince),
+        subtitles: countOf(
+          `SELECT COUNT(*) AS n FROM placed_files WHERE kind = 'subtitle' AND created_at >= ?`,
+          recentSince,
+        ),
+        escalated: countOf(`SELECT COUNT(*) AS n FROM attention_items WHERE ts >= ?`, recentSince),
+      },
+      week: {
+        done: countOf(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'done' AND updated_at >= ?`, weekSince),
+        failed: countOf(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'failed' AND updated_at >= ?`, weekSince),
       },
     };
   }

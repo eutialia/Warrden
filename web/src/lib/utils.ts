@@ -5,6 +5,22 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
+
+/**
+ * How full a volume is, as one string: "4.1/18 TB". Both numbers share the total's
+ * unit so they can be compared at a glance, which is the only reason to show a used
+ * figure next to a capacity at all.
+ */
+export function formatUsage({ totalBytes, usedBytes }: { totalBytes: number; usedBytes: number }): string {
+  let exponent = 0;
+  while (totalBytes >= 1000 ** (exponent + 1) && exponent < BYTE_UNITS.length - 1) exponent++;
+  const scale = 1000 ** exponent;
+  // A tenth of a terabyte is worth seeing; a tenth of eighteen of them is noise.
+  const show = (n: number) => (n / scale < 10 ? (n / scale).toFixed(1) : String(Math.round(n / scale)));
+  return `${show(usedBytes)}/${show(totalBytes)} ${BYTE_UNITS[exponent]}`;
+}
+
 /** How long ago something happened, with no "ago" — for places that supply their own
  * wording ("held 11m", "oldest 4m"). Same buckets as `formatRelativeTime`. */
 export function formatElapsed(ts: number): string {

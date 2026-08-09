@@ -15,6 +15,8 @@ import {
 import { useOverview } from '@/hooks/useOverview';
 import { cn } from '@/lib/utils';
 
+const APP_VERSION = __APP_VERSION__;
+
 interface NavItem {
   title: string;
   url: string;
@@ -52,6 +54,15 @@ export function AppSidebar() {
   const location = useLocation();
   const { data } = useOverview();
   const openReview = data?.attention.open ?? 0;
+  const inFlight = (data?.jobs.running ?? 0) + (data?.jobs.pending ?? 0);
+
+  /** What each item is carrying right now, so the depth of the queue is visible
+   * without opening the page. Zero shows nothing rather than a "0" to read past. */
+  const badgeFor = (url: string): { count: number; urgent: boolean } | null => {
+    if (url === '/attention' && openReview > 0) return { count: openReview, urgent: true };
+    if (url === '/activity' && inFlight > 0) return { count: inFlight, urgent: false };
+    return null;
+  };
 
   return (
     <Sidebar>
@@ -61,7 +72,10 @@ export function AppSidebar() {
             <ShieldCheck className="size-4.5" />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold tracking-tight">Warrden</div>
+            <div className="flex items-baseline gap-2">
+              <span className="truncate font-serif text-lg leading-none">Warrden</span>
+              <span className="font-mono text-[0.625rem] text-muted-foreground">{APP_VERSION}</span>
+            </div>
             <div className="truncate text-xs text-muted-foreground">Housekeeping for Sonarr &amp; Radarr</div>
           </div>
         </div>
@@ -73,7 +87,7 @@ export function AppSidebar() {
             <SidebarGroupContent>
               <SidebarMenu>
                 {group.items.map((item) => {
-                  const showBadge = item.url === '/attention' && openReview > 0;
+                  const badge = badgeFor(item.url);
                   return (
                     <SidebarMenuItem key={item.url}>
                       <SidebarMenuButton isActive={item.match(location.pathname)} render={<Link to={item.url} />}>
@@ -81,15 +95,18 @@ export function AppSidebar() {
                         <span>{item.title}</span>
                       </SidebarMenuButton>
                       {/* The review queue replaces notifications, so its backlog has to be
-                          visible from every page rather than only once you navigate there. */}
-                      {showBadge && (
+                          visible from every page rather than only once you navigate there.
+                          Work in flight is just a count, so it stays uncoloured. */}
+                      {badge && (
                         <SidebarMenuBadge
                           className={cn(
-                            'bg-warning-muted text-warning-foreground border border-warning-border',
-                            'pointer-events-none tabular-nums',
+                            'pointer-events-none font-mono tabular-nums',
+                            badge.urgent
+                              ? 'border border-warning-border bg-warning-muted text-warning-foreground'
+                              : 'text-muted-foreground',
                           )}
                         >
-                          {openReview > 99 ? '99+' : openReview}
+                          {badge.count > 99 ? '99+' : badge.count}
                         </SidebarMenuBadge>
                       )}
                     </SidebarMenuItem>

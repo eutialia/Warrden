@@ -340,6 +340,9 @@ export interface StorageCheck {
   status: StorageCheckStatus;
   detail: string;
   immutable: boolean;
+  /** Absent when the mount is unreachable, or when the filesystem won't report a
+   * size — "unknown" and "full" must not look the same. */
+  usage?: { totalBytes: number; usedBytes: number };
 }
 
 export function fetchStorageHealth(): Promise<{ checks: StorageCheck[] }> {
@@ -352,6 +355,8 @@ export interface Overview {
   attention: { open: number };
   jobs: { running: number; pending: number; failedRecent: number; doneRecent: number };
   placed: { subtitle: number; audio: number };
+  recent: { webhooks: number; refined: number; subtitles: number; escalated: number };
+  week: { done: number; failed: number };
   storage: StorageCheck[];
 }
 

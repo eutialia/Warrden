@@ -17,7 +17,7 @@ import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { jobTitle } from '@/lib/jobs';
 import { storageStatusLabel, storageStatusTone, targetKindLabel } from '@/lib/labels';
 import { TONE_SOFT, TONE_TEXT, type Tone } from '@/lib/tone';
-import { cn, formatElapsed } from '@/lib/utils';
+import { cn, formatElapsed, formatUsage } from '@/lib/utils';
 
 const RECENT_JOBS = 6;
 
@@ -99,6 +99,10 @@ export default function Overview() {
   const inFlight = (data?.jobs.running ?? 0) + (data?.jobs.pending ?? 0);
   const placed = (data?.placed.subtitle ?? 0) + (data?.placed.audio ?? 0);
   const badMounts = data?.storage.filter((c) => c.status !== 'ok').length ?? 0;
+  // Only worth saying once a week's worth of jobs have actually finished — "100%
+  // clean" out of nothing finished is a lie of omission.
+  const weekTotal = (data?.week.done ?? 0) + (data?.week.failed ?? 0);
+  const cleanRate = weekTotal > 0 ? `${Math.round(((data!.week.done / weekTotal) * 100 + Number.EPSILON) * 10) / 10}% clean over 7 days` : undefined;
 
   return (
     <div className="space-y-6">
@@ -163,7 +167,7 @@ export default function Overview() {
         <StatTile
           label="Failed today"
           value={data?.jobs.failedRecent ?? 0}
-          hint={data ? `${data.jobs.doneRecent} finished cleanly` : undefined}
+          hint={cleanRate ?? (data ? `${data.jobs.doneRecent} finished cleanly` : undefined)}
           tone={data && data.jobs.failedRecent > 0 ? 'danger' : 'neutral'}
           to="/activity"
           loading={loading}
@@ -225,6 +229,7 @@ export default function Overview() {
           </CardContent>
         </Card>
 
+        <div className="space-y-8">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -245,13 +250,47 @@ export default function Overview() {
               <div key={check.id} className="flex items-center gap-3 py-2.5">
                 <StatusDot tone={storageStatusTone(check.status)} />
                 <code className="min-w-0 flex-1 truncate text-xs">{check.path}</code>
-                <span className={cn('shrink-0 text-xs font-medium', TONE_TEXT[storageStatusTone(check.status)])}>
-                  {storageStatusLabel(check.status)}
+                {/* Capacity when the mount can answer, its problem when it can't —
+                    the right-hand column always says the most useful thing it has. */}
+                <span
+                  className={cn(
+                    'shrink-0 font-mono text-xs',
+                    check.usage ? 'text-muted-foreground' : cn('font-medium', TONE_TEXT[storageStatusTone(check.status)]),
+                  )}
+                >
+                  {check.usage ? formatUsage(check.usage) : storageStatusLabel(check.status)}
                 </span>
               </div>
             ))}
           </CardContent>
         </Card>
+
+        {/* What the day consisted of. The band above counts what is outstanding; this
+            counts what went through, which is the only way to tell a quiet Warrden
+            from a stopped one. */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Last 24 hours</CardTitle>
+          </CardHeader>
+          <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
+            {loading && <Skeleton className="h-24 w-full" />}
+            {data &&
+              (
+                [
+                  ['Webhooks handled', data.recent.webhooks],
+                  ['Releases refined', data.recent.refined],
+                  ['Subtitles placed', data.recent.subtitles],
+                  ['Escalated to you', data.recent.escalated],
+                ] as const
+              ).map(([label, value]) => (
+                <div key={label} className="flex items-baseline justify-between gap-3 py-2.5 text-sm">
+                  <span className="text-muted-foreground">{label}</span>
+                  <span className="font-mono tabular-nums">{value.toLocaleString()}</span>
+                </div>
+              ))}
+          </CardContent>
+        </Card>
+        </div>
       </div>
     </div>
   );
