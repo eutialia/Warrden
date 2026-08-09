@@ -1,0 +1,34 @@
+/*
+ * Stylesheet entry for the exported design system (see `.design-sync/`).
+ *
+ * The app's own CSS is compiled by the Vite plugin and never written to disk in a
+ * form anything outside the app can consume, so this entry exists to produce one
+ * standalone file: the same tokens and base layer as `src/index.css`, plus the
+ * utilities used by the component previews.
+ *
+ * `@source` is what makes that second part work — Tailwind only emits utilities it
+ * can see used, and the preview files live outside this package's default scan
+ * root, so without these lines every preview card would render unstyled.
+ */
+@import "./src/index.css";
+
+@source "./src";
+@source "../.design-sync/previews";
+
+/*
+ * The vocabulary `.design-sync/conventions.md` promises.
+ *
+ * Tailwind only emits utilities it can see used, so a class this app happens not
+ * to use today would be missing from the shipped stylesheet — and anything built
+ * against the design system with it would render unstyled with no error. These
+ * are the names the conventions file tells designers to reach for, so they have
+ * to exist whether or not the dashboard itself currently uses them.
+ */
+@source inline("{bg,text,border}-{success,warning,info,destructive,brand}{,-muted,-foreground,-border}");
+@source inline("bg-{background,card,popover,muted,accent,sidebar,primary,secondary}");
+@source inline("text-{foreground,muted-foreground,card-foreground,primary-foreground,secondary-foreground}");
+@source inline("border-{border,input}");
+@source inline("ring-ring");
+@source inline("font-{sans,mono}");
+@source inline("tabular-nums");
+@source inline("rounded-{md,lg,xl}");

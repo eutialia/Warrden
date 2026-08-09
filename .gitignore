@@ -4,3 +4,11 @@ data/
 web/node_modules/
 web/dist/
 .env
+
+# local design tooling: staged scripts, build output, machine state
+.ds-sync/
+ds-bundle/
+web/ds-dist/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
