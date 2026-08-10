@@ -1,6 +1,5 @@
-import { join } from 'node:path';
 import type { AppContext } from '../context.js';
-import { siteKey, siteLabel } from '../config/siteLabel.js';
+import { siteLabel } from '../config/siteLabel.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
 import { SubtitleRuns, type TranscriptEntry } from '../db/subtitleRuns.js';
 import type { SubtitleSiteConfig } from '../config/schema.js';
@@ -8,11 +7,8 @@ import type { JobRow } from '../jobs/queue.js';
 import { targetEventData } from '../events/target.js';
 import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/queries.js';
 import { errorMessage } from '../util/errors.js';
-import { resolveSiteAdapter } from './adapters/registry.js';
-import { runAdapterSearch } from './adapters/run.js';
-import type { SiteAdapter } from './adapters/types.js';
 import { runAgentLoop, TierBlockedError } from './loop.js';
-import { makeTier, TIER_ORDER, type FetchTier } from './tiers.js';
+import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
 /** After this long on a higher tier without probing cheaper ones, start one rung down so
@@ -49,21 +45,25 @@ interface TierFactory {
   make(t: AccessTier): FetchTier;
 }
 
-const REAL_TIERS: TierFactory = { make: makeTier };
+/** Production tiers for one site-search run: shared cookie jar on curl, fresh chromium context.
+ * Each call gets a fresh jar so consecutive searchSite invocations never share cookies.
+ * Optional `fetchImpl` is for tests that mock HTTP on the real factory shape. */
+export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): TierFactory {
+  const cookieJar = new CookieJar();
+  return { make: (t) => makeTier(t, { cookieJar, fetchImpl: opts.fetchImpl }) };
+}
 
 export interface SearchSiteDeps {
   tiers?: TierFactory;
-  /** Inject adapters in tests; production uses the built-in registry. */
-  resolveAdapter?: (site: SubtitleSiteConfig) => SiteAdapter | null;
 }
 
 /**
  * Runs the site-search agent for one site with full access-ladder orchestration: cooldown
- * check, optional protocol adapter (parse-then-pick), then generic HTML loop with tier
- * escalation. Returns the downloaded file + its source URL, or null when the site
- * couldn't produce one this run — never throws (a broken site is a health event, not a job
- * failure). The transcript lands in `subtitle_runs` and streams live as
- * `subtitle.transcript` events.
+ * check, then generic browse loop with tier escalation. Site-specific protocols live in
+ * profile notes (injected into the loop prompt), not in code adapters. Returns the
+ * downloaded file + its source URL, or null when the site couldn't produce one this run —
+ * never throws (a broken site is a health event, not a job failure). The transcript lands
+ * in `subtitle_runs` and streams live as `subtitle.transcript` events.
  */
 export async function searchSite(
   ctx: AppContext,
@@ -71,15 +71,16 @@ export async function searchSite(
   site: SubtitleSiteConfig,
   query: string | SearchHints,
   destDir: string,
-  tiersOrDeps: TierFactory | SearchSiteDeps = REAL_TIERS,
+  tiersOrDeps: TierFactory | SearchSiteDeps = createRunTiers(),
 ): Promise<{ filePath: string; url: string } | null> {
   // Back-compat: tests pass a TierFactory as the 6th arg; production may pass deps.
   const deps: SearchSiteDeps =
     'make' in tiersOrDeps && typeof tiersOrDeps.make === 'function'
       ? { tiers: tiersOrDeps }
       : (tiersOrDeps as SearchSiteDeps);
-  const tiers = deps.tiers ?? REAL_TIERS;
-  const resolveAdapter = deps.resolveAdapter ?? resolveSiteAdapter;
+  // Fresh jar per invocation when using the real factory (each default arg call is new;
+  // deps.tiers from tests is left alone).
+  const tiers = deps.tiers ?? createRunTiers();
 
   const profiles = new SiteProfiles(ctx.db);
   const runs = new SubtitleRuns(ctx.db);
@@ -146,49 +147,13 @@ export async function searchSite(
   };
 
   try {
-    // Protocol adapter first (subhd, …): structured search + pick + download, one captcha try.
-    const adapter = resolveAdapter(site);
-    if (adapter) {
-      try {
-        const adapterOut = await runAdapterSearch({
-          adapter,
-          llm: ctx.llm,
-          hints,
-          destDir,
-          workDir: join(ctx.dataDir, 'subtitle', 'adapter', siteKey(site.baseUrl), String(job.id)),
-          onTranscript: onTranscriptEvent,
-        });
-        if (adapterOut) {
-          runs.finish(runId, 'done');
-          profiles.update(site.baseUrl, {
-            lastWorkingTier: 'curl',
-            lastSuccessAt: Date.now(),
-            failCount: 0,
-            lastFailureAt: null,
-          });
-          return { filePath: adapterOut.filePath, url: adapterOut.url };
-        }
-        onTranscriptEvent({
-          ts: Date.now(),
-          tier: 'curl',
-          action: 'adapter-fallback',
-          detail: `${adapter.id}: no download — falling through to generic agent`,
-        });
-      } catch (err) {
-        onTranscriptEvent({
-          ts: Date.now(),
-          tier: 'curl',
-          action: 'adapter-fallback',
-          detail: `${adapter.id}: error ${errorMessage(err)} — falling through to generic agent`,
-        });
-      }
-    }
-
     for (let i = startIdx; i < TIER_ORDER.length; i++) {
       const tierName = TIER_ORDER[i]!;
-      const tier = tiers.make(tierName);
-      activeTiers.push(tier);
+      // make() lives inside the try so a factory throw cannot escape searchSite's
+      // never-throws contract — it is handled like any other tier failure.
       try {
+        const tier = tiers.make(tierName);
+        activeTiers.push(tier);
         const outcome = await runAgentLoop({
           llm: ctx.llm,
           tier,
@@ -223,8 +188,8 @@ export async function searchSite(
         // exhausted/gave-up: fall through to the next rung.
       } catch (err) {
         if (!(err instanceof TierBlockedError)) {
-          // A genuine error (bad LLM output after retries, FS failure, ...) is a site-level
-          // failure, not an escalation signal.
+          // A genuine error (bad LLM output after retries, FS failure, factory throw, ...)
+          // is a site-level failure, not an escalation signal.
           return failSite('subtitle.site-failed', `Site ${siteLabel(site.baseUrl)} failed: ${errorMessage(err)}`);
         }
         // TierBlockedError: note the wall in the run's transcript and try the next rung.

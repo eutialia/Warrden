@@ -149,13 +149,14 @@ const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).option
 // Dashboard edits to a site profile — every field optional so a partial PUT only touches
 // what the client sent. `lastWorkingTier` is the full AccessTier union or explicit null
 // (clears the "known-good" tier), `searchUrlPatterns` capped at 5 non-empty entries,
-// `notes` at 2000 chars (matching HINT_MAX_LENGTH's rationale — a pasted-in quirk note
-// shouldn't inflate the agent's prompt unboundedly). `failCount` is the accessible reset
-// seam: PUT `{ failCount: 0 }` clears the escalation/backoff bookkeeping.
+// `notes` at 8000 chars so an operator can paste a full site-protocol walkthrough into
+// the agent prompt without hitting a too-tight ceiling (still bounded so a runaway paste
+// can't inflate tokens unboundedly). `failCount` is the accessible reset seam: PUT
+// `{ failCount: 0 }` clears the escalation/backoff bookkeeping.
 const SiteProfileUpdateSchema = z.object({
   /** Which site to write to — its base URL, the only identity a site has. */
   baseUrl: z.url(),
-  notes: z.string().max(2000).optional(),
+  notes: z.string().max(8000).optional(),
   lastWorkingTier: z.enum(['curl', 'chromium', 'camoufox', 'remote']).nullable().optional(),
   searchUrlPatterns: z.array(z.string().min(1)).max(5).optional(),
   failCount: z.number().int().min(0).optional(),

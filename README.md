@@ -103,8 +103,10 @@ release group are soft ranking hints, never hard filters. Each run:
 2. Previously downloaded packs in the archive cache are matched against what's missing
    before anything new is fetched.
 3. Configured sites are searched in order until nothing is missing, each driven by a
-   browser agent. subhd.tv has a protocol adapter; other sites use the generic HTML
-   agent with `curl` and `chromium` fetch tiers.
+   browser agent with `curl` and `chromium` fetch tiers. A site with a multi-step
+   download protocol is described in its profile notes (Sites → Notes), which the
+   agent follows step by step; `docs/sites/subhd.tv.md` is a ready-made notes doc
+   for subhd.tv.
 4. Each archive's files are matched to episodes: filename parsing first, an LLM call
    for the cryptic rest.
 5. Every candidate is scored against the episode's embedded track. A drifted candidate

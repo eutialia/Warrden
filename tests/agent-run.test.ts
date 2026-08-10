@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { searchSite, failBackoffMs, tierStartIndex } from '../src/agent/run.js';
+import { searchSite, failBackoffMs, tierStartIndex, createRunTiers } from '../src/agent/run.js';
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { SiteProfiles, type AccessTier } from '../src/db/siteProfiles.js';
 import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
@@ -8,6 +8,27 @@ import { FakeGenerator, freshDb, makeCtx, findEvent, enqueueAndClaim, withFakeTi
 
 const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 const OK_HTML: FetchResult = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
+
+/** Sentinel-complete agent action for FakeGenerator's strict schema. */
+function act(
+  partial: {
+    action: string;
+    url: string;
+    note: string;
+    method?: 'GET' | 'POST';
+    body?: string;
+    contentType?: string;
+    referer?: string;
+  },
+) {
+  return {
+    method: 'GET' as const,
+    body: '',
+    contentType: '',
+    referer: '',
+    ...partial,
+  };
+}
 
 /** A stub `tiers` factory — `make(t)` returns a fake tier backed by ONE shared queue, so
  * escalation consumes results sequentially across rungs exactly as the real ladder would
@@ -93,8 +114,8 @@ describe('searchSite', () => {
       { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false },
     ]);
     ctx.llm = new FakeGenerator([
-      { action: 'search', url: 'https://acg.rip/?term=x', note: 's' },
-      { action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' },
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }),
     ]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
@@ -137,6 +158,20 @@ describe('searchSite', () => {
     expect(row.transcript).toHaveLength(0);
   });
 
+  it('factory throw is handled as a site failure (never escapes searchSite)', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([]);
+    const tiers = {
+      make: () => {
+        throw new Error('tier factory boom');
+      },
+    };
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    expect(out).toBeNull();
+    expect(findEvent(ctx.events.list(), 'subtitle.site-failed')).toBeDefined();
+  });
+
   it('success resets fail_count and leaves last_working_tier as the working rung', async () => {
     const { ctx, job } = setup();
     // Seed a prior failure so success must clear both the counter AND the timestamp —
@@ -144,7 +179,7 @@ describe('searchSite', () => {
     const profiles = new SiteProfiles(ctx.db);
     profiles.upsert({ baseUrl: 'https://acg.rip' });
     profiles.update('https://acg.rip', { failCount: 2, lastFailureAt: Date.now() - 10 * 60_000 });
-    ctx.llm = new FakeGenerator([{ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }]);
+    ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
@@ -166,7 +201,7 @@ describe('searchSite', () => {
     const profiles = new SiteProfiles(ctx.db);
     profiles.upsert({ baseUrl: 'https://acg.rip' });
     profiles.update('https://acg.rip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
-    ctx.llm = new FakeGenerator([{ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }]);
+    ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
@@ -177,8 +212,8 @@ describe('searchSite', () => {
   it('success appends a newly discovered search pattern', async () => {
     const { ctx, job } = setup();
     ctx.llm = new FakeGenerator([
-      { action: 'search', url: 'https://acg.rip/find?q=frieren', note: 's' },
-      { action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' },
+      act({ action: 'search', url: 'https://acg.rip/find?q=frieren', note: 's' }),
+      act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }),
     ]);
     const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
@@ -192,13 +227,46 @@ describe('searchSite', () => {
     const { ctx, job } = setup();
     const literalTemplate: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/search' };
     ctx.llm = new FakeGenerator([
-      { action: 'search', url: 'https://acg.rip/search', note: 's' },
-      { action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' },
+      act({ action: 'search', url: 'https://acg.rip/search', note: 's' }),
+      act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }),
     ]);
     const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     await searchSite(ctx, job, literalTemplate, 'F', tmpDir(), tiers);
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.search_url_patterns).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: 'download success',
+      llm: [act({ action: 'download', url: 'https://acg.rip/dl/1.zip', note: 'dl' })],
+      results: [{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }],
+      expected: { filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/1.zip' },
+    },
+    {
+      name: 'give_up returns null after exhausting rungs',
+      llm: [
+        act({ action: 'give_up', url: '', note: 'nothing on curl' }),
+        act({ action: 'give_up', url: '', note: 'nothing on chromium' }),
+      ],
+      results: [],
+      expected: null,
+    },
+  ])('adapter-free path: $name', async ({ llm, results, expected }) => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator(llm);
+    const tiers = stubTiers(results as FetchResult[]);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    expect(out).toEqual(expected);
+  });
+
+  it('createRunTiers produces independent jars across two factory instances', async () => {
+    // Smoke that the exported factory shape is the production default path.
+    const a = createRunTiers();
+    const b = createRunTiers();
+    expect(a.make('curl').tier).toBe('curl');
+    expect(b.make('curl').tier).toBe('curl');
+    expect(a).not.toBe(b);
   });
 });

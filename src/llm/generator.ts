@@ -15,9 +15,9 @@ export interface GenerateOpts<T> {
   system: string;
   prompt: string;
   /**
-   * Opt into provider-aware prompt caching for multi-step loops (site-search / adapter pick)
-   * where the system prefix is stable and the user half grows. Wiring differs by provider
-   * (see `planPromptCache`) — not "Anthropic-only, ignore elsewhere".
+   * Opt into provider-aware prompt caching for multi-step loops (site-search) where the
+   * system prefix is stable and the user half grows. Wiring differs by provider (see
+   * `planPromptCache`) — not "Anthropic-only, ignore elsewhere".
    */
   promptCache?: boolean;
 }

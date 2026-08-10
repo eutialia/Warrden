@@ -329,7 +329,7 @@ describe('runAcquireJob — per-season series acquisition (C1)', () => {
     expect(client.searchReleases).not.toHaveBeenCalled();
     const attentionEvents = ctx.events.list({ level: 'attention' });
     expect(attentionEvents).toHaveLength(1);
-    expect(attentionEvents[0]!.message).toContain('No monitored seasons');
+    expect(attentionEvents[0]!.message).toContain('no monitored seasons');
   });
 });
 

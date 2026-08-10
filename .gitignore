@@ -11,3 +11,4 @@ web/dist/
 ds-bundle/
 web/ds-dist/
 web/ds-tokens/
+.claude/
