@@ -262,11 +262,15 @@ export default function Attention() {
                       {bundleImport.reasoning && (
                         <p className="text-xs leading-relaxed text-muted-foreground">{bundleImport.reasoning}</p>
                       )}
+                      {/* The label has to track the state the chevron already shows —
+                          a button that always reads "Show" is wrong half the time, and
+                          a screen reader only gets the label. */}
                       <CollapsibleTrigger
                         render={
-                          <Button type="button" variant="ghost" size="sm" className="-ml-2 h-8 px-2">
+                          <Button type="button" variant="ghost" size="sm" className="group/files -ml-2 h-8 px-2">
                             <ChevronRight className="size-4 transition-transform data-panel-open:rotate-90" />
-                            Show file list
+                            <span className="group-data-panel-open/files:hidden">Show file list</span>
+                            <span className="hidden group-data-panel-open/files:inline">Hide file list</span>
                           </Button>
                         }
                       />

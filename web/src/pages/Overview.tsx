@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -76,9 +76,9 @@ function verdictOf(data: OverviewData): Verdict {
 }
 
 export default function Overview() {
-  const navigate = useNavigate();
   const { data, error, loading, refetch } = useOverview();
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobsLoaded, setJobsLoaded] = useState(false);
 
   const beginFetch = useFetchGeneration();
   const loadJobs = useCallback(() => {
@@ -90,6 +90,9 @@ export default function Overview() {
       .catch(() => {
         // The tiles above already surface load failures; a silent recent-jobs list
         // is better than two error banners for one outage.
+      })
+      .finally(() => {
+        if (!isStale()) setJobsLoaded(true);
       });
   }, [beginFetch]);
   useSseRefetch(loadJobs);
@@ -102,7 +105,10 @@ export default function Overview() {
   // Only worth saying once a week's worth of jobs have actually finished — "100%
   // clean" out of nothing finished is a lie of omission.
   const weekTotal = (data?.week.done ?? 0) + (data?.week.failed ?? 0);
-  const cleanRate = weekTotal > 0 ? `${Math.round(((data!.week.done / weekTotal) * 100 + Number.EPSILON) * 10) / 10}% clean over 7 days` : undefined;
+  // Floored, never rounded up: 1999 of 2000 must not read as "100% clean" beside a
+  // failure count that says otherwise.
+  const cleanRate =
+    weekTotal > 0 ? `${Math.floor(((data?.week.done ?? 0) / weekTotal) * 1000) / 10}% clean over 7 days` : undefined;
 
   return (
     <div className="space-y-6">
@@ -116,13 +122,16 @@ export default function Overview() {
           serif that carries every title. The tone lives in the icon badge rather
           than an accent rail — the eye goes to the icon anyway, so a rail would
           only repeat it. */}
-      <div className="flex flex-wrap items-center gap-4">
-        {loading || !verdict ? (
+      <div className="flex flex-wrap items-center gap-4 empty:hidden">
+        {/* Skeletons only while a request is genuinely in flight. If it failed there is
+            no verdict to give and the notice above already says why — leaving the
+            skeleton up would promise an answer that is never coming. */}
+        {loading ? (
           <div className="space-y-2">
             <Skeleton className="h-6 w-64" />
             <Skeleton className="h-4 w-80" />
           </div>
-        ) : (
+        ) : !verdict ? null : (
           <>
             <span className={cn('flex size-10 shrink-0 items-center justify-center rounded-full border', TONE_SOFT[verdict.tone])}>
               {verdict.tone === 'success' ? (
@@ -151,7 +160,7 @@ export default function Overview() {
         <StatTile
           label="Needs review"
           value={data?.attention.open ?? 0}
-          hint={data?.attention.open ? 'Waiting on a decision' : 'Queue is clear'}
+          hint={data ? (data.attention.open ? 'Waiting on a decision' : 'Queue is clear') : undefined}
           tone={data && data.attention.open > 0 ? 'warning' : 'neutral'}
           to="/attention"
           loading={loading}
@@ -165,14 +174,19 @@ export default function Overview() {
           loading={loading}
         />
         <StatTile
-          label="Failed today"
+          label="Failed, 24h"
           value={data?.jobs.failedRecent ?? 0}
           hint={cleanRate ?? (data ? `${data.jobs.doneRecent} finished cleanly` : undefined)}
           tone={data && data.jobs.failedRecent > 0 ? 'danger' : 'neutral'}
           to="/activity"
           loading={loading}
         />
-        <StatTile label="Files delivered" value={placed} hint="Subtitles and audio, last 7 days" loading={loading} />
+        <StatTile
+          label="Files delivered"
+          value={placed}
+          hint={data ? 'Subtitles and audio, last 7 days' : undefined}
+          loading={loading}
+        />
       </StatBand>
 
       {/* The queue reads as the page's subject, so it takes the wide column and the
@@ -189,7 +203,15 @@ export default function Overview() {
             </CardAction>
           </CardHeader>
           <CardContent>
-            {jobs.length === 0 ? (
+            {/* "Nothing yet" is a claim about the queue, so it waits until a request has
+                actually answered — before that the truth is simply unknown. */}
+            {!jobsLoaded ? (
+              <div className="space-y-3 border-t py-4">
+                {Array.from({ length: 4 }, (_, i) => (
+                  <Skeleton key={i} className="h-9 w-full" />
+                ))}
+              </div>
+            ) : jobs.length === 0 ? (
               <p className="border-t py-6 text-sm text-muted-foreground">
                 Nothing yet. Add a series or movie in Sonarr/Radarr and Warrden will pick it up.
               </p>
@@ -205,9 +227,13 @@ export default function Overview() {
                 </TableHeader>
                 <TableBody>
                   {jobs.map((job) => (
-                    <TableRow key={job.id} className="cursor-pointer" onClick={() => navigate(`/jobs/${job.id}`)}>
+                    // The whole row is the hit area, but the link is a real link: a row
+                    // with an onClick can't be tabbed to, opened in a new tab, or copied.
+                    <TableRow key={job.id} className="relative cursor-pointer">
                       <TableCell className="max-w-0">
-                        <div className="truncate font-medium">{jobTitle(job)}</div>
+                        <Link to={`/jobs/${job.id}`} className="truncate font-medium after:absolute after:inset-0">
+                          {jobTitle(job)}
+                        </Link>
                         <div className="truncate text-xs text-muted-foreground">
                           {job.arr_instance} · {targetKindLabel(job.target_kind)}
                         </div>
@@ -219,7 +245,7 @@ export default function Overview() {
                         <StatusBadge status={job.status} />
                       </TableCell>
                       <TableCell className="text-right font-mono text-xs text-muted-foreground tabular-nums">
-                        {formatElapsed(job.updated_at)}
+                        {formatElapsed(job.created_at)}
                       </TableCell>
                     </TableRow>
                   ))}

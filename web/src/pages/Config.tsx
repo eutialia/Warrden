@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Plus, Trash2 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { toast } from 'sonner';
 import {
   ApiError,
+  apiErrorMessage,
   fetchConfig,
   fetchStorageHealth,
   saveConfig,
@@ -18,6 +20,7 @@ import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
+import { THEME_OPTIONS } from '@/components/ThemeToggle';
 import { TagInput } from '@/components/TagInput';
 import { StatusDot, ToneBadge } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
@@ -54,12 +57,6 @@ const STANDARD_MOUNT_ROWS = [
   { id: 'downloads', label: 'Downloads', path: '/downloads', blurb: 'Torrent download / completed root' },
 ] as const;
 
-const THEME_OPTIONS = [
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
-  { value: 'system', label: 'Follow system' },
-] as const;
-
 const SECTIONS = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'connections', label: 'Connections' },
@@ -92,6 +89,30 @@ function numericFrom(c: Config): NumericDraft {
   };
 }
 
+/**
+ * Drops call-site routes whose model was never filled in, and blank fallbacks inside the
+ * ones that stay. "Route this call-site" seeds an empty model, and the schema requires a
+ * non-empty one — without this, one unfinished row 400s the entire page's save, taking
+ * every unrelated edit with it. Same reasoning as the blank-arr filter below it.
+ */
+function withoutBlankCallsites(profiles: Config['llm']['profiles']): Config['llm']['profiles'] {
+  return Object.fromEntries(
+    Object.entries(profiles).map(([profile, callsites]) => [
+      profile,
+      Object.fromEntries(
+        Object.entries(callsites)
+          .filter(([, entry]) => entry.model.trim() !== '')
+          .map(([callsite, entry]) => [
+            callsite,
+            entry.fallback && entry.fallback.model.trim() === ''
+              ? { provider: entry.provider, model: entry.model }
+              : entry,
+          ]),
+      ),
+    ]),
+  );
+}
+
 function parseNumber(text: string): number | undefined {
   const trimmed = text.trim();
   const value = Number(trimmed);
@@ -112,13 +133,22 @@ export default function ConfigPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const [activeProfileTab, setActiveProfileTab] = useState('dev');
   const { theme, setTheme } = useTheme();
 
   const loadStorage = useCallback(() => {
     fetchStorageHealth()
-      .then((res) => setStorageChecks(res.checks))
-      .catch(() => setStorageChecks([]));
+      .then((res) => {
+        setStorageChecks(res.checks);
+        setStorageError(null);
+      })
+      .catch((err: unknown) => {
+        // A failed probe is not the same as four missing mounts. Say which it was, or
+        // "Re-check now" looks like it does nothing.
+        setStorageChecks([]);
+        setStorageError(apiErrorMessage(err, 'Could not check the mounts'));
+      });
   }, []);
 
   const loadFormState = useCallback((c: Config) => {
@@ -145,6 +175,15 @@ export default function ConfigPage() {
   }, [loadFormState, loadStorage]);
 
   useEffect(load, [load]);
+
+  // A router navigation doesn't act on the fragment the way a real page load would, and
+  // the section it names doesn't exist until the config resolves — so "Check mounts" on
+  // the home screen would otherwise just drop you at the top of a long page.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (!hash || draft === null) return;
+    document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' });
+  }, [hash, draft]);
 
   // One dirty flag for the whole page. The API saves the config atomically anyway,
   // so per-section saves were both more clicks and a lie about the granularity.
@@ -206,7 +245,7 @@ export default function ConfigPage() {
         maxSizeMB: parsed.maxSizeMB!,
       },
       browser: { stepBudget: parsed.stepBudget!, siteCooldownSeconds: parsed.siteCooldownSeconds! },
-      llm: { ...draft.llm, keys },
+      llm: { ...draft.llm, keys, profiles: withoutBlankCallsites(draft.llm.profiles) },
       reconcileIntervalMinutes: parsed.reconcileIntervalMinutes!,
     };
 
@@ -322,7 +361,7 @@ export default function ConfigPage() {
 
               <div className="space-y-3">
                 {draft.arrs.map((arr, i) => (
-                  <div key={i} className="grid gap-3 border-t pt-3 md:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
+                  <div key={i} className="grid gap-3 border-t pt-3 lg:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
                     <div className="space-y-1.5">
                       <Label className="text-xs">Name</Label>
                       <Input
@@ -410,20 +449,23 @@ export default function ConfigPage() {
                 Warrden expects exactly four bind mounts. Set them when you create the container — this page only checks
                 that they are reachable.
               </CardDescription>
-              <CardAction>
-                <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
-                  {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
-                </ToneBadge>
-              </CardAction>
+              {storageChecks.length > 0 && (
+                <CardAction>
+                  <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
+                    {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
+                  </ToneBadge>
+                </CardAction>
+              )}
             </CardHeader>
             <CardContent className="space-y-3">
+              {storageError && <StatusNotice message={storageError} onRetry={loadStorage} />}
               <div className="space-y-1">
                 {STANDARD_MOUNT_ROWS.map((row) => {
                   const check = storageChecks.find((c) => c.id === row.id);
-                  const status = check?.status ?? 'missing';
+                  const status = check?.status;
                   return (
                     <div key={row.id} className="flex flex-wrap items-center gap-3 border-t py-3">
-                      <StatusDot tone={storageStatusTone(status)} />
+                      <StatusDot tone={status ? storageStatusTone(status) : 'neutral'} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-baseline gap-2">
                           <span className="text-sm font-medium">{row.label}</span>
@@ -435,8 +477,13 @@ export default function ConfigPage() {
                         {check?.usage && (
                           <span className="font-mono text-xs text-muted-foreground">{formatUsage(check.usage)}</span>
                         )}
-                        <span className={cn('text-xs font-medium', TONE_TEXT[storageStatusTone(status)])}>
-                          {storageStatusLabel(status)}
+                        <span
+                          className={cn(
+                            'text-xs font-medium',
+                            status ? TONE_TEXT[storageStatusTone(status)] : 'text-muted-foreground',
+                          )}
+                        >
+                          {status ? storageStatusLabel(status) : 'Checking…'}
                         </span>
                       </div>
                     </div>

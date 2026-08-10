@@ -171,9 +171,12 @@ export default function JobDetail() {
   const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
 
   return (
-    <SectionStack>
+    // The back link sits above the stack, not inside it: as a section it would put a
+    // full-width rule and 32px of space between itself and the job it belongs to.
+    <div className="space-y-4">
       <BackLink />
 
+      <SectionStack>
       <Card>
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center gap-2 text-xl">
@@ -284,7 +287,8 @@ export default function JobDetail() {
           </CardContent>
         </Card>
       )}
-    </SectionStack>
+      </SectionStack>
+    </div>
   );
 }
 

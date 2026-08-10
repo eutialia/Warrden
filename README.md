@@ -285,9 +285,10 @@ is what makes a screen stop matching the rest.
 
 1. **Colour means state, never decoration.** Warm greige is the whole surface palette. Hue
    appears only for success / warning / info / destructive, and only through `ToneBadge`,
-   `StatusBadge`, `StatusDot` or `PipelineBadge`. Categories — which pipeline a job belongs
-   to, what kind of object a row is — get an icon and a neutral chip. A screen that colours
-   categories reads as a rainbow and destroys the signal.
+   `StatusBadge`, `StatusDot` or the `TONE_*` maps in `web/src/lib/tone.ts` that back them.
+   Categories — which pipeline a job belongs to, what kind of object a row is — get an icon
+   and a neutral chip, which is why `PipelineBadge` has no colour of its own. A screen that
+   colours categories reads as a rainbow and destroys the signal.
 2. **Cards have no fill, no shadow, no corner.** Separation comes from a hairline rule and
    whitespace, never a box. If a surface genuinely needs to lift off the page it is a
    popover, not a card.
@@ -295,7 +296,8 @@ is what makes a screen stop matching the rest.
    machine strings.** Titles sit at weight 400 — the serif carries the emphasis. Never mono
    for prose, never sans for a large number or a release name.
 
-Both themes are complete, so never hand-write a `dark:` colour override. The full contract,
+Both themes are complete, so no page should ever hand-write a `dark:` colour override
+(the vendored shadcn primitives carry their own, which is theirs to keep). The full contract,
 including the class vocabulary, lives in
 [`.design-sync/conventions.md`](.design-sync/conventions.md), which also ships as the
 design system's README.

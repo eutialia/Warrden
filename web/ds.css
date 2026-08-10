@@ -2,7 +2,7 @@
  * Compiled-utility entry for the exported design system (see `.design-sync/`).
  *
  * Deliberately imports `theme.css` and NOT `tokens.css`: the token layer ships as
- * its own file (`ds-dist/tokens.css` → `tokens/tokens.css` in the export) so that
+ * its own file (`ds-tokens/tokens.css` → `tokens/tokens.css` in the export) so that
  * anything reading this design system's tokens gets our names alone, rather than
  * having to pick them out of a compiled stylesheet where Tailwind's internals
  * (`--tw-*`) and its default theme sit in the same `:root` block.
@@ -28,7 +28,7 @@
  */
 @source inline("{bg,text,border}-{success,warning,info,destructive,brand}{,-muted,-foreground,-border}");
 @source inline("bg-{background,card,popover,muted,accent,sidebar,primary,secondary}");
-@source inline("text-{foreground,muted-foreground,card-foreground,primary-foreground,secondary-foreground}");
+@source inline("text-{foreground,muted-foreground,card-foreground,primary,primary-foreground,secondary-foreground}");
 @source inline("border-{border,input}");
 @source inline("ring-ring");
 @source inline("font-{sans,serif,mono}");

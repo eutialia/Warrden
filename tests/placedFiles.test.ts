@@ -27,7 +27,7 @@ describe('PlacedFiles', () => {
     expect(rows[0]).toMatchObject({ source_path: '/dl/t2/ep05.sc.ass', job_id: 2 });
   });
 
-  it('upsert refreshes video_path, data, and created_at on re-placement', () => {
+  it('upsert refreshes video_path and data on re-placement, but keeps the original created_at', () => {
     withFakeTime(() => {
       const files = new PlacedFiles(freshDb());
       const base = baseInput({ data: { lang: 'zh-Hans' } });
@@ -45,7 +45,8 @@ describe('PlacedFiles', () => {
       expect(rows[0]).toMatchObject({
         video_path: '/lib/Show/S01/Show - S01E05 (renamed).mkv',
         data: { lang: 'zh-Hant' },
-        created_at: 2_000,
+        // Still the first placement: re-verifying a file is not delivering it again.
+        created_at: 1_000,
       });
     });
   });

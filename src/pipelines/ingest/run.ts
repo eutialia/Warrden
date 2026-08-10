@@ -490,9 +490,9 @@ async function sweepSidecars(
   });
 }
 
-/** Re-upserts an already-placed sidecar's row as-is (bumping `job_id`/`created_at` to this
- * run) without touching the filesystem or re-running any matching — the cheap path for a
- * sidecar this job has already placed correctly in a previous run. */
+/** Re-upserts an already-placed sidecar's row as-is (bumping `job_id` to this run, never
+ * `created_at`) without touching the filesystem or re-running any matching — the cheap path
+ * for a sidecar this job has already placed correctly in a previous run. */
 function refreshPlacedRow(placedFiles: PlacedFiles, job: JobRow, row: PlacedFileRow): void {
   placedFiles.upsert({
     arrInstance: row.arr_instance,

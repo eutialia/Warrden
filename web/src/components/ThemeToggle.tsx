@@ -8,10 +8,12 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
-const OPTIONS = [
+/** The three theme choices, in one place: the header toggle and the Appearance section
+ * of Settings both offer them, and two lists drifted apart the moment they existed. */
+export const THEME_OPTIONS = [
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'dark', label: 'Dark', icon: Moon },
-  { value: 'system', label: 'System', icon: Monitor },
+  { value: 'system', label: 'Follow system', icon: Monitor },
 ] as const;
 
 export function ThemeToggle() {
@@ -28,7 +30,7 @@ export function ThemeToggle() {
         }
       />
       <DropdownMenuContent align="end">
-        {OPTIONS.map((option) => (
+        {THEME_OPTIONS.map((option) => (
           <DropdownMenuItem
             key={option.value}
             onClick={() => setTheme(option.value)}

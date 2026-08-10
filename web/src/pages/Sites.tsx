@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Globe, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -83,6 +83,12 @@ export default function Sites() {
   const [notesFor, setNotesFor] = useState<SiteProfileRow | null>(null);
   const [notesDraft, setNotesDraft] = useState('');
 
+  // Whether the two tag fields hold edits nobody has saved yet. Held in a ref because
+  // `refetch` runs on a 45-second heartbeat and on every server event: re-seeding the
+  // fields from the server mid-sentence would wipe what someone is typing, and take the
+  // save bar with it.
+  const prefsDirtyRef = useRef(false);
+
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
     const isStale = beginFetch();
@@ -90,8 +96,10 @@ export default function Sites() {
       .then(([c, p]) => {
         if (isStale()) return;
         setConfig(c);
-        setLanguages(c.subtitle.languages);
-        setGroups(c.subtitle.preferredGroups ?? []);
+        if (!prefsDirtyRef.current) {
+          setLanguages(c.subtitle.languages);
+          setGroups(c.subtitle.preferredGroups ?? []);
+        }
         setProfiles(p.profiles);
         setError(null);
       })
@@ -109,12 +117,19 @@ export default function Sites() {
   useEffect(refetch, [refetch]);
 
   /** Writes a whole config back. Secrets round-trip as the redaction sentinel the
-   * API hands us, so re-sending the fetched object never rotates a stored key. */
+   * API hands us, so re-sending the fetched object never rotates a stored key.
+   *
+   * The write is built on a fresh read rather than on this page's copy, which can be up
+   * to a heartbeat old: `PUT /api/config` replaces the whole document, so a stale copy
+   * would quietly undo anything saved from Settings in the meantime. Mounts and path
+   * mappings are taken from that fresh read too — they are fixed outside the UI, and no
+   * page may rewrite them (the same guard Settings states in its own save). */
   const persist = useCallback(
     async (next: Config, successMsg: string): Promise<boolean> => {
       setSaving(true);
       try {
-        await saveConfig(next);
+        const current = await fetchConfig();
+        await saveConfig({ ...next, ingest: current.ingest, pathMappings: current.pathMappings });
         toast.success(successMsg);
         refetch();
         return true;
@@ -188,6 +203,7 @@ export default function Sites() {
     config !== null &&
     (JSON.stringify(languages) !== JSON.stringify(config.subtitle.languages) ||
       JSON.stringify(groups) !== JSON.stringify(config.subtitle.preferredGroups ?? []));
+  prefsDirtyRef.current = prefsDirty;
 
   return (
     <div className="space-y-6">
@@ -200,7 +216,7 @@ export default function Sites() {
       {loading && !config && <Skeleton className="h-64 w-full" />}
 
       {config && (
-        <SectionStack>
+        <>
           <StatBand>
             <StatTile label="Languages wanted" value={languages.length} hint="Before a video counts as covered" />
             <StatTile label="Preferred groups" value={groups.length} hint="Ranking boost only" />
@@ -213,6 +229,7 @@ export default function Sites() {
             />
           </StatBand>
 
+          <SectionStack className="[&>*:first-child]:border-t-0 [&>*:first-child]:pt-0">
           <Card>
             <CardHeader>
               <CardTitle>What counts as covered</CardTitle>
@@ -353,7 +370,8 @@ export default function Sites() {
               })}
             </CardContent>
           </Card>
-        </SectionStack>
+          </SectionStack>
+        </>
       )}
 
       {/* Add / edit site */}

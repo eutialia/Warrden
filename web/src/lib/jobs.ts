@@ -23,8 +23,6 @@ export interface JobDay {
   failed: number;
 }
 
-const DAY_MS = 86_400_000;
-
 /**
  * Splits a newest-first job list into calendar days. History reads as a diary —
  * "today, then yesterday" — which a single unbroken table of timestamps does not
@@ -33,6 +31,10 @@ const DAY_MS = 86_400_000;
 export function groupJobsByDay(jobs: Job[]): JobDay[] {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  // Stepping the date, not subtracting 24 hours: on the two days a year a local day is
+  // 23 or 25 hours long, arithmetic on milliseconds lands on no day at all.
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
 
   const days = new Map<number, Job[]>();
   for (const job of jobs) {
@@ -51,7 +53,7 @@ export function groupJobsByDay(jobs: Job[]): JobDay[] {
       label:
         key === today.getTime()
           ? 'Today'
-          : key === today.getTime() - DAY_MS
+          : key === yesterday.getTime()
             ? 'Yesterday'
             : new Date(key).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }),
       jobs: dayJobs,
@@ -60,9 +62,14 @@ export function groupJobsByDay(jobs: Job[]): JobDay[] {
 }
 
 /** How long a job took (or has been going). `null` when the timestamps can't say
- * anything useful — a job that was created and never updated. */
+ * anything useful — a job that was created and never updated.
+ *
+ * A job still in flight is measured against now, not against `updated_at`: the queue
+ * stamps that once when it claims the job and never again, so a run of any length would
+ * otherwise report the time it spent waiting to start. */
 export function jobDuration(job: Job): string | null {
-  const ms = job.updated_at - job.created_at;
+  const live = job.status === 'running' || job.status === 'pending';
+  const ms = (live ? Date.now() : job.updated_at) - job.created_at;
   if (ms < 1000) return null;
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;

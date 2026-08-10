@@ -13,9 +13,13 @@ export function StatBand({ children }: { children: ReactNode }) {
   return (
     <div
       className={cn(
+        // Two up on a phone, four up from `sm`. The wide rule has to out-specify the
+        // narrow one rather than merely follow it: Tailwind sorts arbitrary variants
+        // by selector text, so `first-child` is emitted before `nth-child` whatever
+        // order they are written in, and an equal-specificity reset would always lose.
         'grid grid-cols-2 border-y sm:grid-cols-4',
         '[&>*]:border-l [&>*]:pl-5 [&>*:nth-child(odd)]:border-l-0 [&>*:nth-child(odd)]:pl-0',
-        'sm:[&>*:nth-child(odd)]:border-l sm:[&>*:nth-child(odd)]:pl-5 sm:[&>*:first-child]:border-l-0 sm:[&>*:first-child]:pl-0'
+        'sm:[&>*:nth-child(odd):not(:first-child)]:border-l sm:[&>*:nth-child(odd):not(:first-child)]:pl-5'
       )}
     >
       {children}

@@ -10,20 +10,20 @@
  *
  * Every custom property below is a real design decision. Nothing else belongs here.
  *
- * The palette is warm: every neutral sits around hue 68-78 at very low chroma,
+ * The palette is warm: every neutral sits between hue 60 and 80 at very low chroma,
  * bone in light and charcoal in dark, never a blue-grey. The brand is a warm
  * taupe deliberately close to neutral, so no brand hue competes with the status
  * tones. Colour still means state and only state.
  */
 
 /*
- * The angle of the sweep across a loading skeleton — the one animation property
- * the components read. Registering it lets the browser interpolate the angle
- * instead of swapping it; the value itself is set in `:root` below, where a
- * reader (and anything that reads this file for tokens) will look for it.
+ * The angle of the sweep in shadcn's `shimmer` text utility — the one animation
+ * property the component CSS exposes. Registering it lets the browser interpolate the
+ * angle instead of swapping it; the value is set in `:root` below, where both a reader
+ * and anything extracting tokens from this file will look for it.
  *
- * These values match the declaration the component CSS already ships, so this
- * repeats it rather than changing it.
+ * These values match the declaration the component CSS already ships, so this repeats
+ * it rather than changing it.
  */
 @property --shimmer-angle {
     syntax: "<angle>";

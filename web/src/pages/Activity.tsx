@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { ListChecks, Search } from 'lucide-react';
 import { apiErrorMessage, fetchJobs, type Job, type JobStatus } from '@/api';
 import { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from '@/components/StatusBadge';
@@ -50,7 +50,6 @@ export default function Activity() {
   const [query, setQuery] = useState('');
   const [pipeline, setPipeline] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
-  const navigate = useNavigate();
 
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
@@ -194,7 +193,9 @@ export default function Activity() {
                     </TableHeader>
                     <TableBody>
                       {day.jobs.map((job) => (
-                        <TableRow key={job.id} className="cursor-pointer" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        // The row is the hit area; the title is the actual link, so the
+                        // job can be tabbed to, opened in a new tab, or copied.
+                        <TableRow key={job.id} className="relative cursor-pointer">
                           <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
                             <Tooltip>
                               <TooltipTrigger render={<span>{formatTimeOfDay(job.updated_at)}</span>} />
@@ -202,7 +203,9 @@ export default function Activity() {
                             </Tooltip>
                           </TableCell>
                           <TableCell>
-                            <div className="font-medium">{jobTitle(job)}</div>
+                            <Link to={`/jobs/${job.id}`} className="font-medium after:absolute after:inset-0">
+                              {jobTitle(job)}
+                            </Link>
                             <div className="text-xs text-muted-foreground">
                               {job.arr_instance} · {targetKindLabel(job.target_kind)}
                             </div>

@@ -20,7 +20,7 @@ import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '
 import { SubtitleRuns } from '../db/subtitleRuns.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
-import { probeStorage } from './storageHealth.js';
+import { cachedStorage, probeStorage } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
@@ -648,7 +648,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // Everything the dashboard home needs to answer "is Warrden healthy right now?"
     // in one request: queue depth, the review backlog, recent outcomes, and the mount
     // probe that would otherwise be a second round-trip.
-    app.get('/api/overview', (c) => c.json({ ...overview.counts(), storage: probeStorage() }));
+    app.get('/api/overview', (c) => c.json({ ...overview.counts(), storage: cachedStorage() }));
   }
 
   if (ctx.config && ctx.dataDir) {

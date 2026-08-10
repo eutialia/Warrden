@@ -55,6 +55,11 @@ function parseRow(row: PlacedFileRowRaw): PlacedFileRow {
  * unique `placed_path`. Re-placing the same path (e.g. a corrected re-match) refreshes the
  * row in place rather than accumulating duplicates, since `placed_path` is where the
  * ground truth about "what's on disk now" lives.
+ *
+ * `created_at` is when the file was first placed and never moves again. A sweep that
+ * re-verifies an already-placed sidecar rewrites the row, so a `created_at` that moved
+ * with it would make "delivered in the last 7 days" count the whole library every time a
+ * series gets one new episode.
  */
 export class PlacedFiles {
   constructor(private readonly db: Database.Database) {}
@@ -69,8 +74,7 @@ export class PlacedFiles {
            video_path = excluded.video_path,
            source_path = excluded.source_path,
            job_id = excluded.job_id,
-           data = excluded.data,
-           created_at = excluded.created_at`,
+           data = excluded.data`,
       )
       .run(
         o.arrInstance,

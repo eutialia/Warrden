@@ -22,7 +22,9 @@ export function formatUsage({ totalBytes, usedBytes }: { totalBytes: number; use
 }
 
 /** How long ago something happened, with no "ago" — for places that supply their own
- * wording ("held 11m", "oldest 4m"). Same buckets as `formatRelativeTime`. */
+ * wording ("held 11m", "oldest 4m"). Same minute/hour/day thresholds as
+ * `formatRelativeTime`, but with no "just now" and no date past a week: a duration
+ * always reads as a duration. */
 export function formatElapsed(ts: number): string {
   const seconds = Math.round((Date.now() - ts) / 1000);
   if (seconds < 60) return `${Math.max(seconds, 1)}s`;

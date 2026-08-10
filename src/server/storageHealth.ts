@@ -32,6 +32,24 @@ export interface StorageCheck {
  * and we also require a real mount point (device id differs from parent) so an empty
  * leftover directory never reports as OK.
  */
+/** How long a probe stays good enough for a page that polls. */
+const CACHE_MS = 30_000;
+let cached: { at: number; checks: StorageCheck[] } | null = null;
+
+/**
+ * The probe, but safe to call from a route the dashboard polls. Every check here is a
+ * blocking syscall against a network mount, and Node has one thread: a hung NFS share
+ * would otherwise stall webhooks and the job queue behind it, once per poll per open tab.
+ * The explicit "Re-check now" button calls `probeStorage` instead and always sees fresh
+ * results.
+ */
+export function cachedStorage(now = Date.now()): StorageCheck[] {
+  if (cached && now - cached.at < CACHE_MS) return cached.checks;
+  const checks = probeStorage();
+  cached = { at: now, checks };
+  return checks;
+}
+
 export function probeStorage(): StorageCheck[] {
   return standardMounts().map((mount) => {
     const access = probeAccess(mount.path, mount.label, /* requireMountPoint */ true);
@@ -49,16 +67,17 @@ export function probeStorage(): StorageCheck[] {
 }
 
 /**
- * How much of the volume behind `p` is in use. Uses the free space available to an
- * unprivileged process, which is what actually limits Warrden — on most filesystems
- * a slice is reserved for root, and counting it would promise room that isn't there.
+ * How much of the volume behind `p` is in use, counted the way `df` counts it: used is
+ * total minus all free blocks, including the slice most filesystems reserve for root.
+ * Charging that reserve to "used" would report a brand-new 18 TB volume as nearly a
+ * terabyte full, which is not what anyone comparing this against `df` expects.
  */
 function diskUsage(p: string): StorageCheck['usage'] {
   try {
     const fs = statfsSync(p);
     const total = fs.blocks * fs.bsize;
     if (total <= 0) return undefined;
-    return { totalBytes: total, usedBytes: total - fs.bavail * fs.bsize };
+    return { totalBytes: total, usedBytes: (fs.blocks - fs.bfree) * fs.bsize };
   } catch {
     // Network filesystems can refuse statfs while still being readable. The mount is
     // fine; we just have nothing to say about its size.

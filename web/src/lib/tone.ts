@@ -6,7 +6,7 @@
  * pipeline a job belongs to, what kind of object a row is) are carried by icons
  * and neutral chips instead, so a busy table doesn't read as a rainbow.
  *
- * Every tone resolves to theme tokens defined in `index.css`, so both themes are
+ * Every tone resolves to theme tokens defined in `tokens.css`, so both themes are
  * covered by construction — no page should ever write `bg-emerald-100 dark:…`.
  */
 export type Tone = 'neutral' | 'brand' | 'success' | 'warning' | 'info' | 'danger';
