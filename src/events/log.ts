@@ -81,6 +81,21 @@ export class EventLog {
     return parsed;
   }
 
+  /**
+   * Deletes events older than `retentionDays`, returning how many went. `0` keeps
+   * everything — the table is append-only and nothing else prunes it, so without this
+   * it grows for the life of the install and the dashboard's "last 24 hours" counters
+   * scan all of it.
+   *
+   * Attention items are a separate table and are never touched here: they are decisions
+   * waiting on a human, not history.
+   */
+  prune(retentionDays: number, now = Date.now()): number {
+    if (retentionDays <= 0) return 0;
+    const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+    return this.db.prepare('DELETE FROM events WHERE ts < ?').run(cutoff).changes;
+  }
+
   list(opts?: { limit?: number; level?: string }): EventRow[] {
     let sql = 'SELECT * FROM events';
     const params: unknown[] = [];

@@ -6,7 +6,7 @@ import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { SubtitleSiteConfig } from '../src/config/schema.js';
 import { FakeGenerator, freshDb, makeCtx, findEvent, enqueueAndClaim, withFakeTime, tmpDir } from './helpers.js';
 
-const SITE: SubtitleSiteConfig = { name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
+const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 const OK_HTML: FetchResult = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
 
 /** A stub `tiers` factory — `make(t)` returns a fake tier backed by ONE shared queue, so
@@ -100,7 +100,7 @@ describe('searchSite', () => {
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
     expect(out).toEqual({ filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip' });
     expect(tiers.made).toEqual(['curl', 'chromium']);
-    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.last_working_tier).toBe('chromium');
     expect(profile.fail_count).toBe(0);
   });
@@ -108,8 +108,8 @@ describe('searchSite', () => {
   it('skips when within cooldown, emitting subtitle.site-cooldown', async () => {
     const { ctx, job } = setup();
     const profiles = new SiteProfiles(ctx.db);
-    profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
-    profiles.update('acgrip', { lastFailureAt: Date.now(), failCount: 2 });
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { lastFailureAt: Date.now(), failCount: 2 });
     const tiers = stubTiers([]);
 
     await withFakeTime(async () => {
@@ -127,12 +127,12 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
     expect(out).toBeNull();
-    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.fail_count).toBe(1);
     expect(profile.last_failure_at).not.toBeNull();
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')).toBeDefined();
     // The run row is marked failed (the LLM throw happened before any step, so no transcript).
-    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acgrip')!;
+    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acg.rip')!;
     expect(row.status).toBe('failed');
     expect(row.transcript).toHaveLength(0);
   });
@@ -142,19 +142,19 @@ describe('searchSite', () => {
     // Seed a prior failure so success must clear both the counter AND the timestamp —
     // otherwise a stale last_failure_at would keep the site in a residual cooldown.
     const profiles = new SiteProfiles(ctx.db);
-    profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
-    profiles.update('acgrip', { failCount: 2, lastFailureAt: Date.now() - 10 * 60_000 });
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { failCount: 2, lastFailureAt: Date.now() - 10 * 60_000 });
     ctx.llm = new FakeGenerator([{ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
     expect(out).not.toBeNull();
-    const profile = profiles.get('acgrip')!;
+    const profile = profiles.get('https://acg.rip')!;
     expect(profile.fail_count).toBe(0);
     expect(profile.last_failure_at).toBeNull();
     expect(profile.last_success_at).not.toBeNull();
     expect(profile.last_working_tier).toBe('curl');
-    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acgrip')!;
+    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acg.rip')!;
     expect(row.status).toBe('done');
     expect(row.transcript).toHaveLength(1);
   });
@@ -164,8 +164,8 @@ describe('searchSite', () => {
     // the fail_count > 0 guard, failBackoffMs(0) would still block for the base cooldown.
     const { ctx, job } = setup();
     const profiles = new SiteProfiles(ctx.db);
-    profiles.upsert({ name: 'acgrip', baseUrl: 'https://acg.rip' });
-    profiles.update('acgrip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
     ctx.llm = new FakeGenerator([{ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
@@ -184,13 +184,13 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
     expect(out).not.toBeNull();
-    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.search_url_patterns).toEqual(['https://acg.rip/find?q=frieren']);
   });
 
   it('does not append the configured searchUrlTemplate itself', async () => {
     const { ctx, job } = setup();
-    const literalTemplate: SubtitleSiteConfig = { name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/search' };
+    const literalTemplate: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/search' };
     ctx.llm = new FakeGenerator([
       { action: 'search', url: 'https://acg.rip/search', note: 's' },
       { action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' },
@@ -198,7 +198,7 @@ describe('searchSite', () => {
     const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     await searchSite(ctx, job, literalTemplate, 'F', tmpDir(), tiers);
-    const profile = new SiteProfiles(ctx.db).get('acgrip')!;
+    const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.search_url_patterns).toEqual([]);
   });
 });

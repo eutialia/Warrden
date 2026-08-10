@@ -1,3 +1,4 @@
+import { isValidElement } from "react"
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
 import { cva, type VariantProps } from "class-variance-authority"
 
@@ -46,9 +47,14 @@ function Button({
   size = "default",
   ...props
 }: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+  // A button that renders something else — usually a router Link — is not a native
+  // button, and base-ui has to be told so it can supply the keyboard behaviour the
+  // element does not bring with it. Worked out here so no call site has to remember.
+  const nativeButton = !isValidElement(props.render) || props.render.type === "button"
   return (
     <ButtonPrimitive
       data-slot="button"
+      nativeButton={nativeButton}
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
     />

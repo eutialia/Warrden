@@ -31,7 +31,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
@@ -178,7 +178,9 @@ export default function Attention() {
         description="Decisions Warrden deliberately left to you — approve an import, pick a different release, or dismiss the noise."
       />
 
-      <Tabs value={status} onValueChange={(v) => setStatus((v as AttentionStatus) ?? 'open')}>
+      {/* The list lives inside the tabs: a trigger that controls no panel is a dead
+          control to anything reading the page structure rather than looking at it. */}
+      <Tabs className="gap-4" value={status} onValueChange={(v) => setStatus((v as AttentionStatus) ?? 'open')}>
         <TabsList>
           {STATUS_TABS.map((tab) => (
             <TabsTrigger key={tab.value} value={tab.value}>
@@ -191,9 +193,8 @@ export default function Attention() {
             </TabsTrigger>
           ))}
         </TabsList>
-      </Tabs>
 
-      <div className="space-y-3">
+        <TabsContent value={status} className="space-y-3">
         {error && <StatusNotice message={error} onRetry={refetch} />}
 
         {loading && items.length === 0 && (
@@ -352,7 +353,8 @@ export default function Attention() {
             </Card>
           );
         })}
-      </div>
+        </TabsContent>
+      </Tabs>
 
       <Dialog open={repickItem !== null} onOpenChange={(open) => !open && setRepickItem(null)}>
         <DialogContent>

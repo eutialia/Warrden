@@ -5,11 +5,9 @@ web/node_modules/
 web/dist/
 .env
 
-# local design tooling: staged scripts, build output, machine state
+# local design tooling workspace and outputs; not needed to build or run Warrden.
+.design-sync/
 .ds-sync/
 ds-bundle/
 web/ds-dist/
 web/ds-tokens/
-.design-sync/.cache/
-.design-sync/learnings/
-.design-sync/node_modules

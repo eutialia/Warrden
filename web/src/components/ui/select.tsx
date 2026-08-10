@@ -4,7 +4,44 @@ import { Select as SelectPrimitive } from "@base-ui/react/select"
 import { cn } from "@/lib/utils"
 import { ChevronDownIcon, CheckIcon, ChevronUpIcon } from "lucide-react"
 
-const Select = SelectPrimitive.Root
+/**
+ * Collects the value→label pairs of every `SelectItem` beneath `children`, so the trigger
+ * can show a label instead of a raw value.
+ *
+ * Labels have to be plain text for this: anything richer, and the caller should pass its
+ * own `items` map, which always wins.
+ */
+function labelsFromItems(children: React.ReactNode, into: Record<string, string> = {}) {
+  React.Children.forEach(children, (child) => {
+    if (!React.isValidElement(child)) return
+    const props = child.props as { value?: unknown; children?: React.ReactNode }
+    if (child.type === SelectItem && typeof props.value === "string" && typeof props.children === "string") {
+      into[props.value] = props.children
+    } else if (props.children !== undefined) {
+      labelsFromItems(props.children, into)
+    }
+  })
+  return into
+}
+
+/**
+ * base-ui renders the raw value in the trigger unless the root is given a value→label
+ * map, which every call site used to build by hand beside the items it already wrote.
+ * Deriving it from those items keeps the two from drifting; pass `items` explicitly to
+ * override.
+ */
+function Select<Value, Multiple extends boolean | undefined = false>({
+  items,
+  children,
+  ...props
+}: SelectPrimitive.Root.Props<Value, Multiple>) {
+  const derived = React.useMemo(() => items ?? labelsFromItems(children), [items, children])
+  return (
+    <SelectPrimitive.Root items={derived} {...(props as SelectPrimitive.Root.Props<Value, Multiple>)}>
+      {children}
+    </SelectPrimitive.Root>
+  )
+}
 
 function SelectGroup({ className, ...props }: SelectPrimitive.Group.Props) {
   return (

@@ -217,25 +217,20 @@ describe('config store', () => {
       subtitle: {
         languages: ['zh-Hans'],
         preferredGroups: ['Airota', 'Sumisora'],
-        sites: [{ name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' }],
+        sites: [{ baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' }],
       },
     });
     expect(cfg.subtitle.languages).toEqual(['zh-Hans']);
     expect(cfg.subtitle.preferredGroups).toEqual(['Airota', 'Sumisora']);
     expect(cfg.subtitle.sites[0]).toEqual({
-      name: 'acgrip',
       baseUrl: 'https://acg.rip',
       searchUrlTemplate: 'https://acg.rip/?term={query}',
     });
   });
 
-  it('rejects a blank site name or non-url baseUrl', () => {
-    expect(
-      ConfigSchema.safeParse({ subtitle: { sites: [{ name: '', baseUrl: 'https://x' }] } }).success,
-    ).toBe(false);
-    expect(
-      ConfigSchema.safeParse({ subtitle: { sites: [{ name: 'x', baseUrl: 'not-a-url' }] } }).success,
-    ).toBe(false);
+  it('rejects a site whose baseUrl is not a url — it is the only identity a site has', () => {
+    expect(ConfigSchema.safeParse({ subtitle: { sites: [{ baseUrl: 'not-a-url' }] } }).success).toBe(false);
+    expect(ConfigSchema.safeParse({ subtitle: { sites: [{}] } }).success).toBe(false);
   });
 
   // browser config

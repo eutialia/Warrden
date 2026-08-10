@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { siteLabel } from '../../config/siteLabel.js';
 import type { SubtitleSiteConfig } from '../../config/schema.js';
 import type { DownloadResult, SiteAdapter, SubtitleCandidate } from './types.js';
 
@@ -118,15 +119,7 @@ export function parseSubhdSearch(html: string): SubtitleCandidate[] {
 }
 
 function siteLooksLikeSubhd(site: SubtitleSiteConfig): boolean {
-  const name = site.name.toLowerCase();
-  const host = (() => {
-    try {
-      return new URL(site.baseUrl).hostname.toLowerCase();
-    } catch {
-      return site.baseUrl.toLowerCase();
-    }
-  })();
-  return name.includes('subhd') || host.includes('subhd.tv') || host === 'subhd.tv';
+  return siteLabel(site.baseUrl).toLowerCase().includes('subhd');
 }
 
 /**

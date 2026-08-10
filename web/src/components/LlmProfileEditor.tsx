@@ -15,11 +15,6 @@ const PROVIDERS: { value: Provider; label: string }[] = [
 
 const NONE = 'none';
 
-// base-ui renders the raw value in the trigger unless the root is given a
-// value→label map, so every select that shows friendly text needs one.
-const PROVIDER_ITEMS: Record<string, string> = Object.fromEntries(PROVIDERS.map((p) => [p.value, p.label]));
-const FALLBACK_ITEMS: Record<string, string> = { [NONE]: 'No fallback', ...PROVIDER_ITEMS };
-
 type Profiles = Config['llm']['profiles'];
 
 /**
@@ -77,7 +72,6 @@ export function LlmProfileEditor({
                 <div className="space-y-1.5">
                   <Label className="text-xs">Provider</Label>
                   <Select
-                    items={PROVIDER_ITEMS}
                     value={entry.provider}
                     onValueChange={(v) => v && update(callsite, { ...entry, provider: v as Provider })}
                   >
@@ -104,7 +98,6 @@ export function LlmProfileEditor({
                 <div className="space-y-1.5">
                   <Label className="text-xs">Fallback provider</Label>
                   <Select
-                    items={FALLBACK_ITEMS}
                     value={entry.fallback?.provider ?? NONE}
                     onValueChange={(v) =>
                       update(

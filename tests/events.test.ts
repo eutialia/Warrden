@@ -106,4 +106,53 @@ describe('EventLog', () => {
       consoleError.mockRestore();
     });
   });
+
+  describe('prune', () => {
+    const NOW = 1_800_000_000_000;
+    const DAY = 24 * 60 * 60 * 1000;
+
+    /** `append` stamps its own `ts`, so ages are restated afterwards. */
+    function ageEvent(db: ReturnType<typeof freshDb>, id: number, ts: number): void {
+      db.prepare('UPDATE events SET ts = ? WHERE id = ?').run(ts, id);
+    }
+
+    it.each([
+      { retentionDays: 30, kept: ['fresh', 'edge'], removed: 1 },
+      { retentionDays: 7, kept: ['fresh'], removed: 2 },
+    ])('keeps only what is inside a $retentionDays-day window', ({ retentionDays, kept, removed }) => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const fresh = log.append({ kind: 'fresh', message: 'm' });
+      const edge = log.append({ kind: 'edge', message: 'm' });
+      const old = log.append({ kind: 'old', message: 'm' });
+      ageEvent(db, fresh.id, NOW - DAY);
+      ageEvent(db, edge.id, NOW - 20 * DAY);
+      ageEvent(db, old.id, NOW - 200 * DAY);
+
+      expect(log.prune(retentionDays, NOW)).toBe(removed);
+      expect(log.list().map((e) => e.kind).sort()).toEqual([...kept].sort());
+    });
+
+    it('keeps everything when retention is zero', () => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const old = log.append({ kind: 'old', message: 'm' });
+      ageEvent(db, old.id, NOW - 3650 * DAY);
+
+      expect(log.prune(0, NOW)).toBe(0);
+      expect(log.list()).toHaveLength(1);
+    });
+
+    it('leaves attention items alone — they are decisions, not history', () => {
+      const db = freshDb();
+      const log = new EventLog(db);
+      const raised = log.append({ kind: 'ingest.no-match', level: 'attention', message: 'needs a human' });
+      ageEvent(db, raised.id, NOW - 200 * DAY);
+
+      log.prune(30, NOW);
+
+      expect(log.list()).toHaveLength(0);
+      expect(new AttentionItems(db).list({ status: 'open' })).toHaveLength(1);
+    });
+  });
 });

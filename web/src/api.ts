@@ -82,7 +82,7 @@ export type AccessTier = 'curl' | 'chromium' | 'camoufox' | 'remote';
  * server's snake_case (the API returns rows verbatim), not the camelCase `UpdateSiteProfileInput`
  * the PUT body uses. Hand-copied from `SiteProfileRow` in `src/db/siteProfiles.ts`. */
 export interface SiteProfileRow {
-  name: string;
+  /** The site's identity — its base URL. */
   base_url: string;
   last_working_tier: AccessTier | null;
   search_url_patterns: string[];
@@ -116,6 +116,9 @@ export interface SubtitleRunRow {
  * `lastWorkingTier: null` clears the stored tier; `lastFailureAt: null` clears the
  * failure timestamp; omitting either leaves it untouched. */
 export interface SiteProfileUpdate {
+  /** Which site to write to. A URL cannot survive a path segment, so it travels in
+   * the body. */
+  baseUrl: string;
   notes?: string;
   lastWorkingTier?: AccessTier | null;
   searchUrlPatterns?: string[];
@@ -150,7 +153,6 @@ export interface CallsiteModel {
 export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map', 'site-search', 'archive-map'] as const;
 
 export interface SubtitleSite {
-  name: string;
   baseUrl: string;
   /** Search page URL with `{query}` where the search term goes. Optional: without it the
    * agent discovers the search endpoint itself. */
@@ -171,6 +173,8 @@ export interface Config {
     keys: { openrouter?: string; openai?: string; anthropic?: string };
   };
   reconcileIntervalMinutes: number;
+  /** Days of event history to keep; 0 keeps everything. */
+  eventRetentionDays: number;
 }
 
 export interface SaveConfigResponse {
@@ -239,8 +243,8 @@ export function fetchSiteProfiles(): Promise<{ profiles: SiteProfileRow[] }> {
 
 /** `PUT /api/site-profiles/:name` — PATCH-shaped: only the supplied fields are written. 404s
  * for a name not in `config.subtitle.sites`. The returned row is the post-update state. */
-export function updateSiteProfile(name: string, patch: SiteProfileUpdate): Promise<SiteProfileRow> {
-  return fetchJson<SiteProfileRow>(`/api/site-profiles/${encodeURIComponent(name)}`, {
+export function updateSiteProfile(patch: SiteProfileUpdate): Promise<SiteProfileRow> {
+  return fetchJson<SiteProfileRow>('/api/site-profiles', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(patch),

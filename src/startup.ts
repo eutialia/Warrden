@@ -18,6 +18,42 @@ export function reclaimAbandonedJobs(ctx: AppContext): void {
   }
 }
 
+/** Once a day is often enough to keep the event log inside its retention window. */
+const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Trims the event log to `eventRetentionDays`, now and once a day after. Nothing else
+ * deletes from that table, so without this it grows for the life of the install — and the
+ * dashboard's per-day counters read it on every poll.
+ *
+ * A failed prune is reported and forgotten: it is housekeeping, and the next tick will try
+ * again. Returns a stop function that clears the interval.
+ */
+export function scheduleEventPrune(ctx: AppContext): () => void {
+  const runOnce = (): void => {
+    try {
+      const removed = ctx.events.prune(ctx.config.eventRetentionDays);
+      if (removed > 0) {
+        ctx.events.append({
+          kind: 'events.pruned',
+          message: `Removed ${removed} event(s) older than ${ctx.config.eventRetentionDays} days`,
+          data: { removed, retentionDays: ctx.config.eventRetentionDays },
+        });
+      }
+    } catch (err) {
+      ctx.events.append({
+        kind: 'events.prune-failed',
+        level: 'warn',
+        message: `Could not trim the event log: ${errorMessage(err)}`,
+      });
+    }
+  };
+
+  runOnce();
+  const interval = setInterval(runOnce, PRUNE_INTERVAL_MS);
+  return () => clearInterval(interval);
+}
+
 /**
  * Runs `reconcile()` once immediately, then on `reconcileIntervalMinutes`. `reconcile`
  * already isolates per-instance failures internally, but this is the last-resort net for

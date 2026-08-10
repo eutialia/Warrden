@@ -14,7 +14,7 @@ import { runAcquireJob } from './pipelines/acquire/run.js';
 import { runIngestJob } from './pipelines/ingest/run.js';
 import { runSubtitleJob } from './pipelines/subtitle/run.js';
 import { createApp } from './server/app.js';
-import { reclaimAbandonedJobs, scheduleReconcile } from './startup.js';
+import { reclaimAbandonedJobs, scheduleEventPrune, scheduleReconcile } from './startup.js';
 import { errorMessage } from './util/errors.js';
 
 /** Builds the fully-wired `AppContext` for a fresh process: config, db, one `ArrClient`
@@ -61,6 +61,7 @@ async function main(): Promise<void> {
 
   const stopRunner = startRunner(ctx, { acquire: runAcquireJob, ingest: runIngestJob, subtitle: runSubtitleJob });
   const stopReconcile = scheduleReconcile(ctx);
+  const stopEventPrune = scheduleEventPrune(ctx);
 
   const server = serve({ fetch: createApp(ctx).fetch, port: ctx.config.server.port }, () => {
     console.log(`warrden listening on port ${ctx.config.server.port}`);
@@ -77,6 +78,7 @@ async function main(): Promise<void> {
     console.log(`${signal} received, shutting down`);
     stopRunner();
     stopReconcile();
+    stopEventPrune();
     // Belt-and-suspenders: closeAllConnections() below should make close()'s callback
     // fire promptly, but if something still hangs (e.g. a slow db.close()), don't let a
     // supervisor's SIGKILL be the only way out — exit on our own after a grace period.

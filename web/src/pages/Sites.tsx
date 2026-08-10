@@ -46,7 +46,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { tierLabel } from '@/lib/labels';
+import { siteLabel, tierLabel } from '@/lib/labels';
 import type { Tone } from '@/lib/tone';
 import { formatRelativeTime } from '@/lib/utils';
 
@@ -58,7 +58,7 @@ function siteTone(profile: SiteProfileRow | undefined): Tone {
   return profile.last_success_at === null ? 'neutral' : 'success';
 }
 
-const EMPTY_SITE: SubtitleSite = { name: '', baseUrl: '', searchUrlTemplate: '' };
+const EMPTY_SITE: SubtitleSite = { baseUrl: '', searchUrlTemplate: '' };
 
 /** Draft state for the add/edit dialog — `original` is null when adding. */
 interface SiteDraft {
@@ -154,16 +154,15 @@ export default function Sites() {
   async function saveSite(): Promise<void> {
     if (!config || !draft) return;
     const value: SubtitleSite = {
-      name: draft.value.name.trim(),
       baseUrl: draft.value.baseUrl.trim(),
       searchUrlTemplate: draft.value.searchUrlTemplate?.trim() || undefined,
     };
-    if (!value.name || !value.baseUrl) {
-      toast.error('A site needs both a name and a base URL');
+    if (!value.baseUrl) {
+      toast.error('A site needs a base URL');
       return;
     }
     const sites = draft.original
-      ? config.subtitle.sites.map((s) => (s.name === draft.original!.name ? value : s))
+      ? config.subtitle.sites.map((s) => (s.baseUrl === draft.original!.baseUrl ? value : s))
       : [...config.subtitle.sites, value];
     const ok = await persist({ ...config, subtitle: { ...config.subtitle, sites } }, draft.original ? 'Site updated' : 'Site added');
     if (ok) setDraft(null);
@@ -171,16 +170,19 @@ export default function Sites() {
 
   async function removeSite(): Promise<void> {
     if (!config || !removing) return;
-    const sites = config.subtitle.sites.filter((s) => s.name !== removing.name);
-    const ok = await persist({ ...config, subtitle: { ...config.subtitle, sites } }, `Removed ${removing.name}`);
+    const sites = config.subtitle.sites.filter((s) => s.baseUrl !== removing.baseUrl);
+    const ok = await persist(
+      { ...config, subtitle: { ...config.subtitle, sites } },
+      `Removed ${siteLabel(removing.baseUrl)}`,
+    );
     if (ok) setRemoving(null);
   }
 
   async function saveNotes(): Promise<void> {
     if (!notesFor) return;
     try {
-      const updated = await updateSiteProfile(notesFor.name, { notes: notesDraft });
-      setProfiles((prev) => prev.map((p) => (p.name === updated.name ? updated : p)));
+      const updated = await updateSiteProfile({ baseUrl: notesFor.base_url, notes: notesDraft });
+      setProfiles((prev) => prev.map((p) => (p.base_url === updated.base_url ? updated : p)));
       setNotesFor(null);
       toast.success('Notes saved');
     } catch (err) {
@@ -190,9 +192,9 @@ export default function Sites() {
 
   async function clearFailures(row: SiteProfileRow): Promise<void> {
     try {
-      const updated = await updateSiteProfile(row.name, { failCount: 0, lastFailureAt: null });
-      setProfiles((prev) => prev.map((p) => (p.name === updated.name ? updated : p)));
-      toast.success(`Cleared failures for ${row.name}`);
+      const updated = await updateSiteProfile({ baseUrl: row.base_url, failCount: 0, lastFailureAt: null });
+      setProfiles((prev) => prev.map((p) => (p.base_url === updated.base_url ? updated : p)));
+      toast.success(`Cleared failures for ${siteLabel(row.base_url)}`);
     } catch (err) {
       toast.error(apiErrorMessage(err, 'Failed to clear failures'));
     }
@@ -302,10 +304,10 @@ export default function Sites() {
               )}
 
               {config.subtitle.sites.map((site, rank) => {
-                const profile = profiles.find((p) => p.name === site.name);
+                const profile = profiles.find((p) => p.base_url === site.baseUrl);
                 const failing = (profile?.fail_count ?? 0) > 0;
                 return (
-                  <div key={site.name} className="border-t pt-4">
+                  <div key={site.baseUrl} className="border-t pt-4">
                     <div className="flex flex-wrap items-start gap-3">
                       {/* The order they sit in is the order they are tried, so it is worth
                           showing rather than leaving to be inferred. */}
@@ -315,7 +317,7 @@ export default function Sites() {
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <StatusDot tone={siteTone(profile)} />
-                          <span className="font-medium">{site.name}</span>
+                          <span className="font-medium">{siteLabel(site.baseUrl)}</span>
                           <Badge variant="outline" className="text-muted-foreground">
                             {tierLabel(profile?.last_working_tier ?? null)}
                           </Badge>
@@ -385,18 +387,10 @@ export default function Sites() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="site-name">Name</Label>
-              <Input
-                id="site-name"
-                autoFocus
-                value={draft?.value.name ?? ''}
-                onChange={(e) => setDraft((d) => (d ? { ...d, value: { ...d.value, name: e.target.value } } : d))}
-              />
-            </div>
-            <div className="space-y-2">
               <Label htmlFor="site-url">Base URL</Label>
               <Input
                 id="site-url"
+                autoFocus
                 placeholder="https://example.org"
                 value={draft?.value.baseUrl ?? ''}
                 onChange={(e) => setDraft((d) => (d ? { ...d, value: { ...d.value, baseUrl: e.target.value } } : d))}
@@ -430,7 +424,7 @@ export default function Sites() {
       <Dialog open={notesFor !== null} onOpenChange={(open) => !open && setNotesFor(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Notes for {notesFor?.name}</DialogTitle>
+            <DialogTitle>Notes for {notesFor && siteLabel(notesFor.base_url)}</DialogTitle>
             <DialogDescription>
               Injected into the browse agent's prompt for this site — quirks, working search patterns, things to avoid.
             </DialogDescription>
@@ -447,7 +441,7 @@ export default function Sites() {
       <AlertDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Stop searching {removing?.name}?</AlertDialogTitle>
+            <AlertDialogTitle>Stop searching {removing && siteLabel(removing.baseUrl)}?</AlertDialogTitle>
             <AlertDialogDescription>
               Warrden will no longer browse this site. What it learned about the site is kept, so re-adding it later
               starts from the same memory rather than from scratch.

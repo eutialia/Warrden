@@ -30,9 +30,9 @@ describe('parseSubhdSearch', () => {
 describe('SubhdAdapter.matches', () => {
   const a = new SubhdAdapter();
   it.each([
-    [{ name: 'subhd', baseUrl: 'https://subhd.tv' }, true],
-    [{ name: 'SubHD-main', baseUrl: 'https://example.com' }, true],
-    [{ name: 'acgrip', baseUrl: 'https://acg.rip' }, false],
+    [{ baseUrl: 'https://subhd.tv' }, true],
+    [{ baseUrl: 'https://www.subhd.tv' }, true],
+    [{ baseUrl: 'https://acg.rip' }, false],
   ])('%j -> %s', (site, expected) => {
     expect(a.matches(site)).toBe(expected);
     expect(!!resolveSiteAdapter(site)).toBe(expected);

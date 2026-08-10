@@ -153,6 +153,8 @@ const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).option
 // shouldn't inflate the agent's prompt unboundedly). `failCount` is the accessible reset
 // seam: PUT `{ failCount: 0 }` clears the escalation/backoff bookkeeping.
 const SiteProfileUpdateSchema = z.object({
+  /** Which site to write to — its base URL, the only identity a site has. */
+  baseUrl: z.url(),
   notes: z.string().max(2000).optional(),
   lastWorkingTier: z.enum(['curl', 'chromium', 'camoufox', 'remote']).nullable().optional(),
   searchUrlPatterns: z.array(z.string().min(1)).max(5).optional(),
@@ -584,10 +586,9 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // site renders identically whether or not a row has been written. `upsert` seeds
     // base_url; `start` (in the agent) back-fills the rest as it learns, so these only
     // ever show for sites the agent hasn't touched.
-    function defaultProfile(name: string, baseUrl: string): SiteProfileRow {
+    function defaultProfile(baseUrl: string): SiteProfileRow {
       const now = Date.now();
       return {
-        name,
         base_url: baseUrl,
         last_working_tier: null,
         search_url_patterns: [],
@@ -603,19 +604,15 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // configured site set, with any learned per-site state layered on top.
     app.get('/api/site-profiles', (c) => {
       const config = requireConfig(ctx);
-      const profilesBySite = new Map(profiles.list().map((p) => [p.name, p]));
+      const profilesBySite = new Map(profiles.list().map((p) => [p.base_url, p]));
       return c.json({
-        profiles: config.subtitle.sites.map((site) => profilesBySite.get(site.name) ?? defaultProfile(site.name, site.baseUrl)),
+        profiles: config.subtitle.sites.map((site) => profilesBySite.get(site.baseUrl) ?? defaultProfile(site.baseUrl)),
       });
     });
 
-    app.put('/api/site-profiles/:name', async (c) => {
-      const name = c.req.param('name');
-      // 404 for any name outside the configured site set — the dashboard only edits what
-      // config declares, so a stale/typo'd site is a caller mistake, not a silent no-op.
-      if (!requireConfig(ctx).subtitle.sites.some((s) => s.name === name)) {
-        return c.json({ error: `site "${name}" is not configured` }, 404);
-      }
+    // The site is named in the body, not the path: its identity is a URL, and a URL does
+    // not survive a path segment intact.
+    app.put('/api/site-profiles', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
       const parsed = SiteProfileUpdateSchema.safeParse(body);
       if (!parsed.success) {
@@ -626,19 +623,25 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // is untouched. When the client only sends `failCount: 0` (the dashboard "reset
       // failures" button), also clear lastFailureAt so the cooldown bookkeeping is fully
       // wiped — fail_count alone is not enough if a stale last_failure_at remains.
+      const { baseUrl: _baseUrl, ...fields } = parsed.data;
       const patch: UpdateSiteProfileInput = {
-        ...parsed.data,
+        ...fields,
         ...(parsed.data.failCount === 0 && parsed.data.lastFailureAt === undefined
           ? { lastFailureAt: null }
           : {}),
       };
+      // 404 for any URL outside the configured site set — the dashboard only edits what
+      // config declares, so a stale/typo'd site is a caller mistake, not a silent no-op.
+      const { baseUrl } = parsed.data;
+      if (!requireConfig(ctx).subtitle.sites.some((s) => s.baseUrl === baseUrl)) {
+        return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
+      }
       // Upsert-then-update (not just update) so a partial PUT still creates the row when
       // the agent hasn't run for this site yet — then only the provided fields land.
-      const site = requireConfig(ctx).subtitle.sites.find((s) => s.name === name)!;
-      profiles.upsert({ name, baseUrl: site.baseUrl });
-      profiles.update(name, patch);
+      profiles.upsert({ baseUrl });
+      profiles.update(baseUrl, patch);
       // Return the post-update row: the dashboard replaces its table row with the response.
-      return c.json(profiles.get(name));
+      return c.json(profiles.get(baseUrl));
     });
   }
 

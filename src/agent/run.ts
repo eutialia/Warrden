@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import type { AppContext } from '../context.js';
+import { siteKey, siteLabel } from '../config/siteLabel.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
 import { SubtitleRuns, type TranscriptEntry } from '../db/subtitleRuns.js';
 import type { SubtitleSiteConfig } from '../config/schema.js';
@@ -82,8 +83,8 @@ export async function searchSite(
 
   const profiles = new SiteProfiles(ctx.db);
   const runs = new SubtitleRuns(ctx.db);
-  profiles.upsert({ name: site.name, baseUrl: site.baseUrl });
-  const profile = profiles.get(site.name)!;
+  profiles.upsert({ baseUrl: site.baseUrl });
+  const profile = profiles.get(site.baseUrl)!;
   const hints: SearchHints =
     typeof query === 'string'
       ? buildSearchHints({
@@ -106,13 +107,13 @@ export async function searchSite(
     ctx.events.append({
       kind: 'subtitle.site-cooldown',
       jobId: job.id,
-      message: `Skipping ${site.name} — in failure cooldown (${Math.round(cooldownMs / 60_000)}m backoff)`,
-      data: targetEventData(job, { site: site.name }),
+      message: `Skipping ${siteLabel(site.baseUrl)} — in failure cooldown (${Math.round(cooldownMs / 60_000)}m backoff)`,
+      data: targetEventData(job, { site: siteLabel(site.baseUrl) }),
     });
     return null;
   }
 
-  const runId = runs.start(job.id, site.name);
+  const runId = runs.start(job.id, siteLabel(site.baseUrl));
   // Start at the remembered tier (with optional decay); unimplemented seams fall back via
   // indexOf === -1 → max(0, -1) === 0 in tierStartIndex.
   const startIdx = tierStartIndex(profile.last_working_tier, profile.last_success_at);
@@ -125,21 +126,21 @@ export async function searchSite(
     ctx.events.append({
       kind: 'subtitle.transcript',
       jobId: job.id,
-      message: `[${site.name}] ${entry.action}: ${entry.detail}`,
-      data: targetEventData(job, { site: site.name, entry }),
+      message: `[${siteLabel(site.baseUrl)}] ${entry.action}: ${entry.detail}`,
+      data: targetEventData(job, { site: siteLabel(site.baseUrl), entry }),
     });
   };
 
   /** Persist a site-level failure (genuine error or every rung empty) and emit the event. */
   const failSite = (kind: 'subtitle.site-failed' | 'subtitle.site-exhausted', message: string): null => {
     runs.finish(runId, 'failed');
-    profiles.update(site.name, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
+    profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
     ctx.events.append({
       kind,
       level: 'warn',
       jobId: job.id,
       message,
-      data: targetEventData(job, { site: site.name, dedupeKey: site.name }),
+      data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
     });
     return null;
   };
@@ -154,12 +155,12 @@ export async function searchSite(
           llm: ctx.llm,
           hints,
           destDir,
-          workDir: join(ctx.dataDir, 'subtitle', 'adapter', site.name, String(job.id)),
+          workDir: join(ctx.dataDir, 'subtitle', 'adapter', siteKey(site.baseUrl), String(job.id)),
           onTranscript: onTranscriptEvent,
         });
         if (adapterOut) {
           runs.finish(runId, 'done');
-          profiles.update(site.name, {
+          profiles.update(site.baseUrl, {
             lastWorkingTier: 'curl',
             lastSuccessAt: Date.now(),
             failCount: 0,
@@ -210,7 +211,7 @@ export async function searchSite(
           const learned = isNew
             ? [...profile.search_url_patterns, searchUrl].slice(-5)
             : profile.search_url_patterns;
-          profiles.update(site.name, {
+          profiles.update(site.baseUrl, {
             lastWorkingTier: tierName,
             lastSuccessAt: Date.now(),
             failCount: 0,
@@ -224,7 +225,7 @@ export async function searchSite(
         if (!(err instanceof TierBlockedError)) {
           // A genuine error (bad LLM output after retries, FS failure, ...) is a site-level
           // failure, not an escalation signal.
-          return failSite('subtitle.site-failed', `Site ${site.name} failed: ${errorMessage(err)}`);
+          return failSite('subtitle.site-failed', `Site ${siteLabel(site.baseUrl)} failed: ${errorMessage(err)}`);
         }
         // TierBlockedError: note the wall in the run's transcript and try the next rung.
         onTranscriptEvent({ ts: Date.now(), tier: tierName, action: 'escalate', detail: errorMessage(err) });
@@ -234,7 +235,7 @@ export async function searchSite(
     // Every rung came up empty.
     return failSite(
       'subtitle.site-exhausted',
-      `Site ${site.name} produced no download across ${TIER_ORDER.length - startIdx} tier(s)`,
+      `Site ${siteLabel(site.baseUrl)} produced no download across ${TIER_ORDER.length - startIdx} tier(s)`,
     );
   } finally {
     await Promise.all(activeTiers.map((t) => t.close()));

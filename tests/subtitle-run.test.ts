@@ -205,7 +205,7 @@ describe('runSubtitleJob', () => {
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      data: { matchedBy: 'pipeline', drift: 'in-sync', site: 'acgrip', sourceFile: expect.stringContaining('Show - S01E05.ass') },
+      data: { matchedBy: 'pipeline', drift: 'in-sync', site: 'acg.rip', sourceFile: expect.stringContaining('Show - S01E05.ass') },
     });
   });
 

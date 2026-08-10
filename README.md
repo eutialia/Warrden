@@ -231,8 +231,7 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `ingest.downloadRoots` | `[]` | **Legacy/test only.** Empty → derive the arr-side download root from `pathMappings` targeting `/downloads`, else `/downloads`. Used to find each torrent's own folder for bundle rescue and the movie size-match fallback. |
 | `subtitle.languages` | `[]` | Target subtitle languages for the subtitle pipeline, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). A video is considered covered only when it carries *every* one as an embedded or external track. |
 | `subtitle.preferredGroups` | `[]` | Soft rank boost for fansub/release group names when browsing packs. Never exclusive — if none match, search continues with other groups. |
-| `subtitle.sites[].name` | — | Unique label for a subtitle fan site the pipeline searches. |
-| `subtitle.sites[].baseUrl` | — | Base URL of the site; registered as the site's profile root. |
+| `subtitle.sites[].baseUrl` | — | Base URL of a subtitle fan site the pipeline searches. This is the site's identity — it is what the profile row is keyed by, and its host is the name shown in the dashboard. |
 | `subtitle.sites[].searchUrlTemplate` | omitted | Search-page URL with `{query}` where the URL-encoded search term goes. Optional: without it the agent must discover the search endpoint itself (recorded into the site profile on success). |
 | `browser.stepBudget` | `20` | Hard ceiling on LLM steps (tool calls) for one site-search agent run against a single site. |
 | `browser.siteCooldownSeconds` | `30` | Polite re-hit floor per site after a failure; exponential on repeated failures, capped at 6h. |
@@ -243,6 +242,7 @@ the dashboard's Config page. Fields not set fall back to the defaults below.
 | `llm.activeProfile` | `prod` | Which of `llm.profiles` (`dev` or `prod`) is currently in effect. |
 | `llm.profiles` | `{ dev: {}, prod: {} }` | Per-profile, per-call-site model configuration (provider, model, optional fallback). Call-sites: `release-pick` (Phase 1); `sidecar-match`, `bundle-map` (Phase 2, Ingest); `archive-map`, `site-search` (Phase 3, Subtitle). |
 | `llm.keys.openrouter` / `.openai` / `.anthropic` | unset | API keys for the corresponding LLM provider. Not required for the `claude-code` provider, which uses subscription auth instead. |
+| `eventRetentionDays` | `30` | Days of event history to keep; older events are trimmed once a day. `0` keeps everything. Items waiting on your review are never trimmed. |
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop diffs each arr's full series/movie list against what Warrden has already seen, as a backstop for missed webhooks (both Acquire and Ingest). The same interval also doubles as the grace period before a newly-registered `warrden-` tag/profile becomes eligible for garbage collection. |
 
 Secrets (`arrs[].apiKey`, `llm.keys.*`) are shown as `•••` on the Config page once set.
@@ -297,10 +297,10 @@ is what makes a screen stop matching the rest.
    for prose, never sans for a large number or a release name.
 
 Both themes are complete, so no page should ever hand-write a `dark:` colour override
-(the vendored shadcn primitives carry their own, which is theirs to keep). The full contract,
-including the class vocabulary, lives in
-[`.design-sync/conventions.md`](.design-sync/conventions.md), which also ships as the
-design system's README.
+(the vendored shadcn primitives carry their own, which is theirs to keep). Every colour,
+radius and font is a token in [`web/src/tokens.css`](web/src/tokens.css) — that file is the
+authoritative list, and reaching for a raw palette class instead will be wrong in one of
+the two themes.
 
 ## More detail
 

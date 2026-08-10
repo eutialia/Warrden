@@ -201,6 +201,17 @@ export function attentionKindLabel(kind: string): string {
   }
 }
 
+/** A subtitle site's human name, taken from its base URL — the only identity a site has.
+ * Mirrors `siteLabel` in `src/config/siteLabel.ts`; `web/` shares no package with the
+ * backend, so the two are kept in step by hand. */
+export function siteLabel(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host.replace(/^www\./, '');
+  } catch {
+    return baseUrl;
+  }
+}
+
 /** Storage problems and outright job failures are errors; everything else in the
  * queue is a decision waiting on a human. */
 export function attentionKindTone(kind: string): Tone {

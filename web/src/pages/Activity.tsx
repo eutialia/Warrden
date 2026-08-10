@@ -31,8 +31,6 @@ const STATUSES: JobStatus[] = ['running', 'pending', 'done', 'failed'];
 
 const ALL = 'all';
 
-// base-ui renders the raw value in a select trigger unless the root gets a
-// value→label map.
 const PIPELINE_ITEMS: Record<string, string> = {
   [ALL]: 'All work',
   ...Object.fromEntries(PIPELINES.map((p) => [p, pipelineLabel(p)])),
@@ -107,7 +105,7 @@ export default function Activity() {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <Select items={PIPELINE_ITEMS} value={pipeline} onValueChange={(v) => setPipeline(v ?? ALL)}>
+        <Select value={pipeline} onValueChange={(v) => setPipeline(v ?? ALL)}>
           <SelectTrigger className="w-40">
             <SelectValue />
           </SelectTrigger>
@@ -119,7 +117,7 @@ export default function Activity() {
             ))}
           </SelectContent>
         </Select>
-        <Select items={STATUS_ITEMS} value={status} onValueChange={(v) => setStatus(v ?? ALL)}>
+        <Select value={status} onValueChange={(v) => setStatus(v ?? ALL)}>
           <SelectTrigger className="w-36">
             <SelectValue />
           </SelectTrigger>

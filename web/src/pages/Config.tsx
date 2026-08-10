@@ -16,6 +16,7 @@ import {
   type StorageCheck,
 } from '@/api';
 import { LlmProfileEditor } from '@/components/LlmProfileEditor';
+import { MountHealth } from '@/components/MountHealth';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionStack } from '@/components/SectionStack';
@@ -30,16 +31,12 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
 import { TONE_TEXT } from '@/lib/tone';
 import { cn, formatUsage } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
-
-// base-ui renders the raw value in a select trigger unless the root gets a
-// value→label map.
-const ARR_KIND_ITEMS: Record<string, string> = { sonarr: 'Sonarr', radarr: 'Radarr' };
 
 const LLM_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const;
 type LlmProvider = (typeof LLM_PROVIDERS)[number];
@@ -57,9 +54,20 @@ const STANDARD_MOUNT_ROWS = [
   { id: 'downloads', label: 'Downloads', path: '/downloads', blurb: 'Torrent download / completed root' },
 ] as const;
 
+/** Spans offered for the event log. `0` is "keep everything" — the schema takes any
+ * non-negative number, but a dropdown of every possibility helps nobody. */
+const RETENTION_OPTIONS = [
+  { value: '7', label: '7 days' },
+  { value: '30', label: '30 days' },
+  { value: '90', label: '90 days' },
+  { value: '180', label: '180 days' },
+  { value: '0', label: 'Forever' },
+] as const;
+
 const SECTIONS = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'connections', label: 'Connections' },
+  { id: 'history', label: 'History' },
   { id: 'storage', label: 'Storage' },
   { id: 'picking', label: 'Release picking' },
   { id: 'browser', label: 'Browser agent' },
@@ -247,6 +255,7 @@ export default function ConfigPage() {
       browser: { stepBudget: parsed.stepBudget!, siteCooldownSeconds: parsed.siteCooldownSeconds! },
       llm: { ...draft.llm, keys, profiles: withoutBlankCallsites(draft.llm.profiles) },
       reconcileIntervalMinutes: parsed.reconcileIntervalMinutes!,
+      eventRetentionDays: draft.eventRetentionDays,
     };
 
     setSaving(true);
@@ -288,7 +297,6 @@ export default function ConfigPage() {
     );
   }
 
-  const badMounts = storageChecks.filter((c) => c.status !== 'ok').length;
 
   return (
     <div className="space-y-6 pb-24">
@@ -375,7 +383,6 @@ export default function ConfigPage() {
                     <div className="space-y-1.5">
                       <Label className="text-xs">Type</Label>
                       <Select
-                        items={ARR_KIND_ITEMS}
                         value={arr.kind}
                         onValueChange={(v) =>
                           v && patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, kind: v as ArrKind } : a)) })
@@ -441,6 +448,41 @@ export default function ConfigPage() {
             </CardContent>
           </Card>
 
+          {/* History */}
+          <Card id="history" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>History</CardTitle>
+              <CardDescription>
+                How long Warrden keeps its event log. Items that need your review are never trimmed — only the
+                record of what already happened.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                <Label>Keep events for</Label>
+                <Select
+                  value={String(draft.eventRetentionDays)}
+                  onValueChange={(v) => v && patch({ eventRetentionDays: Number(v) })}
+                >
+                  <SelectTrigger className="w-48">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {RETENTION_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Older events are removed once a day. Keeping everything is fine on a small install, but the log
+                  grows for as long as Warrden runs.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Storage — four fixed mounts, never editable */}
           <Card id="storage" className="scroll-mt-20">
             <CardHeader>
@@ -449,13 +491,9 @@ export default function ConfigPage() {
                 Warrden expects exactly four bind mounts. Set them when you create the container — this page only checks
                 that they are reachable.
               </CardDescription>
-              {storageChecks.length > 0 && (
-                <CardAction>
-                  <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
-                    {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
-                  </ToneBadge>
-                </CardAction>
-              )}
+              <CardAction>
+                <MountHealth checks={storageChecks} />
+              </CardAction>
             </CardHeader>
             <CardContent className="space-y-3">
               {storageError && <StatusNotice message={storageError} onRetry={loadStorage} />}
@@ -598,23 +636,28 @@ export default function ConfigPage() {
                 </p>
               </div>
 
-              <div className="space-y-3">
-                <Tabs value={activeProfileTab} onValueChange={(v) => setActiveProfileTab(v ?? 'dev')}>
-                  <TabsList>
-                    <TabsTrigger value="dev">
-                      dev{draft.llm.activeProfile === 'dev' && <span className="ml-1.5 text-xs">· active</span>}
-                    </TabsTrigger>
-                    <TabsTrigger value="prod">
-                      prod{draft.llm.activeProfile === 'prod' && <span className="ml-1.5 text-xs">· active</span>}
-                    </TabsTrigger>
-                  </TabsList>
-                </Tabs>
-                <LlmProfileEditor
-                  profile={activeProfileTab}
-                  profiles={draft.llm.profiles}
-                  onChange={(profiles) => patch({ llm: { ...draft.llm, profiles } })}
-                />
-              </div>
+              {/* The editor sits inside the tabs, not beside them: a trigger that
+                  controls no panel is a dead control to anything reading the page
+                  structure rather than looking at it. */}
+              <Tabs className="gap-3" value={activeProfileTab} onValueChange={(v) => setActiveProfileTab(v ?? 'dev')}>
+                <TabsList>
+                  <TabsTrigger value="dev">
+                    dev{draft.llm.activeProfile === 'dev' && <span className="ml-1.5 text-xs">· active</span>}
+                  </TabsTrigger>
+                  <TabsTrigger value="prod">
+                    prod{draft.llm.activeProfile === 'prod' && <span className="ml-1.5 text-xs">· active</span>}
+                  </TabsTrigger>
+                </TabsList>
+                {(['dev', 'prod'] as const).map((profile) => (
+                  <TabsContent key={profile} value={profile}>
+                    <LlmProfileEditor
+                      profile={profile}
+                      profiles={draft.llm.profiles}
+                      onChange={(profiles) => patch({ llm: { ...draft.llm, profiles } })}
+                    />
+                  </TabsContent>
+                ))}
+              </Tabs>
             </CardContent>
           </Card>
 

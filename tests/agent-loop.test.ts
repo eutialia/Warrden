@@ -5,7 +5,7 @@ import type { SiteProfileRow } from '../src/db/siteProfiles.js';
 import { FakeGenerator, tmpDir } from './helpers.js';
 
 const PROFILE: SiteProfileRow = {
-  name: 'acgrip', base_url: 'https://acg.rip', last_working_tier: null,
+  base_url: 'https://acg.rip', last_working_tier: null,
   search_url_patterns: [], notes: '', last_success_at: null, last_failure_at: null, fail_count: 0, created_at: 0,
 };
 
@@ -19,7 +19,7 @@ function fakeTier(results: FetchResult[]): FetchTier & { urls: string[] } {
   };
 }
 
-const SITE = { name: 'acgrip', baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
+const SITE = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 
 const OK_HTML = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
 

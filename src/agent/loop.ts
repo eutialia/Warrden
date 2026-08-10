@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { join } from 'node:path';
 import type { StructuredGenerator } from '../llm/generator.js';
 import type { FetchTier } from './tiers.js';
+import { siteKey } from '../config/siteLabel.js';
 import type { SiteProfileRow } from '../db/siteProfiles.js';
 import type { TranscriptEntry } from '../db/subtitleRuns.js';
 import { formatSearchHintsForPrompt, type SearchHints } from '../pipelines/subtitle/queries.js';
@@ -40,7 +41,7 @@ export class TierBlockedError extends Error {
 export async function runAgentLoop(input: {
   llm: StructuredGenerator;
   tier: FetchTier;
-  site: { name: string; baseUrl: string; searchUrlTemplate?: string };
+  site: { baseUrl: string; searchUrlTemplate?: string };
   profile: SiteProfileRow;
   /** Primary title; also `hints.title` when hints are provided. */
   query: string;
@@ -91,7 +92,7 @@ export async function runAgentLoop(input: {
       // resolve outside the download dir).
       const rawName = action.url.split('/').pop() || 'download';
       const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'download';
-      const destPath = join(destDir, `${site.name}-${Date.now()}-${safeName}`);
+      const destPath = join(destDir, `${siteKey(site.baseUrl)}-${Date.now()}-${safeName}`);
       const res = await tier.fetch(action.url, { destPath });
       if (res.blocked) throw new TierBlockedError(`download blocked at ${action.url}`);
       if (!res.ok || res.filePath === undefined) {

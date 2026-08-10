@@ -24,7 +24,8 @@ const ArrInstanceSchema = z.object({
   apiKey: z.string().min(1),
 });
 const SubtitleSiteSchema = z.object({
-  name: z.string().min(1),
+  // The base URL is the site's identity: unique by construction, where the name beside it
+  // used to be a second identity nothing enforced. `siteLabel()` derives what to show.
   baseUrl: z.url(),
   // Search page URL with `{query}` where the URL-encoded search term goes. Optional:
   // without it the agent must discover the search endpoint itself (recorded into the
@@ -127,6 +128,11 @@ export const ConfigSchema = z
       })
       .prefault({}),
     reconcileIntervalMinutes: z.number().int().min(1).default(15),
+    /** How long the event log is kept. `0` means keep everything, for anyone who would
+     * rather grow a table than lose the history. The dashboard offers a fixed set of
+     * spans; the schema takes any non-negative number so a hand-edited config stays
+     * valid. */
+    eventRetentionDays: z.number().int().min(0).default(30),
   })
   .superRefine((cfg, ctx) => {
     // Defense-in-depth against `SECRET_PLACEHOLDER` ever being saved as a real secret:

@@ -11,18 +11,26 @@ import { cn } from '@/lib/utils';
  */
 export function StatBand({ children }: { children: ReactNode }) {
   return (
-    <div
-      className={cn(
-        // Two up on a phone, four up from `sm`. The wide rule has to out-specify the
-        // narrow one rather than merely follow it: Tailwind sorts arbitrary variants
-        // by selector text, so `first-child` is emitted before `nth-child` whatever
-        // order they are written in, and an equal-specificity reset would always lose.
-        'grid grid-cols-2 border-y sm:grid-cols-4',
-        '[&>*]:border-l [&>*]:pl-5 [&>*:nth-child(odd)]:border-l-0 [&>*:nth-child(odd)]:pl-0',
-        'sm:[&>*:nth-child(odd):not(:first-child)]:border-l sm:[&>*:nth-child(odd):not(:first-child)]:pl-5'
-      )}
-    >
-      {children}
+    // The wrapper is the container being measured; the grid inside it asks the questions.
+    // An element cannot query its own width, so the two cannot be the same element.
+    <div className="@container">
+      <div
+        className={cn(
+          // Two up when there isn't room, four when there is — measured against the band's
+          // own width, not the window's, because the sidebar takes 16rem out of that window
+          // and a viewport breakpoint would go four-up while each figure still had ~70px.
+          //
+          // The wide rule has to out-specify the narrow one rather than merely follow it:
+          // Tailwind sorts arbitrary variants by selector text, so `first-child` is emitted
+          // before `nth-child` whatever order they are written in, and an equal-specificity
+          // reset would always lose.
+          'grid grid-cols-2 border-y @2xl:grid-cols-4',
+          '[&>*]:border-l [&>*]:pl-5 [&>*:nth-child(odd)]:border-l-0 [&>*:nth-child(odd)]:pl-0',
+          '@2xl:[&>*:nth-child(odd):not(:first-child)]:border-l @2xl:[&>*:nth-child(odd):not(:first-child)]:pl-5'
+        )}
+      >
+        {children}
+      </div>
     </div>
   );
 }

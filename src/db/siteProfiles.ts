@@ -6,7 +6,7 @@ import type Database from 'better-sqlite3';
 export type AccessTier = 'curl' | 'chromium' | 'camoufox' | 'remote';
 
 export interface SiteProfileRow {
-  name: string;
+  /** The site's identity — unique by construction, unlike a name nothing enforced. */
   base_url: string;
   last_working_tier: AccessTier | null;
   search_url_patterns: string[];
@@ -46,26 +46,25 @@ export class SiteProfiles {
   constructor(private readonly db: Database.Database) {}
 
   /** Registers a site (from config) if new; an existing row keeps every learned field. */
-  upsert(o: { name: string; baseUrl: string }): void {
+  upsert(o: { baseUrl: string }): void {
     this.db
-      .prepare(
-        `INSERT INTO site_profiles (name, base_url, created_at) VALUES (?, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET base_url = excluded.base_url`,
-      )
-      .run(o.name, o.baseUrl, Date.now());
+      .prepare(`INSERT INTO site_profiles (base_url, created_at) VALUES (?, ?) ON CONFLICT(base_url) DO NOTHING`)
+      .run(o.baseUrl, Date.now());
   }
 
-  get(name: string): SiteProfileRow | null {
-    const row = this.db.prepare(`SELECT * FROM site_profiles WHERE name = ?`).get(name) as SiteProfileRowRaw | undefined;
+  get(baseUrl: string): SiteProfileRow | null {
+    const row = this.db.prepare(`SELECT * FROM site_profiles WHERE base_url = ?`).get(baseUrl) as
+      | SiteProfileRowRaw
+      | undefined;
     return row ? parseRow(row) : null;
   }
 
   list(): SiteProfileRow[] {
-    const rows = this.db.prepare(`SELECT * FROM site_profiles ORDER BY name ASC`).all() as SiteProfileRowRaw[];
+    const rows = this.db.prepare(`SELECT * FROM site_profiles ORDER BY base_url ASC`).all() as SiteProfileRowRaw[];
     return rows.map(parseRow);
   }
 
-  update(name: string, patch: UpdateSiteProfileInput): void {
+  update(baseUrl: string, patch: UpdateSiteProfileInput): void {
     const sets: string[] = [];
     const params: unknown[] = [];
     if (patch.lastWorkingTier !== undefined) { sets.push('last_working_tier = ?'); params.push(patch.lastWorkingTier); }
@@ -75,8 +74,8 @@ export class SiteProfiles {
     if (patch.lastFailureAt !== undefined) { sets.push('last_failure_at = ?'); params.push(patch.lastFailureAt); }
     if (patch.failCount !== undefined) { sets.push('fail_count = ?'); params.push(patch.failCount); }
     if (sets.length === 0) return;
-    params.push(name);
-    this.db.prepare(`UPDATE site_profiles SET ${sets.join(', ')} WHERE name = ?`).run(...params);
+    params.push(baseUrl);
+    this.db.prepare(`UPDATE site_profiles SET ${sets.join(', ')} WHERE base_url = ?`).run(...params);
   }
 
 }

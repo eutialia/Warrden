@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs
 import { basename, dirname, extname, join } from 'node:path';
 import { searchSite } from '../../agent/run.js';
 import type { AppContext } from '../../context.js';
+import { siteKey, siteLabel } from '../../config/siteLabel.js';
 import { ArchiveCache, type ArchiveCacheRow } from '../../db/archiveCache.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
 import { targetEventData } from '../../events/target.js';
@@ -664,7 +665,7 @@ async function siteSearchPass(
     // Extract/copy into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
     // the pack without re-downloading. Keyed uniquely so ArchiveCache's (target, path) upsert
     // refreshes the same row rather than piling up duplicates.
-    const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${site.name}-${basename(download.filePath)}`);
+    const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${basename(download.filePath)}`);
     let files: string[];
     try {
       files = await extractArchive(download.filePath, cacheDir);
@@ -695,7 +696,7 @@ async function siteSearchPass(
       created_at: Date.now(),
     };
     // matchArchiveRow drops fully-resolved episodes from `missing` itself.
-    await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, site.name);
+    await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, siteLabel(site.baseUrl));
   }
 }
 

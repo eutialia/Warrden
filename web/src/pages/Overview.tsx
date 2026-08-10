@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
+import { MountHealth, unreachableMounts } from '@/components/MountHealth';
 import { PageHeader } from '@/components/PageHeader';
 import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusBadge, PipelineBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
-import { StatusDot, ToneBadge } from '@/components/ToneBadge';
+import { StatusDot } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -36,11 +37,11 @@ interface Verdict {
  * waiting on a decision, failures are informational after the fact.
  */
 function verdictOf(data: OverviewData): Verdict {
-  const badMounts = data.storage.filter((c) => c.status !== 'ok');
-  if (badMounts.length > 0) {
+  const bad = unreachableMounts(data.storage);
+  if (bad > 0) {
     return {
       tone: 'danger',
-      headline: `${badMounts.length} storage ${badMounts.length === 1 ? 'mount is' : 'mounts are'} unreachable`,
+      headline: `${bad} storage ${bad === 1 ? 'mount is' : 'mounts are'} unreachable`,
       detail: 'Warrden pauses filesystem work until the mounts come back. Check the container bind mounts.',
       action: { label: 'Check mounts', to: '/config#storage' },
     };
@@ -101,7 +102,6 @@ export default function Overview() {
   const verdict = data ? verdictOf(data) : null;
   const inFlight = (data?.jobs.running ?? 0) + (data?.jobs.pending ?? 0);
   const placed = (data?.placed.subtitle ?? 0) + (data?.placed.audio ?? 0);
-  const badMounts = data?.storage.filter((c) => c.status !== 'ok').length ?? 0;
   // Only worth saying once a week's worth of jobs have actually finished — "100%
   // clean" out of nothing finished is a lie of omission.
   const weekTotal = (data?.week.done ?? 0) + (data?.week.failed ?? 0);
@@ -262,13 +262,9 @@ export default function Overview() {
               <HardDrive className="size-4 text-muted-foreground" />
               Storage
             </CardTitle>
-            {data && (
-              <CardAction>
-                <ToneBadge tone={badMounts > 0 ? 'danger' : 'success'}>
-                  {badMounts > 0 ? `${badMounts} unreachable` : 'All reachable'}
-                </ToneBadge>
-              </CardAction>
-            )}
+            <CardAction>
+              <MountHealth checks={data?.storage ?? []} />
+            </CardAction>
           </CardHeader>
           <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
             {loading && <Skeleton className="h-24 w-full" />}
