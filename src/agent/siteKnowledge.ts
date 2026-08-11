@@ -350,12 +350,22 @@ function renderAgentSections(k: SiteKnowledge): string {
     .join('\n\n');
 }
 
+/** Says what the `## Access` / `## Search` / … block that follows it is, and what to do
+ * with it. Without a line like this the prompt runs from the site's URL straight into a
+ * bare markdown heading, and nothing tells the model those bullets are the site's own
+ * protocol rather than, say, a page it already fetched. This module emits it — a caller
+ * pasting the block into a prompt shouldn't have to know how to introduce it, and there
+ * is no second call site to keep in step. */
+const AGENT_KNOWLEDGE_HEADER =
+  'Site protocol notes learned on earlier runs — follow them step by step. They can be out of date: if a step does not match what the page shows, trust the page.';
+
 /**
  * The subset of a knowledge file worth putting in the agent's prompt: operator notes
  * first (marked authoritative, since they override anything the agent learned on its
- * own), then each non-empty agent section as a heading and its bullets. Empty sections —
- * including an empty operator-notes section, heading and all — are omitted. Returns `''`
- * when there's nothing to say, so a caller can skip adding an empty block to the prompt.
+ * own), then the agent's own sections under a line saying what they are. Empty sections —
+ * including an empty operator-notes section, heading and all — are omitted, header
+ * included. Returns `''` when there's nothing to say, so a caller can skip adding an
+ * empty block to the prompt.
  *
  * Operator notes are trimmed here and only here: the stored copy stays byte-exact for the
  * file, while the prompt doesn't spend tokens on the blank lines around them (and a notes
@@ -369,7 +379,7 @@ export function knowledgeForPrompt(k: SiteKnowledge): string {
     parts.push(`## Operator notes (authoritative — overrides the learned rules below)\n${notes}`);
   }
   const agentPart = renderAgentSections(k);
-  if (agentPart) parts.push(agentPart);
+  if (agentPart) parts.push(`${AGENT_KNOWLEDGE_HEADER}\n${agentPart}`);
 
   return parts.join('\n\n');
 }

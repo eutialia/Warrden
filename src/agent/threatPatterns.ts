@@ -16,7 +16,9 @@
  * thirty-two attacks aimed at the gaps rather than the rules was caught six times — the other
  * twenty-six walked past. Nothing downstream may treat a clean scan as evidence that stored
  * text is safe to replay; the controls that bound the damage are the bounded action set, the
- * same-origin guard on `request`, and the human who reads the Attention item.
+ * same-SITE guard on `request` (subdomains of the site pass it, so it is looser than
+ * same-origin), the private/loopback address guard on every fetch verb, and the human who
+ * reads the Attention item.
  *
  * Every pattern targets a SHAPE, not a word. The text this guards is protocol prose a
  * subtitle-site agent writes about a site — "POST the search form to https://…", "the
@@ -26,8 +28,10 @@
  *
  * Precision beats recall here, and the asymmetry is the reason. This scanner is defence in
  * depth, not the only control: the action set is bounded to search/open/request/download,
- * `request` is same-origin guarded (`open` and `download` are not — see the guard in
- * `loop.ts`), and a refused file raises an Attention item a human reads. A missed payload
+ * `request` is same-site guarded — any subdomain of the site passes it, and `open` and
+ * `download` are not guarded that way at all — every verb is refused a private or loopback
+ * address, and a refused file raises an Attention item a human reads (see the guards in
+ * `loop.ts` for what each one does and does not cover). A missed payload
  * therefore has a bounded blast radius, while a false positive silently deletes a rule the
  * agent paid an LLM call to learn and will pay again to relearn. So this file holds only
  * shapes that are unambiguous in this domain — role and turn markers, invisible-character

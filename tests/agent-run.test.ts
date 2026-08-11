@@ -1,6 +1,10 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
-import { searchSite, failBackoffMs, tierStartIndex, createRunTiers } from '../src/agent/run.js';
-import { emptyKnowledge, saveKnowledge } from '../src/agent/siteKnowledge.js';
+import { searchSite, failBackoffMs, tierStartIndex, createRunTiers, defaultSeedsDir } from '../src/agent/run.js';
+import { emptyKnowledge, renderKnowledge, saveKnowledge } from '../src/agent/siteKnowledge.js';
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { SiteProfiles, type AccessTier } from '../src/db/siteProfiles.js';
 import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
@@ -18,6 +22,9 @@ import {
 } from './helpers.js';
 
 const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
+/** Every `searchSite` call here passes this as `seedsDir`: an empty directory, so no test
+ * can pick up a seed file that ships with the app just because it shares a base URL. */
+const NO_SEEDS = tmpDir();
 const OK_HTML: FetchResult = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
 
 /** Sentinel-complete agent action for FakeGenerator's strict schema. */
@@ -129,7 +136,7 @@ describe('searchSite', () => {
       act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' }),
     ]);
 
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).toEqual({ filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip' });
     expect(tiers.made).toEqual(['curl', 'chromium']);
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
@@ -145,7 +152,7 @@ describe('searchSite', () => {
     const tiers = stubTiers([]);
 
     await withFakeTime(async () => {
-      const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+      const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
       expect(out).toBeNull();
     });
     expect(tiers.made).toHaveLength(0);
@@ -157,7 +164,7 @@ describe('searchSite', () => {
     ctx.llm = new FakeGenerator([new Error('bad llm output')]);
     const tiers = stubTiers([OK_HTML]);
 
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).toBeNull();
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.fail_count).toBe(1);
@@ -178,7 +185,7 @@ describe('searchSite', () => {
       },
     };
 
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).toBeNull();
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')).toBeDefined();
   });
@@ -193,7 +200,7 @@ describe('searchSite', () => {
     ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).not.toBeNull();
     const profile = profiles.get('https://acg.rip')!;
     expect(profile.fail_count).toBe(0);
@@ -215,7 +222,7 @@ describe('searchSite', () => {
     ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).not.toBeNull();
     expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeUndefined();
   });
@@ -228,7 +235,7 @@ describe('searchSite', () => {
     ]);
     const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).not.toBeNull();
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.search_url_patterns).toEqual(['https://acg.rip/find?q=frieren']);
@@ -243,7 +250,7 @@ describe('searchSite', () => {
     ]);
     const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
-    await searchSite(ctx, job, literalTemplate, 'F', tmpDir(), tiers);
+    await searchSite(ctx, job, literalTemplate, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.search_url_patterns).toEqual([]);
   });
@@ -268,7 +275,7 @@ describe('searchSite', () => {
     const { ctx, job } = setup();
     ctx.llm = new FakeGenerator(llm);
     const tiers = stubTiers(results as FetchResult[]);
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out).toEqual(expected);
   });
 
@@ -289,7 +296,7 @@ describe('searchSite', () => {
     ctx.llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stop' })]);
     const tiers = stubTiers([]);
 
-    await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
 
     const llm = ctx.llm as FakeGenerator;
     expect(llm.calls[0]!.system).toContain('IF searching THEN GET /s?q={query}.');
@@ -304,7 +311,10 @@ describe('searchSite', () => {
 
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stop' })]);
     const job = enqueueAndClaim(ctx, subtitleJobInput());
-    await searchSite({ ...ctx, llm }, job, { baseUrl: 'https://x.test' }, 'Frieren', tmpDir(), { tiers: stubTiers() });
+    await searchSite({ ...ctx, llm }, job, { baseUrl: 'https://x.test' }, 'Frieren', tmpDir(), {
+      tiers: stubTiers(),
+      seedsDir: NO_SEEDS,
+    });
 
     expect(llm.calls[0]!.system).not.toContain('evil.test');
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-refused')).toBe(true);
@@ -319,10 +329,68 @@ describe('searchSite', () => {
     ctx.llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stop' })]);
     const tiers = stubTiers([]);
 
-    await searchSite(ctx, job, SITE, 'F', tmpDir(), tiers);
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
 
     expect(hasEvent(ctx.events.list(), 'subtitle.knowledge-refused')).toBe(false);
     const llm = ctx.llm as FakeGenerator;
     expect(llm.calls[0]!.system).toContain('evil.test');
+  });
+
+  it('copies a seed file from seedsDir when the site has no local knowledge yet', async () => {
+    const { ctx, job } = setup();
+    const seedsDir = tmpDir();
+    const seed = emptyKnowledge(SITE.baseUrl);
+    seed.sections.Access.push('IF blocked THEN retry with the chromium tier. (confirmed 2026-08-01)');
+    writeFileSync(join(seedsDir, 'acg.rip.md'), renderKnowledge(seed), 'utf8');
+    ctx.llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stop' })]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir });
+
+    expect((ctx.llm as FakeGenerator).calls[0]!.system).toContain('IF blocked THEN retry with the chromium tier.');
+  });
+
+  it('searches without knowledge, rather than failing the job, when the file cannot be read', async () => {
+    const { ctx, job } = setup();
+    // A directory where the knowledge file belongs: readFileSync throws EISDIR, which used
+    // to escape searchSite and fail the whole subtitle job over one site's file.
+    mkdirSync(join(ctx.dataDir, 'sites', 'acg.rip.md'), { recursive: true });
+    ctx.llm = new FakeGenerator(new Array(4).fill(null).map(() => act({ action: 'give_up', url: '', note: 'stop' })));
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    expect(out).toBeNull();
+    expect(hasEvent(ctx.events.list(), 'subtitle.knowledge-unreadable')).toBe(true);
+    // The site ran normally, just without knowledge — not a hard failure over one file.
+    expect(hasEvent(ctx.events.list(), 'subtitle.site-failed')).toBe(false);
+    expect((ctx.llm as FakeGenerator).calls[0]!.system).not.toContain('## ');
+  });
+
+  it('stops the site after repeated refusals instead of replaying them on every rung', async () => {
+    const { ctx, job } = setup();
+    // Six actions queued but only three may be spent: the run gives up at the refusal
+    // limit and the ladder must not escalate and pay for the same refusals again.
+    ctx.llm = new FakeGenerator(
+      new Array(6).fill(null).map(() => act({ action: 'open', url: 'http://169.254.169.254/latest/meta-data', note: 'probe' })),
+    );
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    expect(out).toBeNull();
+    expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);
+    expect(findEvent(ctx.events.list(), 'subtitle.site-failed')?.message).toContain('refused address');
+  });
+
+  it('resolves the seeds directory from this module, not the working directory', () => {
+    // Module-relative like db.ts's migrations dir: an operator starting the server from
+    // any other directory must still find the seeds. `tests/` sits one level under the
+    // repo root, the same as `src/agent/`'s two.
+    const expected = join(dirname(fileURLToPath(import.meta.url)), '..', 'seeds', 'sites');
+    const cwd = process.cwd();
+    try {
+      process.chdir(tmpdir());
+      expect(defaultSeedsDir()).toBe(expected);
+    } finally {
+      process.chdir(cwd);
+    }
   });
 });

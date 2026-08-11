@@ -155,6 +155,7 @@ describe('runAgentLoop', () => {
     ['sibling subdomain (cdn next to the bare site)', { baseUrl: 'https://acg.rip' }, 'https://cdn.acg.rip/api'],
     ['parent host of the site (www stripped)', { baseUrl: 'https://auth.acg.rip' }, 'https://acg.rip/api'],
     ['sibling host with www on the site side', { baseUrl: 'https://www.acg.rip' }, 'https://cdn.acg.rip/api'],
+    ['same site on a non-default port', { baseUrl: 'https://acg.rip' }, 'https://cdn.acg.rip:8443/api'],
   ])('request accepts a same-site destination: %s', async (_name, site, url) => {
     const llm = new FakeGenerator([
       act({ action: 'request', url, note: 'same-site probe', method: 'GET' }),
@@ -169,6 +170,7 @@ describe('runAgentLoop', () => {
     ['unrelated foreign host', 'https://evil.test/api'],
     ['host that merely contains the site name', 'https://acg.rip.evil.test/api'],
     ['different scheme, same host', 'http://acg.rip/api'],
+    ['the bare TLD above the site', 'https://rip/api'],
   ])('request rejects a genuinely foreign destination: %s', async (_name, url) => {
     const llm = new FakeGenerator([
       act({ action: 'request', url, note: 'foreign probe', method: 'GET' }),
@@ -179,44 +181,63 @@ describe('runAgentLoop', () => {
     expect(tier.calls).toHaveLength(0);
   });
 
-  it.each([
-    ['search', 'search'],
-    ['open', 'open'],
-    ['request', 'request'],
-    ['download', 'download'],
-  ] as const)('%s refuses a private/loopback destination without fetching', async (_name, action) => {
-    const llm = new FakeGenerator([
-      act({ action, url: 'http://127.0.0.1:8080/admin', note: 'probe lan' }),
-      act({ action: 'give_up', url: '', note: 'stopped' }),
-    ]);
-    const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', filePath: '/dl/x', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(tier.calls).toHaveLength(0);
-    const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain(`${action} refused: http://127.0.0.1:8080/admin targets a private/loopback address`);
-  });
-
-  it.each([
+  /** Every spelling of a private/loopback destination the guard must refuse. The IPv4
+   * forms Node's URL parser rewrites (integer, octal, trailing dot) are here beside the
+   * ones it leaves alone, because the guard sees the parser's output and not the text the
+   * model wrote — and the IPv4-mapped IPv6 forms are here because that rewriting is what
+   * once turned `[::ffff:169.254.169.254]` into a spelling no range test recognized. */
+  const PRIVATE_URLS: [string, string][] = [
     ['loopback IPv4', 'http://127.0.0.1/x'],
+    ['loopback IPv4, another /8 address', 'http://127.9.9.9/x'],
+    ['loopback IPv4 as an integer', 'http://2130706433/x'],
+    ['loopback IPv4 with a trailing dot', 'http://127.0.0.1./x'],
     ['loopback IPv6', 'http://[::1]/x'],
+    ['unspecified IPv6', 'http://[::]/x'],
+    ['all-zeroes IPv4', 'http://0.0.0.0/x'],
     ['localhost name', 'http://localhost/x'],
+    ['localhost with a trailing dot', 'http://localhost./x'],
+    ['subdomain of localhost', 'http://api.localhost/x'],
+    ['LOCALHOST uppercased', 'http://LOCALHOST/x'],
+    ['userinfo pointing at loopback', 'http://acg.rip@127.0.0.1/x'],
     ['private 10/8', 'http://10.0.0.5/x'],
     ['private 172.16/12', 'http://172.20.1.1/x'],
     ['private 192.168/16', 'http://192.168.1.1/x'],
     ['link-local 169.254/16', 'http://169.254.1.1/x'],
     ['cloud metadata address', 'http://169.254.169.254/latest/meta-data'],
     ['unique-local IPv6', 'http://[fd00::1]/x'],
-  ])('open refuses %s and continues rather than throwing', async (_name, url) => {
-    const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
-    const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
+    ['unique-local IPv6, fc half of the /7', 'http://[fc00::1]/x'],
+    ['link-local IPv6 fe80::/10', 'http://[fe80::1]/x'],
+    ['IPv4-mapped IPv6 loopback', 'http://[::ffff:127.0.0.1]/x'],
+    ['IPv4-mapped IPv6 metadata address', 'http://[::ffff:169.254.169.254]/latest/meta-data'],
+    ['IPv4-mapped IPv6 private 10/8', 'http://[::ffff:10.0.0.1]/x'],
+    ['IPv4-mapped IPv6 private 192.168/16', 'http://[::ffff:192.168.0.1]/x'],
+    ['IPv4-mapped IPv6 written in hex groups', 'http://[::ffff:7f00:1]/x'],
+    ['IPv4-compatible IPv6', 'http://[::127.0.0.1]/x'],
+    ['IPv4-translated IPv6', 'http://[::ffff:0:127.0.0.1]/x'],
+  ];
+
+  it.each(
+    (['search', 'open', 'request', 'download'] as const).flatMap((action) =>
+      PRIVATE_URLS.map(([name, url]) => [action, name, url] as const),
+    ),
+  )('%s refuses %s and continues rather than throwing', async (action, _name, url) => {
+    const llm = new FakeGenerator([act({ action, url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
+    const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', filePath: '/dl/x', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out).toEqual({ kind: 'gave-up' });
     expect(tier.calls).toHaveLength(0);
+    expect(llm.calls[1]!.prompt).toContain(`${action} refused: ${url} targets a private/loopback address`);
   });
 
   it.each([
     ['public host, not private', 'https://cdn.example.test/x'],
     ['acg.rip itself', 'https://acg.rip/x'],
+    ['a public IPv4 address', 'http://8.8.8.8/x'],
+    ['a public IPv6 address', 'http://[2606:4700::1111]/x'],
+    ['a public IPv4 address mapped into IPv6', 'http://[::ffff:8.8.8.8]/x'],
+    ['172.32/16, just past the private range', 'http://172.32.0.1/x'],
+    ['192.169/16, just past the private range', 'http://192.169.0.1/x'],
+    ['a host whose name merely ends in localhost', 'https://mylocalhost.test/x'],
   ])('open does not refuse %s', async (_name, url) => {
     const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'fine', blocked: false }]);
@@ -259,11 +280,40 @@ describe('runAgentLoop', () => {
   });
 
   it('injects nothing when knowledge is empty (no stray heading)', async () => {
-    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'done' })]);
-    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
-    const { system } = llm.calls[0]!;
-    expect(system).not.toContain('Site knowledge');
-    expect(system).not.toContain('undefined');
+    // Discriminating against the same call with knowledge: the assertion is that the block
+    // and its markdown heading are absent, not that some literal nobody emits is absent.
+    const knowledge = '## Search\n- IF searching THEN GET /s. (confirmed 2026-08-10)';
+    const run = async (k: string): Promise<string> => {
+      const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'done' })]);
+      await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: k, query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+      return llm.calls[0]!.system!;
+    };
+
+    const withKnowledge = await run(knowledge);
+    const without = await run('');
+    expect(withKnowledge).toContain('## Search');
+    expect(without).not.toContain('## ');
+    expect(without).not.toContain('undefined');
+    // Nothing but the knowledge block differs between the two prompts.
+    expect(withKnowledge.replace(`${knowledge}\n`, '')).toBe(without);
+  });
+
+  it('gives up on the site after three refused destinations instead of spending the budget', async () => {
+    const llm = new FakeGenerator(
+      new Array(5).fill(null).map(() => act({ action: 'open', url: 'http://169.254.169.254/latest/meta-data', note: 'probe' })),
+    );
+    const tier = fakeTier([]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
+    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3 });
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it('counts same-site refusals toward the same limit', async () => {
+    const llm = new FakeGenerator(
+      new Array(5).fill(null).map(() => act({ action: 'request', url: 'https://evil.test/api', note: 'probe', method: 'GET' })),
+    );
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
+    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3 });
   });
 
   it('joins action bullets as separate lines and states download/cookie/elision rules', async () => {

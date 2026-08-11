@@ -353,7 +353,7 @@ export default function Sites() {
 
                     <div className="mt-3 flex items-start gap-2 border-t pt-3">
                       <p className="min-w-0 flex-1 text-xs whitespace-pre-wrap text-muted-foreground">
-                        {profile?.notes || 'No notes. Anything you write here is given to the browse agent as context.'}
+                        {profile?.notes || 'No notes. Notes are stored with the site; the browse agent does not read them yet.'}
                       </p>
                       <Button
                         variant="outline"

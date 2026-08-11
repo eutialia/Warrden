@@ -447,6 +447,25 @@ describe('prompt rendering', () => {
     expect(prompt.indexOf('Never use this site')).toBeLessThan(prompt.indexOf('IF the search page'));
   });
 
+  it('introduces the agent sections instead of dropping a bare heading into the prompt', () => {
+    const k = emptyKnowledge('https://x.test');
+    k.sections.Search.push('IF searching THEN use /s. (confirmed 2026-08-10)');
+    const prompt = knowledgeForPrompt(k);
+    // The block must not open on its own markdown heading: something has to say what these
+    // bullets are and that the model should follow them.
+    expect(prompt.startsWith('## ')).toBe(false);
+    expect(prompt.split('\n')[0]).toMatch(/follow/i);
+    expect(prompt.indexOf('## Search')).toBeGreaterThan(0);
+  });
+
+  it('has no agent-section framing when only operator notes are present', () => {
+    const k = emptyKnowledge('https://x.test');
+    k.operatorNotes = 'Mirror is at example.test.';
+    const prompt = knowledgeForPrompt(k);
+    expect(prompt).toContain('Mirror is at example.test.');
+    expect(prompt).not.toMatch(/follow them step by step/i);
+  });
+
   it('returns an empty string when there is nothing to say', () => {
     expect(knowledgeForPrompt(emptyKnowledge('https://x.test'))).toBe('');
   });

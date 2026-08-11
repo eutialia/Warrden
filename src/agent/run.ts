@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AppContext } from '../context.js';
 import { siteLabel } from '../config/siteLabel.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
@@ -13,11 +14,18 @@ import { scanForThreats } from './threatPatterns.js';
 import { runAgentLoop, TierBlockedError } from './loop.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
 
-/** Where seed knowledge files live for a fresh install: `seeds/sites` under the process
- * root. Task 7 populates this directory; until then it simply doesn't exist, which
- * `loadKnowledge` treats the same as "no seed" — never a throw. */
+/**
+ * Where seed knowledge files live for a fresh install: `seeds/sites` at the repo root,
+ * resolved relative to this module's own location (not `process.cwd()`), the same
+ * convention as `db.ts`'s migrations dir and `app.ts`'s web dist dir — this file sits one
+ * level under the root at `agent/` whether it's running from `src/` (tsx) or `dist/`
+ * (compiled). Cwd resolution looked equivalent and is not: an operator starting the
+ * server from anywhere but the app root would get no seeds at all, and silently, since a
+ * missing directory is indistinguishable from "this site has no seed" by design —
+ * `loadKnowledge` only ever asks whether the file exists, and never throws.
+ */
 export function defaultSeedsDir(): string {
-  return join(process.cwd(), 'seeds', 'sites');
+  return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'seeds', 'sites');
 }
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
@@ -65,15 +73,65 @@ export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): Tier
 
 export interface SearchSiteDeps {
   tiers?: TierFactory;
-  /** Overrides `defaultSeedsDir()` — tests point this at a fixture directory instead of
-   * the real `seeds/sites`. */
+  /** Overrides `defaultSeedsDir()`. Tests always set it, pointing at a fixture directory
+   * (usually an empty one), so a real shipped seed can never leak into a test that
+   * happens to use the same base URL. */
   seedsDir?: string;
+}
+
+/**
+ * The site's knowledge, rendered for the loop's system prompt, or `''` when there is none
+ * to give. Two things can take it away, and both degrade this one site rather than the
+ * job:
+ *
+ * - The agent-owned half trips the injection scan. Neither half is injected then, since a
+ *   tampered agent half makes the whole file suspect — not repaired, not partially used —
+ *   and an attention-level event puts it in front of a human. Operator notes are never
+ *   scanned: they're trusted input by definition, and scanning them would let a phrase a
+ *   human deliberately wrote refuse their own instruction. A clean scan is a cheap
+ *   tripwire, not proof of safety — the bounded action set and the guards in loop.ts are
+ *   what actually bound the damage of anything that gets through.
+ * - Reading the file fails outright: the data volume went read-only, or something left a
+ *   directory where the file should be. `loadKnowledge` reads and copies without a net,
+ *   so that throw would otherwise escape `searchSite`, which promises never to throw, and
+ *   fail the whole subtitle job over one site's file.
+ */
+function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, seedsDir: string): string {
+  try {
+    const knowledgeFile = loadKnowledge(ctx.dataDir, baseUrl, seedsDir);
+    const agentText = AGENT_SECTIONS.flatMap((s) => knowledgeFile.sections[s]).join('\n');
+    const threats = agentText ? scanForThreats(agentText, 'strict') : [];
+    if (threats.length === 0) return knowledgeForPrompt(knowledgeFile);
+
+    ctx.events.append({
+      kind: 'subtitle.knowledge-refused',
+      level: 'attention',
+      jobId: job.id,
+      message: `Site knowledge for ${siteLabel(baseUrl)} looks tampered with and was not used`,
+      data: targetEventData(job, {
+        site: siteLabel(baseUrl),
+        dedupeKey: siteLabel(baseUrl),
+        patterns: threats.map((t) => t.pattern),
+        excerpt: threats[0]?.excerpt,
+      }),
+    });
+    return '';
+  } catch (err) {
+    ctx.events.append({
+      kind: 'subtitle.knowledge-unreadable',
+      level: 'warn',
+      jobId: job.id,
+      message: `Site knowledge for ${siteLabel(baseUrl)} could not be read — searching without it: ${errorMessage(err)}`,
+      data: targetEventData(job, { site: siteLabel(baseUrl), dedupeKey: siteLabel(baseUrl) }),
+    });
+    return '';
+  }
 }
 
 /**
  * Runs the site-search agent for one site with full access-ladder orchestration: cooldown
  * check, then generic browse loop with tier escalation. Site-specific protocols live in
- * profile notes (injected into the loop prompt), not in code adapters. Returns the
+ * the site's knowledge file (injected into the loop prompt), not in code adapters. Returns the
  * downloaded file + its source URL, or null when the site couldn't produce one this run —
  * never throws (a broken site is a health event, not a job failure). The transcript lands
  * in `subtitle_runs` and streams live as `subtitle.transcript` events.
@@ -84,14 +142,9 @@ export async function searchSite(
   site: SubtitleSiteConfig,
   query: string | SearchHints,
   destDir: string,
-  tiersOrDeps: TierFactory | SearchSiteDeps = createRunTiers(),
+  deps: SearchSiteDeps = {},
 ): Promise<{ filePath: string; url: string } | null> {
-  // Back-compat: tests pass a TierFactory as the 6th arg; production may pass deps.
-  const deps: SearchSiteDeps =
-    'make' in tiersOrDeps && typeof tiersOrDeps.make === 'function'
-      ? { tiers: tiersOrDeps }
-      : (tiersOrDeps as SearchSiteDeps);
-  // Fresh jar per invocation when using the real factory (each default arg call is new;
+  // Fresh jar per invocation when using the real factory (each call builds a new one;
   // deps.tiers from tests is left alone).
   const tiers = deps.tiers ?? createRunTiers();
 
@@ -127,33 +180,7 @@ export async function searchSite(
     return null;
   }
 
-  // Load the site's knowledge file and scan the agent-owned half for prompt injection
-  // before it ever reaches the loop's system prompt. Operator notes are never scanned —
-  // they're trusted input by definition, and scanning them would let a phrase a human
-  // deliberately wrote refuse their own instruction. A clean scan is a cheap tripwire,
-  // not proof of safety: the bounded action set and the guards in loop.ts are what
-  // actually bound the damage of anything that gets through.
-  const knowledgeFile = loadKnowledge(ctx.dataDir, site.baseUrl, deps.seedsDir ?? defaultSeedsDir());
-  const agentText = AGENT_SECTIONS.flatMap((s) => knowledgeFile.sections[s]).join('\n');
-  const threats = agentText ? scanForThreats(agentText, 'strict') : [];
-  if (threats.length > 0) {
-    ctx.events.append({
-      kind: 'subtitle.knowledge-refused',
-      level: 'attention',
-      jobId: job.id,
-      message: `Site knowledge for ${siteLabel(site.baseUrl)} looks tampered with and was not used`,
-      data: targetEventData(job, {
-        site: siteLabel(site.baseUrl),
-        dedupeKey: siteLabel(site.baseUrl),
-        patterns: threats.map((t) => t.pattern),
-        excerpt: threats[0]?.excerpt,
-      }),
-    });
-  }
-  // Tripped whole-file refusal: neither half is injected, since a tampered agent half
-  // makes the whole file suspect — not repaired, not partially used. Task 4's write path
-  // is the place bullets get dropped individually.
-  const knowledge = threats.length > 0 ? '' : knowledgeForPrompt(knowledgeFile);
+  const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, deps.seedsDir ?? defaultSeedsDir());
 
   const runId = runs.start(job.id, siteLabel(site.baseUrl));
   // Start at the remembered tier (with optional decay); unimplemented seams fall back via
@@ -226,6 +253,16 @@ export async function searchSite(
             searchUrlPatterns: learned,
           });
           return { filePath: outcome.filePath, url: outcome.url };
+        }
+        if (outcome.kind === 'refused-repeatedly') {
+          // The knowledge file (or the model reading it) keeps aiming at addresses the
+          // guards refuse. Escalating would replay the same refusals on every remaining
+          // rung at full step budget, so the site stops here and takes the usual failure
+          // backoff — the next job retries it, after a human has had the chance to look.
+          return failSite(
+            'subtitle.site-failed',
+            `Site ${siteLabel(site.baseUrl)} failed: ${outcome.refusals} steps targeted a refused address`,
+          );
         }
         // exhausted/gave-up: fall through to the next rung.
       } catch (err) {

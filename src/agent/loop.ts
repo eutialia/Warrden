@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
 import type { StructuredGenerator } from '../llm/generator.js';
 import type { FetchTier } from './tiers.js';
@@ -32,7 +33,18 @@ export const AgentActionSchema = z.object({
 type AgentOutcome =
   | { kind: 'downloaded'; filePath: string; url: string; searchUrl: string | null }
   | { kind: 'exhausted' }
-  | { kind: 'gave-up' };
+  | { kind: 'gave-up' }
+  /** REFUSAL_LIMIT guarded destinations in one run — the runner stops the site rather
+   * than paying for the same refusals again on every remaining tier. */
+  | { kind: 'refused-repeatedly'; refusals: number };
+
+/**
+ * How many refused destinations end a run. A refusal costs an LLM call and returns no
+ * page, so a knowledge file that keeps naming a guarded address would otherwise burn the
+ * whole step budget once per tier — four full budgets of paid calls before the site gives
+ * up. Three leaves room for a model that misreads a page once and corrects itself.
+ */
+const REFUSAL_LIMIT = 3;
 
 /** One history step: a fixed prefix plus an optional observation body (already OBSERVATION_CAP-capped). */
 interface HistoryStep {
@@ -57,11 +69,16 @@ function formatHistoryForPrompt(history: HistoryStep[]): string {
 
 /**
  * Whether `url` is on the same site as `baseUrl` (request's same-site guard) — same
- * scheme, and hosts that are equal, or one a subdomain of the other, once a leading
+ * scheme, and hostnames that are equal, or one a subdomain of the other, once a leading
  * `www.` is stripped from both. Not same-origin: a subtitle site legitimately serves
  * auth and downloads from sibling hosts (`auth.example.test`, `cdn.example.test` next to
  * `www.example.test`), so an exact-host comparison refused traffic the site itself sends
  * the agent to.
+ *
+ * The ancestor side of that relation stops one label short of the top: `acg.rip` and
+ * `rip` are not the same site, and without the dot test a site on any two-label domain
+ * would accept every host under its TLD. Ports are not compared — a site that moves its
+ * API to `:8443` is still the same site — so this is a host relation, not an origin one.
  */
 function isSameSite(url: string, baseUrl: string): boolean {
   try {
@@ -69,44 +86,119 @@ function isSameSite(url: string, baseUrl: string): boolean {
     const b = new URL(baseUrl);
     if (a.protocol !== b.protocol) return false;
     const stripWww = (host: string): string => host.replace(/^www\./, '');
-    const ah = stripWww(a.host);
-    const bh = stripWww(b.host);
-    return ah === bh || ah.endsWith(`.${bh}`) || bh.endsWith(`.${ah}`);
+    const ah = stripWww(a.hostname);
+    const bh = stripWww(b.hostname);
+    if (ah === bh) return true;
+    return (ah.endsWith(`.${bh}`) && bh.includes('.')) || (bh.endsWith(`.${ah}`) && ah.includes('.'));
   } catch {
     return false;
   }
 }
 
+/** The four bytes of a dotted-quad IPv4 address, which `isIP` has already validated. */
+function ipv4Bytes(address: string): number[] {
+  return address.split('.').map(Number);
+}
+
+/**
+ * An IPv6 literal as its 16 bytes, or `null` if it can't be read. Handles the one `::`
+ * run and a trailing dotted quad (`::ffff:127.0.0.1`), which is all the textual forms
+ * are; callers reach this only after `isIP` has said the string is a valid IPv6 address.
+ */
+function ipv6Bytes(address: string): number[] | null {
+  const halves = address.split('::');
+  if (halves.length > 2) return null;
+
+  const expand = (part: string): number[] | null => {
+    if (part === '') return [];
+    const out: number[] = [];
+    const groups = part.split(':');
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i]!;
+      if (i === groups.length - 1 && group.includes('.')) {
+        out.push(...ipv4Bytes(group));
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      const value = Number.parseInt(group, 16);
+      out.push(value >> 8, value & 0xff);
+    }
+    return out;
+  };
+
+  const head = expand(halves[0]!);
+  const tail = halves.length === 2 ? expand(halves[1]!) : [];
+  if (head === null || tail === null) return null;
+  const fill = 16 - head.length - tail.length;
+  if (fill < 0 || (halves.length === 1 && fill !== 0)) return null;
+  return [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
+/**
+ * The IPv4 address an IPv6 literal carries in its low four bytes, when the high bytes are
+ * one of the prefixes that mean "this is really an IPv4 address": `::ffff:0:0/96`
+ * (IPv4-mapped, which is what `http://[::ffff:127.0.0.1]/` becomes once the URL parser
+ * normalizes it), `::/96` (IPv4-compatible, and with it `::1` and `::` themselves), and
+ * `::ffff:0:0:0/96` (IPv4-translated). Every one of those spellings reaches the same
+ * machine as the bare IPv4 address, so all of them have to be judged as that address
+ * rather than as an unrecognized IPv6 host.
+ */
+function embeddedIpv4(bytes: number[]): number[] | null {
+  const zeros = (from: number, to: number): boolean => bytes.slice(from, to).every((b) => b === 0);
+  const mappedOrCompatible = zeros(0, 10) && (zeros(10, 12) || (bytes[10] === 0xff && bytes[11] === 0xff));
+  const translated = zeros(0, 8) && bytes[8] === 0xff && bytes[9] === 0xff && zeros(10, 12);
+  return mappedOrCompatible || translated ? bytes.slice(12) : null;
+}
+
+function isPrivateIpv4(bytes: number[]): boolean {
+  const [a, b] = bytes as [number, number];
+  if (a === 0) return true; // "this network" 0/8 — 0.0.0.0 reaches loopback on Linux
+  if (a === 127) return true; // loopback 127.0.0.0/8
+  if (a === 10) return true; // private 10/8
+  if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
+  if (a === 192 && b === 168) return true; // private 192.168/16
+  if (a === 169 && b === 254) return true; // link-local 169.254/16 (incl. 169.254.169.254)
+  return false;
+}
+
 /**
  * Whether `hostname` (a URL's `.hostname`, brackets included for IPv6) names a loopback,
- * private, or link-local destination: `127.0.0.0/8` and `localhost`, `10/8`, `172.16/12`,
- * `192.168/16`, `169.254/16` (which includes the cloud metadata address
- * `169.254.169.254`), `::1`, and unique-local IPv6 `fc00::/7`. Closes the
- * server-side-request-forgery shape — page text the agent reads can otherwise name any
- * URL, and without this guard a fetch verb would happily reach a LAN service or a cloud
- * metadata endpoint.
+ * private, or link-local destination. Closes the server-side-request-forgery shape — page
+ * text the agent reads can otherwise name any URL, and without this guard a fetch verb
+ * would happily reach a LAN service or a cloud metadata endpoint.
+ *
+ * The host is normalized before any range test, because the ranges are the easy half and
+ * the spellings are the hard one. A trailing dot comes off (`localhost.` resolves exactly
+ * like `localhost`), an IPv6 literal is read as its 16 bytes, and a literal that carries
+ * an IPv4 address in its low bytes is judged as that IPv4 address. What is then refused:
+ * `0.0.0.0/8`, `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `169.254/16` (which
+ * includes the cloud metadata address `169.254.169.254`), the names `localhost` and
+ * `*.localhost`, `::1` and `::`, unique-local `fc00::/7`, and link-local `fe80::/10`.
+ *
+ * What it does NOT catch, and cannot: a hostname that merely *resolves* to one of those
+ * addresses. An attacker who controls a DNS record can point `pack.example.test` at
+ * 127.0.0.1, or answer twice and rebind between this check and the connection. Catching
+ * that means checking the address the socket actually connected to, which belongs in the
+ * fetch tiers and not here. This guard covers literals only, and that is the whole of the
+ * claim.
  */
 function isPrivateOrLoopbackHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  let host = hostname.toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (host.endsWith('.')) host = host.slice(0, -1);
 
-  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
-
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
-  if (ipv4) {
-    const a = Number(ipv4[1]);
-    const b = Number(ipv4[2]);
-    if (a === 127) return true; // loopback 127.0.0.0/8
-    if (a === 10) return true; // private 10/8
-    if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
-    if (a === 192 && b === 168) return true; // private 192.168/16
-    if (a === 169 && b === 254) return true; // link-local 169.254/16 (incl. 169.254.169.254)
+  const version = isIP(host);
+  if (version === 4) return isPrivateIpv4(ipv4Bytes(host));
+  if (version === 6) {
+    const bytes = ipv6Bytes(host);
+    if (bytes === null) return true; // a literal this can't read is refused, not allowed
+    const embedded = embeddedIpv4(bytes);
+    if (embedded !== null) return isPrivateIpv4(embedded);
+    if ((bytes[0]! & 0xfe) === 0xfc) return true; // unique-local fc00::/7
+    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true; // link-local fe80::/10
     return false;
   }
-
-  if (bare === '::1') return true; // loopback
-  if (/^fc[0-9a-f]{2}:|^fd[0-9a-f]{2}:/.test(bare)) return true; // unique-local fc00::/7
-  return false;
+  return host === 'localhost' || host.endsWith('.localhost');
 }
 
 /** A refusal line for `action`/`url` if it targets a private or loopback destination,
@@ -183,6 +275,14 @@ export async function runAgentLoop(input: {
 
   const history: HistoryStep[] = [];
   let lastSearchUrl: string | null = null;
+  let refusals = 0;
+  /** Records a guarded destination as this step's observation and reports whether the run
+   * has spent its refusal allowance. */
+  const refuse = (line: string): boolean => {
+    history.push({ prefix: line });
+    refusals += 1;
+    return refusals >= REFUSAL_LIMIT;
+  };
   for (let step = 0; step < maxSteps; step++) {
     const prompt = [
       `Title: ${query}`,
@@ -209,7 +309,7 @@ export async function runAgentLoop(input: {
     // actually bounds the damage a tampered or malicious page can do.
     const privateRefusal = privateDestinationRefusal(action.action, action.url);
     if (privateRefusal) {
-      history.push({ prefix: privateRefusal });
+      if (refuse(privateRefusal)) return { kind: 'refused-repeatedly', refusals };
       continue;
     }
 
@@ -244,7 +344,8 @@ export async function runAgentLoop(input: {
         } catch {
           siteHost = site.baseUrl;
         }
-        history.push({ prefix: `request refused: ${action.url} is not on ${siteHost}` });
+        const line = `request refused: ${action.url} is not on ${siteHost}`;
+        if (refuse(line)) return { kind: 'refused-repeatedly', refusals };
         continue;
       }
 
