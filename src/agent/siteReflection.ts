@@ -54,6 +54,16 @@ const MAX_DROPPED_REPORTED = 10;
  * THEN y.` would be immune to decay forever. */
 const STAMP_RE = /\s*\(confirmed \d{4}-\d{2}-\d{2}\)\s*/g;
 
+/** Every code point a text format may treat as ending a line: CR, LF, next line, vertical
+ * tab, form feed, and the Unicode line/paragraph separators. `parseKnowledge` splits on LF
+ * alone, but the file is also read by a language model whose tokenizer's idea of a line
+ * break is its own — a bullet carrying U+0085 renders as a forged `## Operator notes`
+ * heading in the prompt whether or not our parser agrees. U+2028 and U+2029 are worse than
+ * cosmetic: `.` in `BULLET_RE` does not match them, so a bullet containing one stops
+ * parsing as a bullet at all and disappears on the next save, after the operator was told
+ * the write applied. One rule: a bullet is one line by every definition of a line. */
+const LINE_BREAK_RE = /[\r\n\v\f\u0085\u2028\u2029]/;
+
 /** Bullet text that would forge file structure once rendered, mapped to why it's refused.
  * `renderKnowledge` writes a bullet as `- ${text}` with no escaping, so any of these turn
  * one operation into markdown the next `parseKnowledge` reads as something else entirely:
@@ -63,7 +73,7 @@ const STAMP_RE = /\s*\(confirmed \d{4}-\d{2}-\d{2}\)\s*/g;
  * was made strict at exactly these boundaries; the writer must not be able to forge them
  * from the other side. */
 const FORGERY_CHECKS: readonly { test: RegExp; why: string }[] = [
-  { test: /[\r\n]/, why: 'line break in bullet text — a bullet is one line' },
+  { test: LINE_BREAK_RE, why: 'line break in bullet text — a bullet is one line' },
   { test: /^#{1,6}\s/, why: 'bullet text starts a markdown heading' },
   { test: /^-\s/, why: 'bullet text starts a markdown bullet marker' },
 ];
@@ -152,7 +162,8 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  *
  * 0. Anything past `MAX_OPS` is dropped unread, and so is any bullet or target longer than
  *    `MAX_BULLET_CHARS`. Both bound what one response can do — to the file, and to the
- *    event that quotes the refusals back.
+ *    event that quotes the refusals back. The bullet cap is tested after check 4, so
+ *    padding a hostile bullet past it cannot downgrade the refusal to a length complaint.
  * 1. A section outside `AGENT_SECTIONS` — `## Operator notes` above all, but also any name
  *    a model invented — is refused. The schema's enum cannot even express the operator
  *    section, so a well-formed response never reaches this; it is here because a schema is
@@ -168,9 +179,10 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  * 4. The text may not forge file structure (`FORGERY_CHECKS`) and is scanned at `'strict'`
  *    before it can land. Stored knowledge is replayed into a later system prompt, so a
  *    bullet is the one place an injection gets to persist past the page it came from.
- * 5. An `add` whose text already exists in the section is refused. Two identical bullets
- *    make every later `update`/`remove` ambiguous, so a duplicate is not merely noise: it
- *    permanently locks both copies in place, with only decay able to retire them.
+ * 5. An `add` whose text already exists in the section is refused, and so is an `update`
+ *    whose result would. Two identical bullets make every later `update`/`remove`
+ *    ambiguous, so a duplicate is not merely noise: it permanently locks both copies in
+ *    place, with only decay able to retire them.
  * 6. `update`/`remove` match on exact bullet text ignoring stamps. Zero matches or more
  *    than one is a dropped operation — guessing which of two similar bullets the model
  *    meant is how the wrong rule gets deleted.
@@ -218,10 +230,9 @@ export function applyOps(
         drop(op, `${op.op} with no bullet text`);
         continue;
       }
-      if (op.text.length > MAX_BULLET_CHARS) {
-        drop(op, `bullet text over ${MAX_BULLET_CHARS} characters`);
-        continue;
-      }
+      // Hostile checks run before the length cap: both refuse the write, but only one of
+      // them raises the event to `attention`, and padding a forged heading past the cap
+      // must not be able to buy silence.
       const forgery = FORGERY_CHECKS.find((check) => check.test.test(op.text));
       if (forgery) {
         drop(op, forgery.why, true);
@@ -231,11 +242,21 @@ export function applyOps(
         drop(op, 'injection patterns in bullet', true);
         continue;
       }
+      if (op.text.length > MAX_BULLET_CHARS) {
+        drop(op, `bullet text over ${MAX_BULLET_CHARS} characters`);
+        continue;
+      }
     }
+
+    /** Whether the section already holds this bullet, ignoring the bullet at `exclude` —
+     * which for an `update` is the one being replaced, since a rule matching only itself is
+     * a re-confirmation and not a duplicate. */
+    const duplicates = (text: string, exclude?: number): boolean =>
+      knowledge.sections[section].some((bullet, index) => index !== exclude && withoutStamp(bullet) === text);
 
     if (op.op === 'add') {
       const text = withoutStamp(op.text);
-      if (knowledge.sections[section].some((bullet) => withoutStamp(bullet) === text)) {
+      if (duplicates(text)) {
         drop(op, `${section} already has this bullet`);
         continue;
       }
@@ -270,9 +291,17 @@ export function applyOps(
     const { index } = matches[0]!;
     if (op.op === 'remove') {
       knowledge.sections[section].splice(index, 1);
-    } else {
-      knowledge.sections[section][index] = stamped(op.text, opts.today);
+      continue;
     }
+    // Same reason an `add` is deduped, reached through the other door: an `update` that
+    // rewrites one bullet into the text of another leaves two identical bullets, and from
+    // then on every `update`/`remove` naming that text is ambiguous, so neither copy can be
+    // edited or retired again except by decay.
+    if (duplicates(withoutStamp(op.text), index)) {
+      drop(op, `${section} already has this bullet`);
+      continue;
+    }
+    knowledge.sections[section][index] = stamped(op.text, opts.today);
   }
 
   return { knowledge, dropped };
@@ -485,6 +514,7 @@ export async function reflectOnRun(input: {
     data: targetEventData(job, {
       site: label,
       applied: appliedCount,
+      droppedCount: dropped.length,
       dropped: dropped.slice(0, MAX_DROPPED_REPORTED),
       pruned: prunedCount,
     }),
