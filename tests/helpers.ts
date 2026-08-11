@@ -24,6 +24,7 @@ import type { ArrInstance, Config } from '../src/config/schema.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { AttentionItems, type AttentionRow } from '../src/db/attention.js';
 import { openDb } from '../src/db/db.js';
+import type { SiteProfileRow } from '../src/db/siteProfiles.js';
 import { EventLog, type EventRow } from '../src/events/log.js';
 import { JobQueue, type EnqueueInput, type JobRow, type PipelineName, type TargetKind } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
@@ -133,6 +134,30 @@ export function enqueueAndClaim(ctx: AppContext, input: EnqueueInput): JobRow {
   const job = ctx.queue.claim();
   if (!job) throw new Error('enqueueAndClaim: claim() unexpectedly returned null right after enqueue()');
   return job;
+}
+
+/** A `subtitle`-pipeline `EnqueueInput` with sane defaults (series #42 on `sonarr`) — for
+ * `enqueueAndClaim(ctx, subtitleJobInput())` in tests exercising `searchSite`/the browse
+ * agent, which don't care which series the job is nominally for. */
+export function subtitleJobInput(overrides?: Partial<EnqueueInput>): EnqueueInput {
+  return { pipeline: 'subtitle', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {}, ...overrides };
+}
+
+/** A `SiteProfileRow` fixture with nothing learned yet — the row shape `runAgentLoop`
+ * tests pass as `profile` and `SiteProfiles.get()` returns for a freshly-`upsert`ed site.
+ * `created_at: 0` since no test asserts on it. */
+export function defaultProfileRow(baseUrl: string, overrides?: Partial<SiteProfileRow>): SiteProfileRow {
+  return {
+    base_url: baseUrl,
+    last_working_tier: null,
+    search_url_patterns: [],
+    notes: '',
+    last_success_at: null,
+    last_failure_at: null,
+    fail_count: 0,
+    created_at: 0,
+    ...overrides,
+  };
 }
 
 /**

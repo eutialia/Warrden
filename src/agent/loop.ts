@@ -55,15 +55,72 @@ function formatHistoryForPrompt(history: HistoryStep[]): string {
     .join('\n');
 }
 
-/** Whether `url` is same scheme+host as `baseUrl` (request same-origin guard). */
-function isSameOrigin(url: string, baseUrl: string): boolean {
+/**
+ * Whether `url` is on the same site as `baseUrl` (request's same-site guard) — same
+ * scheme, and hosts that are equal, or one a subdomain of the other, once a leading
+ * `www.` is stripped from both. Not same-origin: a subtitle site legitimately serves
+ * auth and downloads from sibling hosts (`auth.example.test`, `cdn.example.test` next to
+ * `www.example.test`), so an exact-host comparison refused traffic the site itself sends
+ * the agent to.
+ */
+function isSameSite(url: string, baseUrl: string): boolean {
   try {
     const a = new URL(url);
     const b = new URL(baseUrl);
-    return a.protocol === b.protocol && a.host === b.host;
+    if (a.protocol !== b.protocol) return false;
+    const stripWww = (host: string): string => host.replace(/^www\./, '');
+    const ah = stripWww(a.host);
+    const bh = stripWww(b.host);
+    return ah === bh || ah.endsWith(`.${bh}`) || bh.endsWith(`.${ah}`);
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether `hostname` (a URL's `.hostname`, brackets included for IPv6) names a loopback,
+ * private, or link-local destination: `127.0.0.0/8` and `localhost`, `10/8`, `172.16/12`,
+ * `192.168/16`, `169.254/16` (which includes the cloud metadata address
+ * `169.254.169.254`), `::1`, and unique-local IPv6 `fc00::/7`. Closes the
+ * server-side-request-forgery shape — page text the agent reads can otherwise name any
+ * URL, and without this guard a fetch verb would happily reach a LAN service or a cloud
+ * metadata endpoint.
+ */
+function isPrivateOrLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 127) return true; // loopback 127.0.0.0/8
+    if (a === 10) return true; // private 10/8
+    if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
+    if (a === 192 && b === 168) return true; // private 192.168/16
+    if (a === 169 && b === 254) return true; // link-local 169.254/16 (incl. 169.254.169.254)
+    return false;
+  }
+
+  if (bare === '::1') return true; // loopback
+  if (/^fc[0-9a-f]{2}:|^fd[0-9a-f]{2}:/.test(bare)) return true; // unique-local fc00::/7
+  return false;
+}
+
+/** A refusal line for `action`/`url` if it targets a private or loopback destination,
+ * else `null`. Applies to every fetch verb (search/open/request/download) — unlike the
+ * same-site guard, this one is not verb-specific: nothing the agent does should be able
+ * to reach a LAN service or cloud metadata endpoint, whatever site sent it there. */
+function privateDestinationRefusal(action: string, url: string): string | null {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  return isPrivateOrLoopbackHost(hostname) ? `${action} refused: ${url} targets a private/loopback address` : null;
 }
 
 /** The loop hit the current tier's wall — the runner escalates one rung and retries. */
@@ -77,9 +134,10 @@ export class TierBlockedError extends Error {
 /**
  * One site-search agent run at ONE tier: a step-budgeted LLM loop over search/open/request/
  * download. Warrden's code owns the budget, the fetch, and every termination condition; the
- * model only picks the next action (and may follow operator-authored protocol notes in the
- * site profile). The most recent observation is kept up to OBSERVATION_CAP chars; older
- * steps are elided at prompt-render time so the rolling prompt stays bounded.
+ * model only picks the next action (and may follow the site's learned/operator knowledge,
+ * passed in already rendered as `knowledge`). The most recent observation is kept up to
+ * OBSERVATION_CAP chars; older steps are elided at prompt-render time so the rolling
+ * prompt stays bounded.
  * Every step (and its note) is reported via `onTranscript`.
  */
 export async function runAgentLoop(input: {
@@ -87,6 +145,10 @@ export async function runAgentLoop(input: {
   tier: FetchTier;
   site: { baseUrl: string; searchUrlTemplate?: string };
   profile: SiteProfileRow;
+  /** The site's learned + operator knowledge, already rendered for the prompt (via
+   * `knowledgeForPrompt`) and scanned for prompt injection by the caller. `''` when
+   * there's nothing to inject, or when the scan tripped and the caller withheld it. */
+  knowledge: string;
   /** Primary title; also `hints.title` when hints are provided. */
   query: string;
   hints?: SearchHints;
@@ -94,7 +156,7 @@ export async function runAgentLoop(input: {
   maxSteps: number;
   onTranscript: (e: TranscriptEntry) => void;
 }): Promise<AgentOutcome> {
-  const { llm, tier, site, profile, destDir, maxSteps, onTranscript } = input;
+  const { llm, tier, site, profile, knowledge, destDir, maxSteps, onTranscript } = input;
   const query = input.hints?.title ?? input.query;
   const hintBlock = input.hints ? formatSearchHintsForPrompt(input.hints) : '';
 
@@ -102,9 +164,7 @@ export async function runAgentLoop(input: {
   const system = [
     `You are finding and downloading a subtitle pack (zip/tar archive or subtitle files) for "${query}" on ${site.baseUrl}.`,
     patterns.length > 0 ? `Known search URL patterns ({query} = URL-encoded search term): ${patterns.join(', ')}` : '',
-    profile.notes
-      ? `Site protocol notes (follow step by step when they describe a full walkthrough — endpoints, request shapes, captcha behavior): ${profile.notes}`
-      : '',
+    knowledge || '',
     hintBlock,
     'Choose one action per step:',
     '- search: build a search URL and open it (GET)',
@@ -143,6 +203,16 @@ export async function runAgentLoop(input: {
 
     const referer = action.referer !== '' ? action.referer : undefined;
 
+    // Every fetch verb is checked against private/loopback destinations before anything
+    // else runs — a clean scan of stored knowledge is not evidence it's safe to act on;
+    // this guard (plus the same-site guard below, plus the bounded action set) is what
+    // actually bounds the damage a tampered or malicious page can do.
+    const privateRefusal = privateDestinationRefusal(action.action, action.url);
+    if (privateRefusal) {
+      history.push({ prefix: privateRefusal });
+      continue;
+    }
+
     if (action.action === 'download') {
       // Sanitize the URL tail so a model-chosen path segment can't escape destDir via
       // `..` or separators (join('/data/dl', 'x-1-../../etc/passwd') would otherwise
@@ -163,9 +233,11 @@ export async function runAgentLoop(input: {
     }
 
     if (action.action === 'request') {
-      // Same-origin guard: request is a POST-capable primitive; third-party page text in
-      // the prompt must not aim it at LAN/foreign hosts. open/search/download stay open.
-      if (!isSameOrigin(action.url, site.baseUrl)) {
+      // Same-site guard: request is a POST-capable primitive; third-party page text in
+      // the prompt must not aim it at a foreign host. open/search/download stay open —
+      // they legitimately reach mirrors and CDNs and hard-guarding them would break real
+      // sites; only the private/loopback check above applies to those verbs.
+      if (!isSameSite(action.url, site.baseUrl)) {
         let siteHost: string;
         try {
           siteHost = new URL(site.baseUrl).host;

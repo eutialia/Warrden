@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import type { AppContext } from '../context.js';
 import { siteLabel } from '../config/siteLabel.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
@@ -7,8 +8,17 @@ import type { JobRow } from '../jobs/queue.js';
 import { targetEventData } from '../events/target.js';
 import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/queries.js';
 import { errorMessage } from '../util/errors.js';
+import { AGENT_SECTIONS, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
+import { scanForThreats } from './threatPatterns.js';
 import { runAgentLoop, TierBlockedError } from './loop.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
+
+/** Where seed knowledge files live for a fresh install: `seeds/sites` under the process
+ * root. Task 7 populates this directory; until then it simply doesn't exist, which
+ * `loadKnowledge` treats the same as "no seed" — never a throw. */
+export function defaultSeedsDir(): string {
+  return join(process.cwd(), 'seeds', 'sites');
+}
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
 /** After this long on a higher tier without probing cheaper ones, start one rung down so
@@ -55,6 +65,9 @@ export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): Tier
 
 export interface SearchSiteDeps {
   tiers?: TierFactory;
+  /** Overrides `defaultSeedsDir()` — tests point this at a fixture directory instead of
+   * the real `seeds/sites`. */
+  seedsDir?: string;
 }
 
 /**
@@ -114,6 +127,34 @@ export async function searchSite(
     return null;
   }
 
+  // Load the site's knowledge file and scan the agent-owned half for prompt injection
+  // before it ever reaches the loop's system prompt. Operator notes are never scanned —
+  // they're trusted input by definition, and scanning them would let a phrase a human
+  // deliberately wrote refuse their own instruction. A clean scan is a cheap tripwire,
+  // not proof of safety: the bounded action set and the guards in loop.ts are what
+  // actually bound the damage of anything that gets through.
+  const knowledgeFile = loadKnowledge(ctx.dataDir, site.baseUrl, deps.seedsDir ?? defaultSeedsDir());
+  const agentText = AGENT_SECTIONS.flatMap((s) => knowledgeFile.sections[s]).join('\n');
+  const threats = agentText ? scanForThreats(agentText, 'strict') : [];
+  if (threats.length > 0) {
+    ctx.events.append({
+      kind: 'subtitle.knowledge-refused',
+      level: 'attention',
+      jobId: job.id,
+      message: `Site knowledge for ${siteLabel(site.baseUrl)} looks tampered with and was not used`,
+      data: targetEventData(job, {
+        site: siteLabel(site.baseUrl),
+        dedupeKey: siteLabel(site.baseUrl),
+        patterns: threats.map((t) => t.pattern),
+        excerpt: threats[0]?.excerpt,
+      }),
+    });
+  }
+  // Tripped whole-file refusal: neither half is injected, since a tampered agent half
+  // makes the whole file suspect — not repaired, not partially used. Task 4's write path
+  // is the place bullets get dropped individually.
+  const knowledge = threats.length > 0 ? '' : knowledgeForPrompt(knowledgeFile);
+
   const runId = runs.start(job.id, siteLabel(site.baseUrl));
   // Start at the remembered tier (with optional decay); unimplemented seams fall back via
   // indexOf === -1 → max(0, -1) === 0 in tierStartIndex.
@@ -159,6 +200,7 @@ export async function searchSite(
           tier,
           site,
           profile,
+          knowledge,
           query: primaryQuery,
           hints,
           destDir,
