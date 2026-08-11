@@ -193,9 +193,32 @@ describe('CurlTier', () => {
       },
     });
     const res = await tier.fetch('https://site/start');
-    expect(res).toEqual({ ok: false, status: 302, blocked: false, refusedUrl });
+    expect(res).toEqual({ ok: false, status: 302, blocked: false, refusedUrl, refusedReason: 'private' });
     // The public first hop happened; the private one never left the process.
     expect(seen).toEqual(['https://site/start']);
+  });
+
+  /** A `Location` that will not resolve fetches nothing either way, but reported as a plain
+   * HTTP failure it is indistinguishable from a broken site — the hop has to reach the
+   * transcript as the refusal it is. */
+  it.each([
+    ['a truncated IPv6 literal', '//[::1'],
+    ['an IPv6 literal with too many groups', 'http://[:::1]/x'],
+  ])('reports a Location it cannot parse (%s) as a refusal, not an anonymous failure', async (_name, location) => {
+    const tier = new CurlTier({
+      fetchImpl: async () => {
+        const h = new Headers();
+        h.set('location', location);
+        return new Response(null, { status: 302, headers: h });
+      },
+    });
+    expect(await tier.fetch('https://site/start')).toEqual({
+      ok: false,
+      status: 302,
+      blocked: false,
+      refusedUrl: location,
+      refusedReason: 'unparseable',
+    });
   });
 
   it('refuses a private URL handed in directly, without fetching it', async () => {
@@ -210,6 +233,7 @@ describe('CurlTier', () => {
       ok: false,
       blocked: false,
       refusedUrl: 'http://169.254.169.254/latest/meta-data',
+      refusedReason: 'private',
     });
     expect(called).toBe(0);
   });

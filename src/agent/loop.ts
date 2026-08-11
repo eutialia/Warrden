@@ -43,8 +43,24 @@ type AgentOutcome =
  * page, so a knowledge file that keeps naming a guarded address would otherwise burn the
  * whole step budget once per tier — four full budgets of paid calls before the site gives
  * up. Three leaves room for a model that misreads a page once and corrects itself.
+ *
+ * Only the refusals a human is told about count (the `attention` ones: a private/loopback
+ * destination, directly or via a redirect hop). Ending a site run has real cost — a failed
+ * site, a `fail_count` bump, backoff before the next try — and the other refusals are
+ * ordinary model slips: a protocol-relative URL, or a `request` aimed off-site. Those fail
+ * their own step and the run carries on to its step budget, as it did before the breaker
+ * existed.
  */
 const REFUSAL_LIMIT = 3;
+
+/** Cap on a refused URL echoed into the next prompt. It can be attacker-chosen text of any
+ * length (a hostile site's `Location` header), and every other thing a page puts in the
+ * prompt is bounded, so this is too. */
+const REFUSED_URL_CAP = 200;
+
+function capUrl(url: string): string {
+  return url.length <= REFUSED_URL_CAP ? url : `${url.slice(0, REFUSED_URL_CAP)}…[elided]`;
+}
 
 /** One history step: a fixed prefix plus an optional observation body (already OBSERVATION_CAP-capped). */
 interface HistoryStep {
@@ -169,11 +185,14 @@ export async function runAgentLoop(input: {
    * ordinary action against a URL that then failed for no stated reason, and a knowledge
    * file aimed at cloud metadata looks like a clumsy model. `attention` marks the variants
    * that are a security signal rather than a wrong guess, so the runner raises them into
-   * the attention queue where a human sees them.
+   * the attention queue where a human sees them — and those are exactly the ones that
+   * count toward REFUSAL_LIMIT, so the breaker only ever fires on something a human is
+   * being shown.
    */
   const refuse = (line: string, level?: 'attention'): boolean => {
     history.push({ prefix: line });
     onTranscript({ ts: Date.now(), tier: tier.tier, action: 'refused', detail: line, ...(level !== undefined ? { level } : {}) });
+    if (level !== 'attention') return false;
     refusals += 1;
     return refusals >= REFUSAL_LIMIT;
   };
@@ -205,7 +224,7 @@ export async function runAgentLoop(input: {
     // the model never named can appear.
     const refusal = refusedDestination(action.url);
     if (refusal !== null) {
-      const line = `${action.action} refused: ${action.url} ${REFUSAL_REASON[refusal]}`;
+      const line = `${action.action} refused: ${capUrl(action.url)} ${REFUSAL_REASON[refusal]}`;
       // A malformed URL is a model slip; a private/loopback one is the SSRF shape and has
       // to reach a human even when the run recovers on the next step.
       if (refuse(line, refusal === 'private' ? 'attention' : undefined)) {
@@ -217,11 +236,14 @@ export async function runAgentLoop(input: {
     /** A redirect hop the tier refused mid-fetch: the destination guard runs again on
      * every hop inside the fetch, so a public URL that 302s onto a guarded address never
      * connects. It comes back as a failed result rather than a throw, and is recorded and
-     * counted exactly like a refusal the loop caught up front. */
+     * counted exactly like a refusal the loop caught up front — including a `Location`
+     * header that is not a URL, which fetches nothing either way but would otherwise read
+     * as an ordinary HTTP failure. */
     const refuseHop = (res: FetchResult): 'stop' | 'continue' | null => {
       if (res.refusedUrl === undefined) return null;
-      const line = `${action.action} refused: ${action.url} redirected to ${res.refusedUrl}, which ${REFUSAL_REASON.private}`;
-      return refuse(line, 'attention') ? 'stop' : 'continue';
+      const reason = res.refusedReason ?? 'private';
+      const line = `${action.action} refused: ${capUrl(action.url)} redirected to ${capUrl(res.refusedUrl)}, which ${REFUSAL_REASON[reason]}`;
+      return refuse(line, reason === 'private' ? 'attention' : undefined) ? 'stop' : 'continue';
     };
 
     if (action.action === 'download') {
@@ -258,7 +280,7 @@ export async function runAgentLoop(input: {
         } catch {
           siteHost = site.baseUrl;
         }
-        const line = `request refused: ${action.url} is not on ${siteHost}`;
+        const line = `request refused: ${capUrl(action.url)} is not on ${siteHost}`;
         if (refuse(line)) return { kind: 'refused-repeatedly', refusals };
         continue;
       }

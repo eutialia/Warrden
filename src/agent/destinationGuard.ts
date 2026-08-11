@@ -54,6 +54,10 @@ function ipv6Bytes(address: string): number[] | null {
  *
  * Every one of those spellings can reach the same machine as the bare IPv4 address, so all
  * of them are judged as that address rather than as an unrecognized IPv6 host.
+ *
+ * NAT64's other prefix, local-use `64:ff9b:1::/48` (RFC 8215), is NOT decoded here — see
+ * `isPrivateOrLoopbackHost`, which refuses the whole prefix instead, because where the
+ * IPv4 address sits inside it is a local choice this code cannot know.
  */
 function embeddedIpv4(bytes: number[]): number[] | null {
   const zeros = (from: number, to: number): boolean => bytes.slice(from, to).every((b) => b === 0);
@@ -90,8 +94,15 @@ function isPrivateIpv4(bytes: number[]): boolean {
  * What is then refused: `0.0.0.0/8`, `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`,
  * `169.254/16` (which includes the cloud metadata address `169.254.169.254`), the names
  * `localhost` and `*.localhost`, `::1` and `::`, unique-local `fc00::/7`, link-local
- * `fe80::/10`, deprecated site-local `fec0::/10`, and any 6to4 (`2002::/16`) or NAT64
- * (`64:ff9b::/96`) spelling of a refused IPv4 address.
+ * `fe80::/10`, deprecated site-local `fec0::/10`, any 6to4 (`2002::/16`) or well-known
+ * NAT64 (`64:ff9b::/96`) spelling of a refused IPv4 address, and every address under the
+ * local-use NAT64 prefix `64:ff9b:1::/48` (RFC 8215).
+ *
+ * That last one is refused whole rather than decoded, because RFC 6052 lets a NAT64 embed
+ * the IPv4 address at /48, /56, /64 or /96 and the choice is the gateway operator's — so
+ * there is no way to read the address out of it from the literal alone. A locally-run
+ * NAT64 is also precisely the gateway that translates onto the LAN, and nothing Warrden
+ * fetches is reachable only through one, so failing closed on the prefix costs nothing.
  *
  * What it does NOT catch, and cannot: a hostname that merely *resolves* to one of those
  * addresses. An attacker who controls a DNS record can point `pack.example.test` at
@@ -112,6 +123,10 @@ export function isPrivateOrLoopbackHost(hostname: string): boolean {
     if (bytes === null) return true; // a literal this can't read is refused, not allowed
     const embedded = embeddedIpv4(bytes);
     if (embedded !== null) return isPrivateIpv4(embedded);
+    // local-use NAT64 64:ff9b:1::/48 — refused whole, the embedding offset is unknowable
+    if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && bytes[4] === 0x00 && bytes[5] === 0x01) {
+      return true;
+    }
     if ((bytes[0]! & 0xfe) === 0xfc) return true; // unique-local fc00::/7
     if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true; // link-local fe80::/10
     if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0xc0) return true; // site-local fec0::/10 (deprecated, still routed)
@@ -143,4 +158,31 @@ export function refusedDestination(url: string): RefusedDestination | null {
     return 'unparseable';
   }
   return isPrivateOrLoopbackHost(hostname) ? 'private' : null;
+}
+
+/** Where a redirect hop points, and whether it may be followed. */
+export interface RedirectTarget {
+  /** The resolved absolute URL, or the raw `Location` value when it would not resolve. */
+  url: string;
+  refused: RefusedDestination | null;
+}
+
+/**
+ * Resolves a `Location` header against the URL it came from and judges the result. THE one
+ * place a redirect target becomes a destination, shared by every tier, so no hop is
+ * followed on a path that skipped the check and none fails silently on one that skipped
+ * the resolve.
+ *
+ * A `Location` that will not resolve is a refusal, not an error: nothing can be fetched
+ * from it either way, but reported as a refusal it carries the hop into the transcript
+ * instead of vanishing into a generic network failure.
+ */
+export function resolveRedirect(location: string, from: string): RedirectTarget {
+  let url: string;
+  try {
+    url = new URL(location, from).href;
+  } catch {
+    return { url: location, refused: 'unparseable' };
+  }
+  return { url, refused: refusedDestination(url) };
 }

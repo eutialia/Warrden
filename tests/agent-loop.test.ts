@@ -218,6 +218,10 @@ describe('runAgentLoop', () => {
     ['6to4 IPv6 wrapping a private IPv4', 'http://[2002:a00:1::]/x'],
     ['6to4 IPv6 wrapping the metadata address', 'http://[2002:a9fe:a9fe::]/x'],
     ['NAT64 well-known prefix over the metadata address', 'http://[64:ff9b::a9fe:a9fe]/x'],
+    // The local-use prefix (RFC 8215) is what an operator-run NAT64 actually uses, and it
+    // is refused whole — where the IPv4 address sits inside it is the gateway's choice.
+    ['NAT64 local-use prefix over the metadata address', 'http://[64:ff9b:1::a9fe:a9fe]/x'],
+    ['NAT64 local-use prefix, whatever it wraps', 'http://[64:ff9b:1:ffff::1]/x'],
     ['deprecated site-local IPv6', 'http://[fec0::1]/x'],
   ];
 
@@ -244,6 +248,7 @@ describe('runAgentLoop', () => {
     ['192.169/16, just past the private range', 'http://192.169.0.1/x'],
     ['a host whose name merely ends in localhost', 'https://mylocalhost.test/x'],
     ['6to4 IPv6 wrapping a public IPv4', 'http://[2002:808:808::]/x'],
+    ['NAT64 well-known prefix over a public IPv4', 'http://[64:ff9b::808:808]/x'],
   ])('open does not refuse %s', async (_name, url) => {
     const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'fine', blocked: false }]);
@@ -301,6 +306,40 @@ describe('runAgentLoop', () => {
       expect(llm.calls[1]!.prompt).not.toContain('-> FAILED');
     },
   );
+
+  it('reports a Location the tier could not parse as a refusal of that step, without ending the run', async () => {
+    const refusedUrl = '//[::1';
+    const llm = new FakeGenerator([
+      ...new Array(4).fill(null).map(() => act({ action: 'open', url: 'https://acg.rip/t/1', note: 'probe' })),
+    ]);
+    const tier = fakeTier(
+      new Array(4).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl, refusedReason: 'unparseable' as const })),
+    );
+    const entries: TranscriptEntry[] = [];
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 4, onTranscript: (e) => entries.push(e) });
+    expect(out).toEqual({ kind: 'exhausted' });
+    const refusals = entries.filter((e) => e.action === 'refused');
+    expect(refusals).toHaveLength(4);
+    expect(refusals[0]!.level).toBeUndefined();
+    expect(refusals[0]!.detail).toBe(`open refused: https://acg.rip/t/1 redirected to ${refusedUrl}, which is not a usable URL`);
+  });
+
+  /** A refused URL is echoed into the next prompt, and a hostile site chooses its own
+   * `Location` header — so it is bounded like every other thing a page puts there. */
+  it('caps a refused redirect URL in the history line', async () => {
+    const refusedUrl = `http://169.254.169.254/${'a'.repeat(5000)}`;
+    const llm = new FakeGenerator([
+      act({ action: 'open', url: 'https://acg.rip/t/1', note: 'probe' }),
+      act({ action: 'give_up', url: '', note: 'stopped' }),
+    ]);
+    const tier = fakeTier([{ ok: false, blocked: false, refusedUrl, refusedReason: 'private' as const }]);
+    const entries: TranscriptEntry[] = [];
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+    const detail = entries.find((e) => e.action === 'refused')!.detail;
+    expect(detail).toContain('…[elided]');
+    expect(detail).not.toContain('a'.repeat(300));
+    expect(llm.calls[1]!.prompt).not.toContain('a'.repeat(300));
+  });
 
   it('counts refused redirect hops toward the refusal limit', async () => {
     const llm = new FakeGenerator(
@@ -374,12 +413,19 @@ describe('runAgentLoop', () => {
     expect(llm.calls).toHaveLength(3);
   });
 
-  it('counts same-site refusals toward the same limit', async () => {
-    const llm = new FakeGenerator(
-      new Array(5).fill(null).map(() => act({ action: 'request', url: 'https://evil.test/api', note: 'probe', method: 'GET' })),
-    );
-    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3 });
+  /** Ending a site run costs a failed site, a fail_count bump and backoff. Only the
+   * refusals a human is shown (private/loopback) buy that; a model slip fails its own step
+   * and the run keeps its budget. */
+  it.each([
+    ['a protocol-relative URL the guard cannot parse', act({ action: 'search', url: '//acg.rip/search?q=x', note: 'probe' })],
+    ['a request aimed off-site', act({ action: 'request', url: 'https://evil.test/api', note: 'probe', method: 'GET' })],
+  ])('does not end the run over %s', async (_name, action) => {
+    const llm = new FakeGenerator(new Array(6).fill(null).map(() => action));
+    const entries: TranscriptEntry[] = [];
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 6, onTranscript: (e) => entries.push(e) });
+    expect(out).toEqual({ kind: 'exhausted' });
+    // Every step still refused, and every refusal still reached the transcript.
+    expect(entries.filter((e) => e.action === 'refused')).toHaveLength(6);
   });
 
   it('joins action bullets as separate lines and states download/cookie/elision rules', async () => {

@@ -5,7 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import type { AccessTier } from '../db/siteProfiles.js';
-import { refusedDestination } from './destinationGuard.js';
+import { refusedDestination, resolveRedirect, type RefusedDestination } from './destinationGuard.js';
 
 export interface FetchResult {
   ok: boolean;
@@ -18,6 +18,9 @@ export interface FetchResult {
    * refusal is a failed result and never a throw, so the loop reports it as a refusal
    * instead of as an anonymous network error. */
   refusedUrl?: string;
+  /** Why `refusedUrl` was refused, so the transcript says which of the two it was: a hop
+   * onto a guarded address, or a `Location` header that is not a URL at all. */
+  refusedReason?: RefusedDestination;
 }
 
 /** Options for a tier fetch — GET by default; POST/body/referer for protocol steps. */
@@ -149,7 +152,8 @@ export class CurlTier implements FetchTier {
 
   async fetch(url: string, opts?: FetchOpts): Promise<FetchResult> {
     try {
-      if (refusedDestination(url) !== null) return { ok: false, blocked: false, refusedUrl: url };
+      const refusal = refusedDestination(url);
+      if (refusal !== null) return { ok: false, blocked: false, refusedUrl: url, refusedReason: refusal };
       let currentUrl = url;
       let method: 'GET' | 'POST' = opts?.method ?? 'GET';
       // GET never carries a body — only POST forwards body/contentType.
@@ -187,12 +191,12 @@ export class CurlTier implements FetchTier {
           if (hops > MAX_REDIRECT_HOPS) {
             return { ok: false, status: res.status, blocked: false };
           }
-          const nextUrl = new URL(location, currentUrl).href;
           // Guard the hop BEFORE it is requested: this is the only place that sees it.
-          if (refusedDestination(nextUrl) !== null) {
-            return { ok: false, status: res.status, blocked: false, refusedUrl: nextUrl };
+          const next = resolveRedirect(location, currentUrl);
+          if (next.refused !== null) {
+            return { ok: false, status: res.status, blocked: false, refusedUrl: next.url, refusedReason: next.refused };
           }
-          currentUrl = nextUrl;
+          currentUrl = next.url;
           // POST bodies are not re-sent; 302/303 (and typical 301) follow with GET.
           if (method === 'POST' && (res.status === 301 || res.status === 302 || res.status === 303)) {
             method = 'GET';
@@ -242,11 +246,14 @@ class ChromiumTier implements FetchTier {
     this.context = await this.browser.newContext({ userAgent: UA });
     // Playwright follows redirects inside the browser, so `page.goto()`'s return value
     // cannot show the hops it took. Request interception is the one place they ARE
-    // visible: the handler runs for every request the context makes, redirect targets
-    // included, and aborting there stops the hop before it is sent. Aborting surfaces as
-    // a navigation failure, which the catch below turns into a failed result, and
-    // `refusedHop` is what tells the loop the failure was a refusal. Not covered by the
-    // test suite — it needs a real browser — unlike CurlTier's per-hop check.
+    // visible, and aborting there stops the hop before it is sent. Aborting surfaces as a
+    // navigation failure, which the catch below turns into a failed result, and
+    // `refusedHop` is what tells the loop the failure was a refusal.
+    //
+    // The load-bearing ASSUMPTION: that this handler runs for every request the context
+    // makes, redirect targets included. Playwright documents it that way, but nothing
+    // here verifies it — checking it needs a real browser and a real redirect, which the
+    // test suite does not have. CurlTier's per-hop check is the one that is proven.
     await this.context.route('**/*', async (route) => {
       const target = route.request().url();
       if (refusedDestination(target) === null) {
@@ -260,20 +267,30 @@ class ChromiumTier implements FetchTier {
   }
 
   async fetch(url: string, opts?: FetchOpts): Promise<FetchResult> {
-    if (refusedDestination(url) !== null) return { ok: false, blocked: false, refusedUrl: url };
+    const refusal = refusedDestination(url);
+    if (refusal !== null) return { ok: false, blocked: false, refusedUrl: url, refusedReason: refusal };
     this.refusedHop = null;
     const res = await this.attempt(url, opts);
-    return !res.ok && this.refusedHop !== null ? { ...res, refusedUrl: this.refusedHop } : res;
+    return !res.ok && this.refusedHop !== null
+      ? { ...res, refusedUrl: this.refusedHop, refusedReason: 'private' }
+      : res;
   }
 
   private async attempt(url: string, opts?: FetchOpts): Promise<FetchResult> {
     try {
       const context = await this.getContext();
       const method = opts?.method ?? 'GET';
-      const extraHeaders: Record<string, string> = {};
-      // Body/content-type only on POST — a GET never carries a body on any tier.
-      if (method === 'POST' && opts?.contentType) extraHeaders['content-type'] = opts.contentType;
-      if (opts?.referer) extraHeaders.referer = opts.referer;
+      // Headers are computed per request, not once per fetch, so a redirect that downgrades
+      // POST to GET drops the content-type with the body — same semantics as CurlTier,
+      // which rebuilds its headers on every hop for the same reason.
+      const headersFor = (m: 'GET' | 'POST'): Record<string, string> => {
+        const headers: Record<string, string> = {};
+        // Body/content-type only on POST — a GET never carries a body on any tier.
+        if (m === 'POST' && opts?.contentType) headers['content-type'] = opts.contentType;
+        if (opts?.referer) headers.referer = opts.referer;
+        return headers;
+      };
+      const extraHeaders = headersFor(method);
 
       if (opts?.destPath !== undefined) {
         const page = await context.newPage();
@@ -281,10 +298,24 @@ class ChromiumTier implements FetchTier {
           if (Object.keys(extraHeaders).length > 0) {
             await page.setExtraHTTPHeaders(extraHeaders);
           }
-          const [download] = await Promise.all([
-            page.waitForEvent('download', { timeout: DOWNLOAD_TIMEOUT_MS }),
-            page.goto(url, { timeout: DOWNLOAD_TIMEOUT_MS }).catch(() => null),
-          ]);
+          // The download arrives as a side effect of the navigation, so both start
+          // together. When the route guard refuses a hop the navigation fails and NO
+          // download will ever arrive: return then and there rather than sitting on the
+          // download event until its timeout, which is three minutes of waiting for
+          // something that cannot happen. Any other navigation outcome keeps waiting —
+          // a download often starts while `goto` is still in flight, or after it fails
+          // with "download initiated" — so the timeout still covers a slow server.
+          const downloadEvent = page.waitForEvent('download', { timeout: DOWNLOAD_TIMEOUT_MS });
+          // When the refusal branch wins, this stays pending until `page.close()` below
+          // rejects it with nobody waiting — handle it here so that is not an unhandled
+          // rejection.
+          downloadEvent.catch(() => {});
+          const refusedNavigation = page
+            .goto(url, { timeout: DOWNLOAD_TIMEOUT_MS })
+            .catch(() => null)
+            .then(() => (this.refusedHop !== null ? null : new Promise<never>(() => {})));
+          const download = await Promise.race([downloadEvent, refusedNavigation]);
+          if (download === null) return { ok: false, blocked: false };
           mkdirSync(dirname(opts.destPath), { recursive: true });
           await download.saveAs(opts.destPath);
           return { ok: true, filePath: opts.destPath, blocked: false };
@@ -306,7 +337,7 @@ class ChromiumTier implements FetchTier {
         for (let hops = 0; ; hops++) {
           const res = await context.request.fetch(currentUrl, {
             method: currentMethod,
-            headers: extraHeaders,
+            headers: headersFor(currentMethod),
             data: sendBody,
             maxRedirects: 0,
             timeout: TIMEOUT_MS,
@@ -320,11 +351,11 @@ class ChromiumTier implements FetchTier {
           if (location === undefined || hops >= MAX_REDIRECT_HOPS) {
             return { ok: false, status, blocked: false };
           }
-          const nextUrl = new URL(location, currentUrl).href;
-          if (refusedDestination(nextUrl) !== null) {
-            return { ok: false, status, blocked: false, refusedUrl: nextUrl };
+          const next = resolveRedirect(location, currentUrl);
+          if (next.refused !== null) {
+            return { ok: false, status, blocked: false, refusedUrl: next.url, refusedReason: next.refused };
           }
-          currentUrl = nextUrl;
+          currentUrl = next.url;
           currentMethod = 'GET';
           sendBody = undefined;
         }

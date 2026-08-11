@@ -26,7 +26,7 @@ import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { jobDuration, jobTitle } from '@/lib/jobs';
 import { acquireOutcomeLabel, subtitleRunLabel, subtitleRunTone, targetKindLabel } from '@/lib/labels';
-import { TONE_SOLID } from '@/lib/tone';
+import { TONE_SOLID, TONE_TEXT } from '@/lib/tone';
 import { cn, formatRelativeTime } from '@/lib/utils';
 
 // Same idea as ManagedObjects.tsx's own `KIND_LABEL` — a raw `PlacedFileKind` reads fine
@@ -57,22 +57,31 @@ function TranscriptTimeline({ entries }: { entries: TranscriptEntry[] }): ReactN
   }
   return (
     <ol className="relative space-y-4 border-l pl-5">
-      {entries.map((entry, i) => (
-        <li key={i} className="relative">
-          <span
-            className={cn(
-              'absolute top-1.5 -left-[1.6rem] size-2 rounded-full ring-4 ring-card',
-              TONE_SOLID[i === entries.length - 1 ? 'brand' : 'neutral'],
+      {entries.map((entry, i) => {
+        // A step the agent refused because it aimed somewhere it must not go. Amber, per
+        // the tone system's "this wants a human" — otherwise it reads like any other step.
+        const attention = entry.level === 'attention';
+        return (
+          <li key={i} className="relative">
+            <span
+              className={cn(
+                'absolute top-1.5 -left-[1.6rem] size-2 rounded-full ring-4 ring-card',
+                TONE_SOLID[attention ? 'warning' : i === entries.length - 1 ? 'brand' : 'neutral'],
+              )}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={cn('text-sm font-medium', attention && TONE_TEXT.warning)}>{entry.action}</span>
+              <TierBadge tier={entry.tier} />
+              <span className="ml-auto text-xs text-muted-foreground">{formatRelativeTime(entry.ts)}</span>
+            </div>
+            {entry.detail && (
+              <p className={cn('mt-1 text-xs break-words', attention ? TONE_TEXT.warning : 'text-muted-foreground')}>
+                {entry.detail}
+              </p>
             )}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium">{entry.action}</span>
-            <TierBadge tier={entry.tier} />
-            <span className="ml-auto text-xs text-muted-foreground">{formatRelativeTime(entry.ts)}</span>
-          </div>
-          {entry.detail && <p className="mt-1 text-xs break-words text-muted-foreground">{entry.detail}</p>}
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ol>
   );
 }

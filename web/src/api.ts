@@ -100,6 +100,9 @@ export interface TranscriptEntry {
   tier: AccessTier;
   action: string;
   detail: string;
+  /** Set only on the few steps a human has to see — a refused private/loopback
+   * destination. Unset on every ordinary step. */
+  level?: 'attention';
 }
 
 export interface SubtitleRunRow {
