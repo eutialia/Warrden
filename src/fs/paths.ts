@@ -1,3 +1,6 @@
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
 /** An arr-side -> Warrden-side path mapping, as configured in `config.pathMappings`. */
 export interface PathMapping {
   from: string;
@@ -28,4 +31,12 @@ export function mapArrPath(mappings: PathMapping[], p: string): string {
   }
   if (!best) return p;
   return best.to + p.slice(best.from.length);
+}
+
+/** Make (and return) a directory under the data dir. Every runtime-owned path goes
+ * through here so the "where does Warrden keep this" answer lives in one place. */
+export function ensureDataSubdir(dataDir: string, ...segments: string[]): string {
+  const dir = join(dataDir, ...segments);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
