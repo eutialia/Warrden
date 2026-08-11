@@ -34,7 +34,25 @@ const HEADING_RE = /^##\s+(.+?)\s*$/;
 const BULLET_RE = /^-\s(.*)$/;
 const UPDATED_RE = /^updated:\s*(.*)$/;
 const CONFIRMED_RE = /\(confirmed (\d{4}-\d{2}-\d{2})\)/;
+const FENCE_RE = /^```/;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Parses a `YYYY-MM-DD` stamp strictly, rejecting anything `Date.parse` would otherwise
+ * silently roll over (a hallucinated `2026-02-30` becomes March 2 under plain
+ * `Date.parse`) as well as anything shaped wrong. Returns `null` — never `NaN` — for
+ * "can't judge this", so a caller can treat it the same as "no stamp at all" instead of
+ * having a bad date silently compare as always-stale. */
+function parseStrictDate(stamp: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(stamp);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const ms = Date.UTC(year, month - 1, day);
+  const roundTrip = new Date(ms);
+  const valid = roundTrip.getUTCFullYear() === year && roundTrip.getUTCMonth() === month - 1 && roundTrip.getUTCDate() === day;
+  return valid ? ms : null;
+}
 
 /** The local path a site's knowledge file lives at. */
 export function knowledgePath(dataDir: string, baseUrl: string): string {
@@ -59,42 +77,76 @@ export function emptyKnowledge(baseUrl: string): SiteKnowledge {
  * ignored — a human or a future version can add sections this reader doesn't know about
  * without losing the ones it does. Never throws: anything it can't make sense of falls
  * back to `emptyKnowledge(baseUrl)` rather than taking down the caller.
+ *
+ * Two defenses against silently losing content: (1) input is normalized to `\n` line
+ * endings up front, so a file re-saved with CRLF by an editor doesn't fail every `- `/
+ * `updated:` regex (both anchor `$` at true end-of-string, which a trailing `\r` breaks)
+ * while headings — whose `\s*$` tail happens to swallow `\r` — keep matching, a mismatch
+ * that would otherwise silently zero out every bullet while leaving the file looking
+ * structurally intact. (2) once a `## Operator notes` heading is seen, no later line —
+ * heading-shaped or not, fenced or not — hands control back to an agent section: operator
+ * notes is always the last section by convention, and the alternative (a `##` inside a
+ * pasted snippet or code fence quietly truncating notes and/or getting its trailing lines
+ * adopted as agent-owned bullets subject to pruning) is worse than never exiting.
+ * Fenced code blocks (```) are also tracked everywhere, not just inside operator notes,
+ * so a `##`-looking line inside one is never mistaken for a real heading.
  */
-export function parseKnowledge(baseUrl: string, text: string): SiteKnowledge {
+export function parseKnowledge(baseUrl: string, rawText: string): SiteKnowledge {
   try {
-    const lines = text.split('\n');
+    const lines = rawText.replace(/\r\n/g, '\n').split('\n');
     let i = 0;
     let updated: string | null = null;
 
-    if (lines[i] === '---') {
-      i++;
-      while (i < lines.length && lines[i] !== '---') {
-        const m = UPDATED_RE.exec(lines[i]);
-        if (m) updated = m[1].trim() || null;
-        i++;
+    if (lines[0] === '---') {
+      const closeIdx = lines.indexOf('---', 1);
+      if (closeIdx === -1) {
+        // No closing fence found by end of file: rather than swallow the whole file as
+        // (unterminated) frontmatter and lose every section, treat it as if there were no
+        // frontmatter at all and parse from the top.
+        i = 0;
+      } else {
+        for (let j = 1; j < closeIdx; j++) {
+          const m = UPDATED_RE.exec(lines[j]);
+          if (m) updated = m[1].trim() || null;
+        }
+        i = closeIdx + 1;
       }
-      if (i < lines.length && lines[i] === '---') i++;
     }
 
     const sections: Record<KnowledgeSection, string[]> = { Access: [], Search: [], Download: [], Pitfalls: [] };
     const operatorLines: string[] = [];
     let currentSection: KnowledgeSection | null = null;
     let inOperatorNotes = false;
+    let inFence = false;
 
     for (; i < lines.length; i++) {
       const line = lines[i];
-      const heading = HEADING_RE.exec(line);
-      if (heading) {
-        const name = heading[1];
-        inOperatorNotes = name === 'Operator notes';
-        currentSection = (AGENT_SECTIONS as readonly string[]).includes(name) ? (name as KnowledgeSection) : null;
+
+      if (FENCE_RE.test(line)) {
+        inFence = !inFence;
+        if (inOperatorNotes) operatorLines.push(line);
         continue;
       }
+
+      if (!inFence && !inOperatorNotes) {
+        const heading = HEADING_RE.exec(line);
+        if (heading) {
+          const name = heading[1];
+          if (name === 'Operator notes') {
+            inOperatorNotes = true;
+          } else {
+            currentSection = (AGENT_SECTIONS as readonly string[]).includes(name) ? (name as KnowledgeSection) : null;
+          }
+          continue;
+        }
+      }
+
       if (inOperatorNotes) {
         operatorLines.push(line);
         continue;
       }
-      if (currentSection) {
+
+      if (!inFence && currentSection) {
         const bullet = BULLET_RE.exec(line);
         if (bullet) sections[currentSection].push(bullet[1]);
       }
@@ -175,6 +227,15 @@ export function saveKnowledge(dataDir: string, k: SiteKnowledge): void {
   renameSync(tmpPath, path);
 }
 
+/** Each non-empty agent section as a `## <Section>` heading and its bullets, joined with
+ * a blank line — the agent-owned portion of both `knowledgeForPrompt` and
+ * `agentCharCount`, factored out so the two can't drift on what "agent-owned" covers. */
+function renderAgentSections(k: SiteKnowledge): string {
+  return AGENT_SECTIONS.filter((section) => k.sections[section].length > 0)
+    .map((section) => `## ${section}\n${k.sections[section].map((b) => `- ${b}`).join('\n')}`)
+    .join('\n\n');
+}
+
 /**
  * The subset of a knowledge file worth putting in the agent's prompt: operator notes
  * first (marked authoritative, since they override anything the agent learned on its
@@ -188,11 +249,8 @@ export function knowledgeForPrompt(k: SiteKnowledge): string {
   if (k.operatorNotes) {
     parts.push(`## Operator notes (authoritative — overrides the learned rules below)\n${k.operatorNotes}`);
   }
-  for (const section of AGENT_SECTIONS) {
-    const bullets = k.sections[section];
-    if (bullets.length === 0) continue;
-    parts.push(`## ${section}\n${bullets.map((b) => `- ${b}`).join('\n')}`);
-  }
+  const agentPart = renderAgentSections(k);
+  if (agentPart) parts.push(agentPart);
 
   return parts.join('\n\n');
 }
@@ -202,18 +260,29 @@ export function knowledgeForPrompt(k: SiteKnowledge): string {
  * `STALE_AFTER_DAYS` before `today` — but only once `hadSuccessSince` is true, i.e. the
  * site has actually run again since that bullet was confirmed and had the chance to
  * contradict it. Without a success to judge them by, stale bullets are the only knowledge
- * there is and are kept. Bullets with no stamp are always kept. Operator notes are never
- * touched — they're human-owned, not the agent's to decay. Returns a new object; `k` is
- * never mutated.
+ * there is and are kept. Operator notes are never touched — they're human-owned, not the
+ * agent's to decay. Returns a new object; `k` is never mutated.
+ *
+ * Kept, not dropped, on anything this can't confidently judge: a bullet with no stamp at
+ * all, a bullet whose stamp is shaped right but calendar-invalid (an LLM-hallucinated
+ * `2026-13-45`, which writes this stamp in a later task), and — since one bad date
+ * shouldn't cost every bullet in every section — a `today` that itself fails to parse.
+ * `today` is read as its first 10 characters, so a full ISO timestamp
+ * (`new Date().toISOString()`, the obvious thing to pass) lands on the same UTC-midnight
+ * cutoff as a bare `YYYY-MM-DD` instead of shifting the boundary by up to a day.
  */
 export function pruneStale(k: SiteKnowledge, today: string, hadSuccessSince: boolean): SiteKnowledge {
+  const todayMs = hadSuccessSince ? parseStrictDate(today.slice(0, 10)) : null;
+  const cutoffMs = todayMs !== null ? todayMs - STALE_AFTER_DAYS * MS_PER_DAY : null;
+
   const clone = (bullets: string[]): string[] => {
-    if (!hadSuccessSince) return [...bullets];
-    const cutoffMs = Date.parse(today) - STALE_AFTER_DAYS * MS_PER_DAY;
+    if (cutoffMs === null) return [...bullets];
     return bullets.filter((bullet) => {
       const m = CONFIRMED_RE.exec(bullet);
       if (!m) return true;
-      return Date.parse(m[1]) >= cutoffMs;
+      const stampMs = parseStrictDate(m[1]);
+      if (stampMs === null) return true;
+      return stampMs >= cutoffMs;
     });
   };
 
@@ -229,9 +298,8 @@ export function pruneStale(k: SiteKnowledge, today: string, hadSuccessSince: boo
 }
 
 /** Rendered length of the agent-owned sections only (no frontmatter, title, or operator
- * notes) — what Task 4's `KNOWLEDGE_CHAR_CAP` ceiling is measured against. */
+ * notes) — what Task 4's `KNOWLEDGE_CHAR_CAP` ceiling is measured against. Zero when no
+ * agent section has any bullets. */
 export function agentCharCount(k: SiteKnowledge): number {
-  return AGENT_SECTIONS.map((section) =>
-    [`## ${section}`, ...k.sections[section].map((b) => `- ${b}`)].join('\n'),
-  ).join('\n\n').length;
+  return renderAgentSections(k).length;
 }

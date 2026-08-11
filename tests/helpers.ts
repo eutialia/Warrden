@@ -921,6 +921,34 @@ export function subtitleFixture(opts?: {
 }
 
 /**
+ * A well-formed site knowledge file (`src/agent/siteKnowledge.ts`): frontmatter, one
+ * bullet each in Access and Search, empty Download and Pitfalls, and an operator note.
+ * Shared because it's both `siteKnowledge.test.ts`'s round-trip fixture and, per its own
+ * comment there, something later tasks (the browse agent reading/rewriting these files)
+ * will want too.
+ */
+export const SITE_KNOWLEDGE_SAMPLE = `---
+site: https://subhd.tv
+updated: 2026-08-10
+---
+
+# subhd.tv
+
+## Access
+- IF the search page returns a Cloudflare interstitial THEN escalate to chromium. (confirmed 2026-08-10)
+
+## Search
+- IF searching THEN GET /search/{query} with the query URL-encoded. (confirmed 2026-08-01)
+
+## Download
+
+## Pitfalls
+
+## Operator notes
+Never use this site for anime.
+`;
+
+/**
  * Closes every db opened via freshDb() and removes every directory created via
  * tmpDir() so far, in this test file's module instance. Called from tests/setup.ts —
  * `process.on('exit')` doesn't fire reliably under Vitest's worker pool, so cleanup
