@@ -1,7 +1,26 @@
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { siteKey, siteLabel } from '../config/siteLabel.js';
 import { ensureDataSubdir } from '../fs/paths.js';
+
+/**
+ * Where seed knowledge files live for a fresh install: `seeds/sites` at the repo root,
+ * resolved relative to this module's own location (not `process.cwd()`), the same
+ * convention as `db.ts`'s migrations dir and `app.ts`'s web dist dir — this file sits one
+ * level under the root at `agent/` whether it's running from `src/` (tsx) or `dist/`
+ * (compiled). Cwd resolution looked equivalent and is not: an operator starting the
+ * server from anywhere but the app root would get no seeds at all, and silently, since a
+ * missing directory is indistinguishable from "this site has no seed" by design —
+ * `loadKnowledge` only ever asks whether the file exists, and never throws.
+ *
+ * It lives beside `loadKnowledge` rather than in one of its callers because every caller
+ * needs the same default: a reader that skipped the seed would write a local file over a
+ * seed that had never been copied in, and lose it.
+ */
+export function defaultSeedsDir(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'seeds', 'sites');
+}
 
 /** The four sections the browse agent itself reads and rewrites. `Operator notes` is a
  * fifth heading every file also carries, but it is human-owned — the agent never writes

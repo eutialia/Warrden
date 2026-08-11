@@ -1,5 +1,3 @@
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { AppContext } from '../context.js';
 import { siteLabel } from '../config/siteLabel.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
@@ -9,24 +7,10 @@ import type { JobRow } from '../jobs/queue.js';
 import { targetEventData } from '../events/target.js';
 import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/queries.js';
 import { errorMessage } from '../util/errors.js';
-import { AGENT_SECTIONS, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
+import { AGENT_SECTIONS, defaultSeedsDir, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
 import { scanForThreats } from './threatPatterns.js';
 import { runAgentLoop, TierBlockedError } from './loop.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
-
-/**
- * Where seed knowledge files live for a fresh install: `seeds/sites` at the repo root,
- * resolved relative to this module's own location (not `process.cwd()`), the same
- * convention as `db.ts`'s migrations dir and `app.ts`'s web dist dir — this file sits one
- * level under the root at `agent/` whether it's running from `src/` (tsx) or `dist/`
- * (compiled). Cwd resolution looked equivalent and is not: an operator starting the
- * server from anywhere but the app root would get no seeds at all, and silently, since a
- * missing directory is indistinguishable from "this site has no seed" by design —
- * `loadKnowledge` only ever asks whether the file exists, and never throws.
- */
-export function defaultSeedsDir(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'seeds', 'sites');
-}
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
 /** After this long on a higher tier without probing cheaper ones, start one rung down so
