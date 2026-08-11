@@ -31,11 +31,15 @@ export interface SiteKnowledge {
 }
 
 const HEADING_RE = /^##\s+(.+?)\s*$/;
+const ANY_HEADING_RE = /^#{1,6}\s/;
 const BULLET_RE = /^-\s(.*)$/;
 const UPDATED_RE = /^updated:\s*(.*)$/;
 const CONFIRMED_RE = /\(confirmed (\d{4}-\d{2}-\d{2})\)/;
 const FENCE_RE = /^```/;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** The one heading in the file the agent may not write to. */
+const OPERATOR_HEADING = 'Operator notes';
 
 /** Parses a `YYYY-MM-DD` stamp strictly, rejecting anything `Date.parse` would otherwise
  * silently roll over (a hallucinated `2026-02-30` becomes March 2 under plain
@@ -70,6 +74,68 @@ export function emptyKnowledge(baseUrl: string): SiteKnowledge {
   };
 }
 
+/** The name in a `## <name>` heading, or `null` for any other line (including `# title`
+ * and `### sub`, whose leading run of `#` is the wrong length). */
+function headingName(line: string): string | null {
+  const m = HEADING_RE.exec(line);
+  return m ? m[1] : null;
+}
+
+function agentSection(name: string): KnowledgeSection | null {
+  return (AGENT_SECTIONS as readonly string[]).includes(name) ? (name as KnowledgeSection) : null;
+}
+
+/**
+ * Where the body starts: past the closing `---` of frontmatter, or line 0 when there is
+ * none. The search for that closing line stops at the first markdown heading, so a `---`
+ * horizontal rule further down the body can never be mistaken for it — an unbounded
+ * search would take everything above that rule, sections included, as frontmatter and
+ * drop it. An unterminated fence therefore parses as "no frontmatter" rather than as
+ * "the whole file is frontmatter".
+ */
+function frontmatterEnd(lines: string[]): number {
+  if (lines[0] !== '---') return 0;
+  for (let i = 1; i < lines.length && !ANY_HEADING_RE.test(lines[i]); i++) {
+    if (lines[i] === '---') return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * Which lines sit inside a *closed* ``` fence, delimiters included, and so must not be
+ * read as structure — a `## Access` in a pasted snippet is an example, not a section.
+ *
+ * Two containment rules keep a stray fence from eating the file, both learned the hard
+ * way. An opener with no closer is not a fence at all: a single unbalanced ``` used to
+ * mask every heading below it to end of file. And the search for a closer never crosses a
+ * `## Operator notes` line, so a fence opened above that heading can never hide it —
+ * hiding it parses the operator's notes as empty, and the next save writes their section
+ * back blank. Masking a heading is a cosmetic loss; blanking a human's file is not, so
+ * the human-owned boundary wins whenever the two rules disagree.
+ */
+function maskFencedLines(lines: string[], from: number): boolean[] {
+  const masked = new Array<boolean>(lines.length).fill(false);
+
+  for (let i = from; i < lines.length; i++) {
+    if (!FENCE_RE.test(lines[i])) continue;
+
+    let close = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (headingName(lines[j]) === OPERATOR_HEADING) break;
+      if (FENCE_RE.test(lines[j])) {
+        close = j;
+        break;
+      }
+    }
+    if (close === -1) continue;
+
+    for (let j = i; j <= close; j++) masked[j] = true;
+    i = close;
+  }
+
+  return masked;
+}
+
 /**
  * Reads a knowledge file's markdown into structure. Frontmatter (`site`, `updated`) is
  * optional; `## <Section>` headings and their `- ` bullets are read for the four agent
@@ -78,79 +144,106 @@ export function emptyKnowledge(baseUrl: string): SiteKnowledge {
  * without losing the ones it does. Never throws: anything it can't make sense of falls
  * back to `emptyKnowledge(baseUrl)` rather than taking down the caller.
  *
- * Two defenses against silently losing content: (1) input is normalized to `\n` line
- * endings up front, so a file re-saved with CRLF by an editor doesn't fail every `- `/
- * `updated:` regex (both anchor `$` at true end-of-string, which a trailing `\r` breaks)
- * while headings — whose `\s*$` tail happens to swallow `\r` — keep matching, a mismatch
- * that would otherwise silently zero out every bullet while leaving the file looking
- * structurally intact. (2) once a `## Operator notes` heading is seen, no later line —
- * heading-shaped or not, fenced or not — hands control back to an agent section: operator
- * notes is always the last section by convention, and the alternative (a `##` inside a
- * pasted snippet or code fence quietly truncating notes and/or getting its trailing lines
- * adopted as agent-owned bullets subject to pruning) is worse than never exiting.
- * Fenced code blocks (```) are also tracked everywhere, not just inside operator notes,
- * so a `##`-looking line inside one is never mistaken for a real heading.
+ * The line scan is deliberately small, because every past bug here was one state leaking
+ * past the boundary it belonged to. It runs in three stages — normalize, then decide the
+ * body's start and which lines are fenced, then a single left-to-right pass that only
+ * ever consults those decisions — and holds exactly three pieces of state: the current
+ * section, whether we are in operator notes, and the bullet still being assembled.
+ *
+ * The rules that pass enforces:
+ *
+ * - Input is normalized to `\n` line endings up front. A file re-saved with CRLF would
+ *   otherwise fail every `- `/`updated:` regex (both anchor `$` at true end-of-string,
+ *   which a trailing `\r` breaks) while headings kept matching, zeroing out every bullet
+ *   while leaving the file looking structurally intact.
+ * - A line in an agent section that follows a bullet and is neither a new bullet, a
+ *   heading, a fence, nor blank is a continuation of that bullet, joined to it with a
+ *   single space. Hand-written files wrap long rules across lines, and dropping the tail
+ *   truncated the rule mid-sentence along with its `(confirmed ...)` stamp. Rendering
+ *   re-emits the joined bullet on one line, so a wrapped file is reflowed once on the
+ *   first save and is byte-stable from then on.
+ * - `## Operator notes` may appear anywhere, not only last, and owns lines only until the
+ *   next `## Access` / `## Search` / `## Download` / `## Pitfalls` heading. Those four
+ *   names are the format's reserved vocabulary; any other `##` line inside the notes
+ *   (`## Mirrors`, a pasted snippet) stays part of them verbatim. Letting notes run to end
+ *   of file instead would keep the bytes but flip ownership of every section below: those
+ *   bullets would be injected as authoritative, exempt from pruning, uncounted against
+ *   the character cap, and unrewritable by the agent.
  */
 export function parseKnowledge(baseUrl: string, rawText: string): SiteKnowledge {
   try {
     const lines = rawText.replace(/\r\n/g, '\n').split('\n');
-    let i = 0;
-    let updated: string | null = null;
+    const bodyStart = frontmatterEnd(lines);
+    const masked = maskFencedLines(lines, bodyStart);
 
-    if (lines[0] === '---') {
-      const closeIdx = lines.indexOf('---', 1);
-      if (closeIdx === -1) {
-        // No closing fence found by end of file: rather than swallow the whole file as
-        // (unterminated) frontmatter and lose every section, treat it as if there were no
-        // frontmatter at all and parse from the top.
-        i = 0;
-      } else {
-        for (let j = 1; j < closeIdx; j++) {
-          const m = UPDATED_RE.exec(lines[j]);
-          if (m) updated = m[1].trim() || null;
-        }
-        i = closeIdx + 1;
-      }
+    let updated: string | null = null;
+    for (let i = 1; i < bodyStart - 1; i++) {
+      const m = UPDATED_RE.exec(lines[i]);
+      if (m) updated = m[1].trim() || null;
     }
 
     const sections: Record<KnowledgeSection, string[]> = { Access: [], Search: [], Download: [], Pitfalls: [] };
     const operatorLines: string[] = [];
     let currentSection: KnowledgeSection | null = null;
     let inOperatorNotes = false;
-    let inFence = false;
+    let pending: { section: KnowledgeSection; text: string } | null = null;
 
-    for (; i < lines.length; i++) {
+    const flush = (): void => {
+      if (pending) sections[pending.section].push(pending.text);
+      pending = null;
+    };
+
+    for (let i = bodyStart; i < lines.length; i++) {
       const line = lines[i];
+      const name = headingName(line);
 
-      if (FENCE_RE.test(line)) {
-        inFence = !inFence;
-        if (inOperatorNotes) operatorLines.push(line);
+      // The operator boundary is recognized even inside a fence — see maskFencedLines.
+      if (name === OPERATOR_HEADING) {
+        flush();
+        inOperatorNotes = true;
+        currentSection = null;
         continue;
       }
 
-      if (!inFence && !inOperatorNotes) {
-        const heading = HEADING_RE.exec(line);
-        if (heading) {
-          const name = heading[1];
-          if (name === 'Operator notes') {
-            inOperatorNotes = true;
-          } else {
-            currentSection = (AGENT_SECTIONS as readonly string[]).includes(name) ? (name as KnowledgeSection) : null;
-          }
+      if (inOperatorNotes) {
+        const reclaimed = masked[i] || name === null ? null : agentSection(name);
+        if (reclaimed) {
+          inOperatorNotes = false;
+          currentSection = reclaimed;
           continue;
         }
-      }
-
-      if (inOperatorNotes) {
         operatorLines.push(line);
         continue;
       }
 
-      if (!inFence && currentSection) {
-        const bullet = BULLET_RE.exec(line);
-        if (bullet) sections[currentSection].push(bullet[1]);
+      if (masked[i]) {
+        flush();
+        continue;
       }
+
+      if (ANY_HEADING_RE.test(line)) {
+        flush();
+        if (name !== null) currentSection = agentSection(name);
+        continue;
+      }
+
+      if (currentSection === null) continue;
+
+      const bullet = BULLET_RE.exec(line);
+      if (bullet) {
+        flush();
+        pending = { section: currentSection, text: bullet[1] };
+        continue;
+      }
+
+      if (line.trim() === '') {
+        flush();
+        continue;
+      }
+
+      if (pending) pending.text = `${pending.text} ${line.trim()}`;
     }
+    flush();
 
     return { baseUrl, updated, sections, operatorNotes: operatorLines.join('\n').trim() };
   } catch {
@@ -164,6 +257,10 @@ export function parseKnowledge(baseUrl: string, rawText: string): SiteKnowledge 
  * fixed order — every heading always present, even when its section is empty, so the file
  * shape never depends on what's been learned yet. Inverse of `parseKnowledge`: rendering a
  * parsed file reproduces it byte-for-byte.
+ *
+ * One normalization, not a round-trip loss: a bullet a human wrapped across several lines
+ * comes back from the parser joined, so it is re-emitted on one line. The text is intact;
+ * only the wrapping is gone, and the file is byte-stable from that first save on.
  */
 export function renderKnowledge(k: SiteKnowledge): string {
   const lines: string[] = [
