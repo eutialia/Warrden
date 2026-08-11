@@ -8,6 +8,10 @@ export interface TranscriptEntry {
   tier: AccessTier;
   action: string;
   detail: string;
+  /** Set only on the few steps a human has to see — a refused private/loopback
+   * destination. The runner raises the step's `subtitle.transcript` event to this level,
+   * which files it as an attention item; every ordinary step leaves it unset. */
+  level?: 'attention';
 }
 
 export interface SubtitleRunRow {

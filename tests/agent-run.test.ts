@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { searchSite, failBackoffMs, tierStartIndex, createRunTiers, defaultSeedsDir } from '../src/agent/run.js';
 import { emptyKnowledge, renderKnowledge, saveKnowledge } from '../src/agent/siteKnowledge.js';
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
+import { AttentionItems } from '../src/db/attention.js';
 import { SiteProfiles, type AccessTier } from '../src/db/siteProfiles.js';
 import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { SubtitleSiteConfig } from '../src/config/schema.js';
@@ -380,17 +381,36 @@ describe('searchSite', () => {
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')?.message).toContain('refused address');
   });
 
+  it('raises a refused private destination into the transcript and the attention queue', async () => {
+    const { ctx, job } = setup();
+    const url = 'http://169.254.169.254/latest/meta-data';
+    ctx.llm = new FakeGenerator([
+      act({ action: 'open', url, note: 'probe' }),
+      ...new Array(3).fill(null).map(() => act({ action: 'give_up', url: '', note: 'stop' })),
+    ]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    // The durable transcript says the step was refused and why — not just that it failed.
+    const transcript = new SubtitleRuns(ctx.db).listByJob(job.id)[0]!.transcript;
+    const refused = transcript.find((e) => e.action === 'refused');
+    expect(refused?.detail).toContain(`${url} targets a private/loopback address`);
+    // ...and a human sees it: attention level, which mirrors into the attention queue.
+    const event = ctx.events.list().find((e) => e.kind === 'subtitle.transcript' && e.message.includes('refused'));
+    expect(event?.level).toBe('attention');
+    expect(new AttentionItems(ctx.db).list().some((i) => i.kind === 'subtitle.transcript')).toBe(true);
+  });
+
   it('resolves the seeds directory from this module, not the working directory', () => {
     // Module-relative like db.ts's migrations dir: an operator starting the server from
     // any other directory must still find the seeds. `tests/` sits one level under the
     // repo root, the same as `src/agent/`'s two.
     const expected = join(dirname(fileURLToPath(import.meta.url)), '..', 'seeds', 'sites');
-    const cwd = process.cwd();
-    try {
-      process.chdir(tmpdir());
-      expect(defaultSeedsDir()).toBe(expected);
-    } finally {
-      process.chdir(cwd);
-    }
+    // Spied rather than `process.chdir`d: the assertion needs a cwd that is NOT the repo
+    // root to mean anything, and chdir is a global side effect that leaks into every other
+    // test sharing this worker (and is unavailable at all under a threads pool).
+    vi.spyOn(process, 'cwd').mockReturnValue(tmpdir());
+    expect(defaultSeedsDir()).toBe(expected);
+    expect(defaultSeedsDir().startsWith(process.cwd())).toBe(false);
   });
 });

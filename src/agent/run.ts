@@ -194,9 +194,18 @@ export async function searchSite(
     runs.appendTranscript(runId, [entry]);
     ctx.events.append({
       kind: 'subtitle.transcript',
+      // A refused private/loopback destination carries `attention` (see the loop's
+      // `refuse`), which files the step as an attention item. Its own dedupeKey keeps the
+      // whole run's refusals collapsed into one item, and keeps that item distinct from
+      // any other attention this target raises.
+      ...(entry.level !== undefined ? { level: entry.level } : {}),
       jobId: job.id,
       message: `[${siteLabel(site.baseUrl)}] ${entry.action}: ${entry.detail}`,
-      data: targetEventData(job, { site: siteLabel(site.baseUrl), entry }),
+      data: targetEventData(job, {
+        site: siteLabel(site.baseUrl),
+        entry,
+        ...(entry.level !== undefined ? { dedupeKey: `refused:${siteLabel(site.baseUrl)}` } : {}),
+      }),
     });
   };
 

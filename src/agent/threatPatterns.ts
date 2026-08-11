@@ -17,8 +17,8 @@
  * twenty-six walked past. Nothing downstream may treat a clean scan as evidence that stored
  * text is safe to replay; the controls that bound the damage are the bounded action set, the
  * same-SITE guard on `request` (subdomains of the site pass it, so it is looser than
- * same-origin), the private/loopback address guard on every fetch verb, and the human who
- * reads the Attention item.
+ * same-origin), the private/loopback address guard on every fetch verb and every redirect
+ * hop, and the human who reads the Attention item.
  *
  * Every pattern targets a SHAPE, not a word. The text this guards is protocol prose a
  * subtitle-site agent writes about a site — "POST the search form to https://…", "the

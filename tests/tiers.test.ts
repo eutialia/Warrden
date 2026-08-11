@@ -176,6 +176,66 @@ describe('CurlTier', () => {
     expect(jar.header('site')).toBe('session=from-redirect');
   });
 
+  /** The redirect chain is the one place a destination the agent never chose gets fetched,
+   * so the guard has to run on every hop and not only on the URL handed in. */
+  it.each([
+    ['absolute Location on the cloud metadata address', 'http://169.254.169.254/latest/meta-data', 'http://169.254.169.254/latest/meta-data'],
+    ['absolute Location on a LAN address', 'http://192.168.1.1/admin', 'http://192.168.1.1/admin'],
+    ['Location resolved against a redirect that already moved host', 'http://[::1]/x', 'http://[::1]/x'],
+  ])('refuses a redirect to a private destination without requesting it: %s', async (_name, location, refusedUrl) => {
+    const seen: string[] = [];
+    const tier = new CurlTier({
+      fetchImpl: async (url) => {
+        seen.push(String(url));
+        const h = new Headers();
+        h.set('location', location);
+        return new Response(null, { status: 302, headers: h });
+      },
+    });
+    const res = await tier.fetch('https://site/start');
+    expect(res).toEqual({ ok: false, status: 302, blocked: false, refusedUrl });
+    // The public first hop happened; the private one never left the process.
+    expect(seen).toEqual(['https://site/start']);
+  });
+
+  it('refuses a private URL handed in directly, without fetching it', async () => {
+    let called = 0;
+    const tier = new CurlTier({
+      fetchImpl: async () => {
+        called += 1;
+        return new Response('secret', { status: 200 });
+      },
+    });
+    expect(await tier.fetch('http://169.254.169.254/latest/meta-data')).toEqual({
+      ok: false,
+      blocked: false,
+      refusedUrl: 'http://169.254.169.254/latest/meta-data',
+    });
+    expect(called).toBe(0);
+  });
+
+  it('still follows a legitimate multi-hop redirect between public hosts', async () => {
+    const seen: string[] = [];
+    const chain: Record<string, string> = {
+      'https://site/start': 'https://mirror.example/step',
+      'https://mirror.example/step': 'https://cdn.example/final',
+    };
+    const tier = new CurlTier({
+      fetchImpl: async (url) => {
+        seen.push(String(url));
+        const next = chain[String(url)];
+        if (next === undefined) return new Response('<html>landed</html>', { status: 200 });
+        const h = new Headers();
+        h.set('location', next);
+        return new Response(null, { status: 302, headers: h });
+      },
+    });
+    const res = await tier.fetch('https://site/start');
+    expect(res).toMatchObject({ ok: true, status: 200, body: '<html>landed</html>' });
+    expect(res.refusedUrl).toBeUndefined();
+    expect(seen).toEqual(['https://site/start', 'https://mirror.example/step', 'https://cdn.example/final']);
+  });
+
   it('returns ok:false when redirects exceed 5 hops', async () => {
     let n = 0;
     const tier = new CurlTier({

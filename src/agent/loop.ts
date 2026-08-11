@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { isIP } from 'node:net';
 import { join } from 'node:path';
 import type { StructuredGenerator } from '../llm/generator.js';
-import type { FetchTier } from './tiers.js';
+import { refusedDestination, type RefusedDestination } from './destinationGuard.js';
+import type { FetchResult, FetchTier } from './tiers.js';
 import { siteKey } from '../config/siteLabel.js';
 import type { SiteProfileRow } from '../db/siteProfiles.js';
 import type { TranscriptEntry } from '../db/subtitleRuns.js';
@@ -95,125 +95,11 @@ function isSameSite(url: string, baseUrl: string): boolean {
   }
 }
 
-/** The four bytes of a dotted-quad IPv4 address, which `isIP` has already validated. */
-function ipv4Bytes(address: string): number[] {
-  return address.split('.').map(Number);
-}
-
-/**
- * An IPv6 literal as its 16 bytes, or `null` if it can't be read. Handles the one `::`
- * run and a trailing dotted quad (`::ffff:127.0.0.1`), which is all the textual forms
- * are; callers reach this only after `isIP` has said the string is a valid IPv6 address.
- */
-function ipv6Bytes(address: string): number[] | null {
-  const halves = address.split('::');
-  if (halves.length > 2) return null;
-
-  const expand = (part: string): number[] | null => {
-    if (part === '') return [];
-    const out: number[] = [];
-    const groups = part.split(':');
-    for (let i = 0; i < groups.length; i++) {
-      const group = groups[i]!;
-      if (i === groups.length - 1 && group.includes('.')) {
-        out.push(...ipv4Bytes(group));
-        continue;
-      }
-      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
-      const value = Number.parseInt(group, 16);
-      out.push(value >> 8, value & 0xff);
-    }
-    return out;
-  };
-
-  const head = expand(halves[0]!);
-  const tail = halves.length === 2 ? expand(halves[1]!) : [];
-  if (head === null || tail === null) return null;
-  const fill = 16 - head.length - tail.length;
-  if (fill < 0 || (halves.length === 1 && fill !== 0)) return null;
-  return [...head, ...new Array<number>(fill).fill(0), ...tail];
-}
-
-/**
- * The IPv4 address an IPv6 literal carries in its low four bytes, when the high bytes are
- * one of the prefixes that mean "this is really an IPv4 address": `::ffff:0:0/96`
- * (IPv4-mapped, which is what `http://[::ffff:127.0.0.1]/` becomes once the URL parser
- * normalizes it), `::/96` (IPv4-compatible, and with it `::1` and `::` themselves), and
- * `::ffff:0:0:0/96` (IPv4-translated). Every one of those spellings reaches the same
- * machine as the bare IPv4 address, so all of them have to be judged as that address
- * rather than as an unrecognized IPv6 host.
- */
-function embeddedIpv4(bytes: number[]): number[] | null {
-  const zeros = (from: number, to: number): boolean => bytes.slice(from, to).every((b) => b === 0);
-  const mappedOrCompatible = zeros(0, 10) && (zeros(10, 12) || (bytes[10] === 0xff && bytes[11] === 0xff));
-  const translated = zeros(0, 8) && bytes[8] === 0xff && bytes[9] === 0xff && zeros(10, 12);
-  return mappedOrCompatible || translated ? bytes.slice(12) : null;
-}
-
-function isPrivateIpv4(bytes: number[]): boolean {
-  const [a, b] = bytes as [number, number];
-  if (a === 0) return true; // "this network" 0/8 — 0.0.0.0 reaches loopback on Linux
-  if (a === 127) return true; // loopback 127.0.0.0/8
-  if (a === 10) return true; // private 10/8
-  if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
-  if (a === 192 && b === 168) return true; // private 192.168/16
-  if (a === 169 && b === 254) return true; // link-local 169.254/16 (incl. 169.254.169.254)
-  return false;
-}
-
-/**
- * Whether `hostname` (a URL's `.hostname`, brackets included for IPv6) names a loopback,
- * private, or link-local destination. Closes the server-side-request-forgery shape — page
- * text the agent reads can otherwise name any URL, and without this guard a fetch verb
- * would happily reach a LAN service or a cloud metadata endpoint.
- *
- * The host is normalized before any range test, because the ranges are the easy half and
- * the spellings are the hard one. A trailing dot comes off (`localhost.` resolves exactly
- * like `localhost`), an IPv6 literal is read as its 16 bytes, and a literal that carries
- * an IPv4 address in its low bytes is judged as that IPv4 address. What is then refused:
- * `0.0.0.0/8`, `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `169.254/16` (which
- * includes the cloud metadata address `169.254.169.254`), the names `localhost` and
- * `*.localhost`, `::1` and `::`, unique-local `fc00::/7`, and link-local `fe80::/10`.
- *
- * What it does NOT catch, and cannot: a hostname that merely *resolves* to one of those
- * addresses. An attacker who controls a DNS record can point `pack.example.test` at
- * 127.0.0.1, or answer twice and rebind between this check and the connection. Catching
- * that means checking the address the socket actually connected to, which belongs in the
- * fetch tiers and not here. This guard covers literals only, and that is the whole of the
- * claim.
- */
-function isPrivateOrLoopbackHost(hostname: string): boolean {
-  let host = hostname.toLowerCase();
-  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-  if (host.endsWith('.')) host = host.slice(0, -1);
-
-  const version = isIP(host);
-  if (version === 4) return isPrivateIpv4(ipv4Bytes(host));
-  if (version === 6) {
-    const bytes = ipv6Bytes(host);
-    if (bytes === null) return true; // a literal this can't read is refused, not allowed
-    const embedded = embeddedIpv4(bytes);
-    if (embedded !== null) return isPrivateIpv4(embedded);
-    if ((bytes[0]! & 0xfe) === 0xfc) return true; // unique-local fc00::/7
-    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true; // link-local fe80::/10
-    return false;
-  }
-  return host === 'localhost' || host.endsWith('.localhost');
-}
-
-/** A refusal line for `action`/`url` if it targets a private or loopback destination,
- * else `null`. Applies to every fetch verb (search/open/request/download) — unlike the
- * same-site guard, this one is not verb-specific: nothing the agent does should be able
- * to reach a LAN service or cloud metadata endpoint, whatever site sent it there. */
-function privateDestinationRefusal(action: string, url: string): string | null {
-  let hostname: string;
-  try {
-    hostname = new URL(url).hostname;
-  } catch {
-    return null;
-  }
-  return isPrivateOrLoopbackHost(hostname) ? `${action} refused: ${url} targets a private/loopback address` : null;
-}
+/** A refused destination, phrased to complete `<action> refused: <url> ...`. */
+const REFUSAL_REASON: Record<RefusedDestination, string> = {
+  private: 'targets a private/loopback address',
+  unparseable: 'is not a usable URL',
+};
 
 /** The loop hit the current tier's wall — the runner escalates one rung and retries. */
 export class TierBlockedError extends Error {
@@ -276,10 +162,18 @@ export async function runAgentLoop(input: {
   const history: HistoryStep[] = [];
   let lastSearchUrl: string | null = null;
   let refusals = 0;
-  /** Records a guarded destination as this step's observation and reports whether the run
-   * has spent its refusal allowance. */
-  const refuse = (line: string): boolean => {
+  /**
+   * Records a guarded destination as this step's observation AND as a transcript entry,
+   * then reports whether the run has spent its refusal allowance. The transcript entry is
+   * the point: without it a refusal is invisible as a refusal — the step reads as an
+   * ordinary action against a URL that then failed for no stated reason, and a knowledge
+   * file aimed at cloud metadata looks like a clumsy model. `attention` marks the variants
+   * that are a security signal rather than a wrong guess, so the runner raises them into
+   * the attention queue where a human sees them.
+   */
+  const refuse = (line: string, level?: 'attention'): boolean => {
     history.push({ prefix: line });
+    onTranscript({ ts: Date.now(), tier: tier.tier, action: 'refused', detail: line, ...(level !== undefined ? { level } : {}) });
     refusals += 1;
     return refusals >= REFUSAL_LIMIT;
   };
@@ -306,12 +200,29 @@ export async function runAgentLoop(input: {
     // Every fetch verb is checked against private/loopback destinations before anything
     // else runs — a clean scan of stored knowledge is not evidence it's safe to act on;
     // this guard (plus the same-site guard below, plus the bounded action set) is what
-    // actually bounds the damage a tampered or malicious page can do.
-    const privateRefusal = privateDestinationRefusal(action.action, action.url);
-    if (privateRefusal) {
-      if (refuse(privateRefusal)) return { kind: 'refused-repeatedly', refusals };
+    // actually bounds the damage a tampered or malicious page can do. The same guard runs
+    // again inside the tiers on every redirect hop, which is the only place a destination
+    // the model never named can appear.
+    const refusal = refusedDestination(action.url);
+    if (refusal !== null) {
+      const line = `${action.action} refused: ${action.url} ${REFUSAL_REASON[refusal]}`;
+      // A malformed URL is a model slip; a private/loopback one is the SSRF shape and has
+      // to reach a human even when the run recovers on the next step.
+      if (refuse(line, refusal === 'private' ? 'attention' : undefined)) {
+        return { kind: 'refused-repeatedly', refusals };
+      }
       continue;
     }
+
+    /** A redirect hop the tier refused mid-fetch: the destination guard runs again on
+     * every hop inside the fetch, so a public URL that 302s onto a guarded address never
+     * connects. It comes back as a failed result rather than a throw, and is recorded and
+     * counted exactly like a refusal the loop caught up front. */
+    const refuseHop = (res: FetchResult): 'stop' | 'continue' | null => {
+      if (res.refusedUrl === undefined) return null;
+      const line = `${action.action} refused: ${action.url} redirected to ${res.refusedUrl}, which ${REFUSAL_REASON.private}`;
+      return refuse(line, 'attention') ? 'stop' : 'continue';
+    };
 
     if (action.action === 'download') {
       // Sanitize the URL tail so a model-chosen path segment can't escape destDir via
@@ -324,6 +235,9 @@ export async function runAgentLoop(input: {
         destPath,
         ...(referer !== undefined ? { referer } : {}),
       });
+      const hop = refuseHop(res);
+      if (hop === 'stop') return { kind: 'refused-repeatedly', refusals };
+      if (hop === 'continue') continue;
       if (res.blocked) throw new TierBlockedError(`download blocked at ${action.url}`);
       if (!res.ok || res.filePath === undefined) {
         history.push({ prefix: `download ${action.url} -> FAILED` });
@@ -357,6 +271,9 @@ export async function runAgentLoop(input: {
         ...(method === 'POST' && action.contentType !== '' ? { contentType: action.contentType } : {}),
         ...(referer !== undefined ? { referer } : {}),
       });
+      const hop = refuseHop(res);
+      if (hop === 'stop') return { kind: 'refused-repeatedly', refusals };
+      if (hop === 'continue') continue;
       if (res.blocked) throw new TierBlockedError(`request blocked at ${action.url}`);
       if (res.ok) {
         history.push({
@@ -370,6 +287,9 @@ export async function runAgentLoop(input: {
     }
 
     const res = await tier.fetch(action.url);
+    const hop = refuseHop(res);
+    if (hop === 'stop') return { kind: 'refused-repeatedly', refusals };
+    if (hop === 'continue') continue;
     if (res.blocked) throw new TierBlockedError(`${action.action} blocked at ${action.url}`);
     if (res.ok && action.action === 'search') lastSearchUrl = action.url;
     if (res.ok) {

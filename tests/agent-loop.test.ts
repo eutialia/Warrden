@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentActionSchema, runAgentLoop, TierBlockedError } from '../src/agent/loop.js';
 import type { FetchOpts, FetchResult, FetchTier } from '../src/agent/tiers.js';
+import type { TranscriptEntry } from '../src/db/subtitleRuns.js';
 import { defaultProfileRow, FakeGenerator, tmpDir } from './helpers.js';
 
 const PROFILE = defaultProfileRow('https://acg.rip');
@@ -214,6 +215,10 @@ describe('runAgentLoop', () => {
     ['IPv4-mapped IPv6 written in hex groups', 'http://[::ffff:7f00:1]/x'],
     ['IPv4-compatible IPv6', 'http://[::127.0.0.1]/x'],
     ['IPv4-translated IPv6', 'http://[::ffff:0:127.0.0.1]/x'],
+    ['6to4 IPv6 wrapping a private IPv4', 'http://[2002:a00:1::]/x'],
+    ['6to4 IPv6 wrapping the metadata address', 'http://[2002:a9fe:a9fe::]/x'],
+    ['NAT64 well-known prefix over the metadata address', 'http://[64:ff9b::a9fe:a9fe]/x'],
+    ['deprecated site-local IPv6', 'http://[fec0::1]/x'],
   ];
 
   it.each(
@@ -238,11 +243,72 @@ describe('runAgentLoop', () => {
     ['172.32/16, just past the private range', 'http://172.32.0.1/x'],
     ['192.169/16, just past the private range', 'http://192.169.0.1/x'],
     ['a host whose name merely ends in localhost', 'https://mylocalhost.test/x'],
+    ['6to4 IPv6 wrapping a public IPv4', 'http://[2002:808:808::]/x'],
   ])('open does not refuse %s', async (_name, url) => {
     const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'fine', blocked: false }]);
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(1);
+  });
+
+  it.each([
+    ['a bare word', 'metadata'],
+    ['a scheme-less host', 'acg.rip/t/1'],
+  ])('refuses a URL that will not parse (%s) rather than handing it to the tier', async (_name, url) => {
+    const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
+    const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls).toHaveLength(0);
+    expect(llm.calls[1]!.prompt).toContain(`open refused: ${url} is not a usable URL`);
+  });
+
+  /** A refusal that only shows up as "the step failed" reads like a clumsy model. It has
+   * to be in the transcript as a refusal, and the private/loopback variant has to carry
+   * the level that puts it in front of a human. */
+  it.each([
+    ['private/loopback destination', act({ action: 'open', url: 'http://169.254.169.254/latest/meta-data', note: 'probe' }), 'attention', 'targets a private/loopback address'],
+    ['unparseable URL', act({ action: 'open', url: 'metadata', note: 'probe' }), undefined, 'is not a usable URL'],
+    ['foreign host on request', act({ action: 'request', url: 'https://evil.test/api', note: 'probe', method: 'GET' }), undefined, 'is not on acg.rip'],
+  ])('records the refusal of a %s in the transcript', async (_name, action, level, reason) => {
+    const llm = new FakeGenerator([action, act({ action: 'give_up', url: '', note: 'stopped' })]);
+    const entries: TranscriptEntry[] = [];
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+    const refusals = entries.filter((e) => e.action === 'refused');
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]!.detail).toContain(reason);
+    expect(refusals[0]!.level).toBe(level);
+  });
+
+  it.each(['search', 'open', 'download'] as const)(
+    'reports a redirect hop the tier refused as a refusal of the %s step',
+    async (action) => {
+      const refusedUrl = 'http://169.254.169.254/latest/meta-data';
+      const llm = new FakeGenerator([
+        act({ action, url: 'https://acg.rip/t/1', note: 'probe' }),
+        act({ action: 'give_up', url: '', note: 'stopped' }),
+      ]);
+      const tier = fakeTier([{ ok: false, blocked: false, refusedUrl }]);
+      const entries: TranscriptEntry[] = [];
+      const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+      expect(out).toEqual({ kind: 'gave-up' });
+      const refusal = entries.find((e) => e.action === 'refused');
+      expect(refusal?.level).toBe('attention');
+      expect(refusal?.detail).toBe(
+        `${action} refused: https://acg.rip/t/1 redirected to ${refusedUrl}, which targets a private/loopback address`,
+      );
+      // The step must not read as an ordinary failure in the next prompt either.
+      expect(llm.calls[1]!.prompt).toContain(`redirected to ${refusedUrl}`);
+      expect(llm.calls[1]!.prompt).not.toContain('-> FAILED');
+    },
+  );
+
+  it('counts refused redirect hops toward the refusal limit', async () => {
+    const llm = new FakeGenerator(
+      new Array(5).fill(null).map(() => act({ action: 'open', url: 'https://acg.rip/t/1', note: 'probe' })),
+    );
+    const tier = fakeTier(new Array(5).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl: 'http://[::1]/x' })));
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
+    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3 });
   });
 
   it('passes referer on download to the tier', async () => {
