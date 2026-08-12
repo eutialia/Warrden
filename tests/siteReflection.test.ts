@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { siteKey } from '../src/config/siteLabel.js';
@@ -564,6 +564,18 @@ describe('reflectOnRun', () => {
     const out = await reflect(ctx);
     expect(out).toBeNull();
     expect(readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8')).toBe(before);
+    expect(findEvent(ctx.events.list({}), 'subtitle.knowledge-failed')?.level).toBe('warn');
+    expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-skipped')).toBe(false);
+  });
+
+  it('warns instead of throwing when the notes file itself cannot be read', async () => {
+    // A directory sitting where the notes file should be — an unreadable-file stand-in that
+    // doesn't depend on filesystem permissions (which don't reproducibly fail as non-root).
+    // reflectOnRun must not let this escape: it is the doc comment's whole promise.
+    const ctx = reflectCtx({ llm: new FakeGenerator([reflection()]) });
+    mkdirSync(knowledgePath(ctx.dataDir, SITE), { recursive: true });
+    const out = await reflect(ctx);
+    expect(out).toBeNull();
     expect(findEvent(ctx.events.list({}), 'subtitle.knowledge-failed')?.level).toBe('warn');
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-skipped')).toBe(false);
   });

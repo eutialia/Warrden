@@ -1,9 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { describe, expect, it } from 'vitest';
 import { ArchiveCache } from '../src/db/archiveCache.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
+import { REFLECT_CALLSITE } from '../src/agent/siteReflection.js';
+import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import type { MediaStream } from '../src/media/tools.js';
@@ -415,5 +417,76 @@ describe('runSubtitleJob', () => {
     });
 
     expect(called).toBe(false);
+  });
+
+  it('a reflection failure for one site does not stop the job or swallow later sites/attention items', async () => {
+    // Real reflectOnRun (no stub) and self-learning switched on, so this exercises the
+    // actual failure path rather than a mock of it — the reviewer's exact probe.
+    const fx = subtitleFixture({
+      sites: [
+        { name: 'a', baseUrl: 'https://a.test' },
+        { name: 'b', baseUrl: 'https://b.test' },
+      ],
+    });
+    fx.ctx.config.llm.profiles[fx.ctx.config.llm.activeProfile] = {
+      ...fx.ctx.config.llm.profiles[fx.ctx.config.llm.activeProfile],
+      [REFLECT_CALLSITE]: { provider: 'openai', model: 'test-model' },
+    };
+    // Only site b's reflection reaches the model — site a's fails before any generate call.
+    fx.ctx.llm = new FakeGenerator([{ verdict: 'usable', reason: 'ok', ops: [] }]);
+    // A directory sitting where site a's notes file belongs: loadKnowledge's readFileSync
+    // throws EISDIR, the real filesystem condition the review reproduced.
+    mkdirSync(knowledgePath(fx.ctx.dataDir, 'https://a.test'), { recursive: true });
+
+    const searched: string[] = [];
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async (_ctx, _job, site) => {
+        searched.push(site.baseUrl);
+        return { download: null, transcript: [], outcome: 'gave-up' as const };
+      },
+    });
+
+    expect(searched).toEqual(['https://a.test', 'https://b.test']);
+    expect(findEvent(fx.ctx.events.list({}), 'subtitle.knowledge-failed')?.level).toBe('warn');
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+  });
+
+  it('reflects a verified success when one of two configured languages actually placed', async () => {
+    // The spec's oracle is "placed something," not "fully resolved the episode" — a single-
+    // language pack against a two-language config must still verify true.
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      ...siteStub({ 'Show - S01E05.zh-Hans.ass': SRT }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: true }]);
+  });
+
+  it('reflects with verifiedSuccess: false, then still propagates, when extraction fails hard', async () => {
+    // Not UnsupportedArchiveError: a genuinely corrupt zip that AdmZip's constructor throws
+    // a plain Error for. extractAndMatch only swallows UnsupportedArchiveError; anything
+    // else must reflect first and then keep propagating (job fails, runner retries).
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const zipPath = join(tmpDir(), 'corrupt.zip');
+    writeFileSync(zipPath, 'not actually a zip file');
+    const fx = subtitleFixture();
+    const job = claimSubtitleJob(fx);
+
+    await expect(
+      runSubtitleJob(fx.ctx, job, {
+        searchSite: async () => ({
+          download: { filePath: zipPath, url: 'https://example.test/corrupt.zip' },
+          transcript: [],
+          outcome: 'downloaded' as const,
+        }),
+        reflectOnRun: reflectSpy(calls),
+      }),
+    ).rejects.toThrow();
+
+    expect(calls).toEqual([{ verifiedSuccess: false }]);
   });
 });

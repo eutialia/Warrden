@@ -382,9 +382,12 @@ function buildSystemPrompt(input: {
  * would break the ceiling, in which case the previous file stands.
  *
  * Returns `null`, having changed nothing, in two cases that are reported differently: the
- * `site-notes` call-site is unconfigured, which is the off switch and is quiet, or the
- * call itself failed, which is a warning. Either way the run continues and the site's file
- * is left exactly as it was — reflection is opt-in and never fails a job.
+ * `site-notes` call-site is unconfigured, which is the off switch and is quiet, or anything
+ * past that point failed — the generate call, the notes file read, the save — which is a
+ * warning. The off-switch check runs before any file I/O so it stays quiet even when the
+ * site's notes path itself is unreadable. Every failure after it, whatever raised it, is
+ * caught here: this function is the caller's whole contract for "reflection never fails a
+ * job," so nothing it does may propagate.
  */
 export async function reflectOnRun(input: {
   ctx: AppContext;
@@ -400,10 +403,6 @@ export async function reflectOnRun(input: {
 }): Promise<{ verdict: SiteVerdict; reason: string } | null> {
   const { ctx, job, site, transcript, verifiedSuccess, today } = input;
   const label = siteLabel(site.baseUrl);
-  // With the seeds dir, same as the reader in `searchSite`: reflection normally runs after
-  // a search that already copied the seed in, but if it ever runs first, saving without
-  // the seed would leave a local file behind and the seed would never be copied again.
-  const knowledge = loadKnowledge(ctx.dataDir, site.baseUrl, input.seedsDir ?? defaultSeedsDir());
 
   try {
     // Before any provider work: an unconfigured call-site is how self-learning stays off,
@@ -421,9 +420,16 @@ export async function reflectOnRun(input: {
     return null;
   }
 
-  let reflection: Reflection;
   try {
-    reflection = await ctx.llm.generate({
+    // With the seeds dir, same as the reader in `searchSite`: reflection normally runs
+    // after a search that already copied the seed in, but if it ever runs first, saving
+    // without the seed would leave a local file behind and the seed would never be copied
+    // again. Inside this guard because an unreadable notes file (bad permissions, a
+    // directory where the file should be) is exactly the kind of failure this function
+    // promises never to let escape.
+    const knowledge = loadKnowledge(ctx.dataDir, site.baseUrl, input.seedsDir ?? defaultSeedsDir());
+
+    const reflection = await ctx.llm.generate({
       callsite: REFLECT_CALLSITE,
       schema: ReflectionSchema,
       system: buildSystemPrompt({ site, knowledge, verifiedSuccess, today }),
@@ -434,11 +440,84 @@ export async function reflectOnRun(input: {
         renderTranscript(transcript),
       ].join('\n'),
     });
+
+    const { knowledge: applied, dropped } = applyOps(knowledge, reflection.ops, {
+      allowProtocol: verifiedSuccess,
+      // The verdict is the model's own, so this guards an honest contradiction — a run
+      // that reports nothing structural happened while deleting the site's protocol —
+      // rather than an adversary, who would simply not report `transient-failure`.
+      allowProtocolRemove: reflection.verdict !== 'transient-failure',
+      today,
+    });
+    const appliedCount = reflection.ops.length - dropped.length;
+
+    if (dropped.length > 0) {
+      const hostile = dropped.some((d) => d.hostile);
+      ctx.events.append({
+        kind: 'subtitle.knowledge-dropped',
+        // A bullet that tried to forge structure or carried an injection is a recorded
+        // attempt to poison the agent's memory — the one thing here a human should see. An
+        // ordinary refusal (a typo'd target, a section that was closed) stays a warning.
+        level: hostile ? 'attention' : 'warn',
+        jobId: job.id,
+        message: hostile
+          ? `${dropped.length} knowledge edit(s) for ${label} were refused, including one that tried to tamper with the notes file`
+          : `${dropped.length} knowledge edit(s) for ${label} were refused`,
+        data: targetEventData(job, {
+          site: label,
+          droppedCount: dropped.length,
+          dropped: dropped.slice(0, MAX_DROPPED_REPORTED),
+        }),
+      });
+    }
+
+    const pruned = pruneStale(applied, today, verifiedSuccess);
+    const prunedCount = AGENT_SECTIONS.reduce(
+      (sum, section) => sum + (applied.sections[section].length - pruned.sections[section].length),
+      0,
+    );
+
+    if (appliedCount === 0 && prunedCount === 0) {
+      // Nothing changed, so nothing is written: a no-op run leaves the file — and its
+      // single `.bak` — exactly as it found them.
+      return { verdict: reflection.verdict, reason: reflection.reason };
+    }
+
+    const size = agentCharCount(pruned);
+    if (size > KNOWLEDGE_CHAR_CAP) {
+      // Not truncated: cutting markdown to fit corrupts a file that was fine, and the old
+      // file is still a working one. The next run sees the same over-full file and can
+      // consolidate it with `remove`/`update` operations of its own.
+      ctx.events.append({
+        kind: 'subtitle.knowledge-overflow',
+        level: 'warn',
+        jobId: job.id,
+        message: `Knowledge update for ${label} dropped — it would reach ${size} chars, over the ${KNOWLEDGE_CHAR_CAP} cap`,
+        data: targetEventData(job, { site: label, size, cap: KNOWLEDGE_CHAR_CAP }),
+      });
+      return { verdict: reflection.verdict, reason: reflection.reason };
+    }
+
+    saveKnowledge(ctx.dataDir, { ...pruned, updated: today });
+    ctx.events.append({
+      kind: 'subtitle.knowledge-updated',
+      jobId: job.id,
+      message: `Site knowledge for ${label} updated (${appliedCount} edit(s), ${prunedCount} stale bullet(s) pruned)`,
+      data: targetEventData(job, {
+        site: label,
+        applied: appliedCount,
+        droppedCount: dropped.length,
+        dropped: dropped.slice(0, MAX_DROPPED_REPORTED),
+        pruned: prunedCount,
+      }),
+    });
+
+    return { verdict: reflection.verdict, reason: reflection.reason };
   } catch (err) {
-    if (!(err instanceof LlmError)) throw err;
-    // The call-site resolved a moment ago, so this is a configured feature failing —
-    // a provider outage, a timeout, a response that didn't match the schema. Worth a
-    // warning: left alone it would silently learn nothing, run after run.
+    // The call-site resolved a moment ago, so this is a configured feature failing — a
+    // provider outage, a timeout, a response that didn't match the schema, or a filesystem
+    // error reading/saving the notes file. Worth a warning: left alone it would silently
+    // learn nothing, run after run.
     ctx.events.append({
       kind: 'subtitle.knowledge-failed',
       level: 'warn',
@@ -448,77 +527,4 @@ export async function reflectOnRun(input: {
     });
     return null;
   }
-
-  const { knowledge: applied, dropped } = applyOps(knowledge, reflection.ops, {
-    allowProtocol: verifiedSuccess,
-    // The verdict is the model's own, so this guards an honest contradiction — a run that
-    // reports nothing structural happened while deleting the site's protocol — rather than
-    // an adversary, who would simply not report `transient-failure`.
-    allowProtocolRemove: reflection.verdict !== 'transient-failure',
-    today,
-  });
-  const appliedCount = reflection.ops.length - dropped.length;
-
-  if (dropped.length > 0) {
-    const hostile = dropped.some((d) => d.hostile);
-    ctx.events.append({
-      kind: 'subtitle.knowledge-dropped',
-      // A bullet that tried to forge structure or carried an injection is a recorded
-      // attempt to poison the agent's memory — the one thing here a human should see. An
-      // ordinary refusal (a typo'd target, a section that was closed) stays a warning.
-      level: hostile ? 'attention' : 'warn',
-      jobId: job.id,
-      message: hostile
-        ? `${dropped.length} knowledge edit(s) for ${label} were refused, including one that tried to tamper with the notes file`
-        : `${dropped.length} knowledge edit(s) for ${label} were refused`,
-      data: targetEventData(job, {
-        site: label,
-        droppedCount: dropped.length,
-        dropped: dropped.slice(0, MAX_DROPPED_REPORTED),
-      }),
-    });
-  }
-
-  const pruned = pruneStale(applied, today, verifiedSuccess);
-  const prunedCount = AGENT_SECTIONS.reduce(
-    (sum, section) => sum + (applied.sections[section].length - pruned.sections[section].length),
-    0,
-  );
-
-  if (appliedCount === 0 && prunedCount === 0) {
-    // Nothing changed, so nothing is written: a no-op run leaves the file — and its single
-    // `.bak` — exactly as it found them.
-    return { verdict: reflection.verdict, reason: reflection.reason };
-  }
-
-  const size = agentCharCount(pruned);
-  if (size > KNOWLEDGE_CHAR_CAP) {
-    // Not truncated: cutting markdown to fit corrupts a file that was fine, and the old
-    // file is still a working one. The next run sees the same over-full file and can
-    // consolidate it with `remove`/`update` operations of its own.
-    ctx.events.append({
-      kind: 'subtitle.knowledge-overflow',
-      level: 'warn',
-      jobId: job.id,
-      message: `Knowledge update for ${label} dropped — it would reach ${size} chars, over the ${KNOWLEDGE_CHAR_CAP} cap`,
-      data: targetEventData(job, { site: label, size, cap: KNOWLEDGE_CHAR_CAP }),
-    });
-    return { verdict: reflection.verdict, reason: reflection.reason };
-  }
-
-  saveKnowledge(ctx.dataDir, { ...pruned, updated: today });
-  ctx.events.append({
-    kind: 'subtitle.knowledge-updated',
-    jobId: job.id,
-    message: `Site knowledge for ${label} updated (${appliedCount} edit(s), ${prunedCount} stale bullet(s) pruned)`,
-    data: targetEventData(job, {
-      site: label,
-      applied: appliedCount,
-      droppedCount: dropped.length,
-      dropped: dropped.slice(0, MAX_DROPPED_REPORTED),
-      pruned: prunedCount,
-    }),
-  });
-
-  return { verdict: reflection.verdict, reason: reflection.reason };
 }

@@ -147,7 +147,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     // landed after the pack was fetched, avoiding a re-download.
     for (const row of cache.forTarget(job.arr_instance, job.target_kind, job.target_id)) {
       if (missing.length === 0) break;
-      const resolved = await matchArchiveRow(ctx, job, row, missing, title, media, placedFiles, refCache, refDir, rawDir, undefined);
+      const { resolved } = await matchArchiveRow(ctx, job, row, missing, title, media, placedFiles, refCache, refDir, rawDir, undefined);
       if (resolved.length > 0) {
         ctx.events.append({
           kind: 'subtitle.cache-hit',
@@ -256,10 +256,15 @@ function notePlacement(
 
 /**
  * Matches one archive's files (from a cached row, or a just-downloaded+extracted pack) to the
- * still-missing episodes and drift-gates + places each match. Returns the episode ids that got
- * fully resolved (every target language filled). Deterministic matching first (via the
- * entry's pre-parsed `episodeRef`), then one `mapArchiveWithLlm` call for whatever's left —
- * mirroring ingest's match-then-LLM ordering.
+ * still-missing episodes and drift-gates + places each match. Deterministic matching first
+ * (via the entry's pre-parsed `episodeRef`), then one `mapArchiveWithLlm` call for whatever's
+ * left — mirroring ingest's match-then-LLM ordering.
+ *
+ * Returns two different counts, for two different callers: `resolved` is the episode ids that
+ * got FULLY resolved (every target language filled) — what the cache-hit event reports.
+ * `placedCount` is how many individual files this call placed on disk, full resolution or
+ * not — the number `extractAndMatch` needs, since one language landing out of several
+ * configured is still a real, verifiable placement (see the design doc's "Writing" section).
  */
 async function matchArchiveRow(
   ctx: AppContext,
@@ -273,9 +278,10 @@ async function matchArchiveRow(
   refDir: string,
   rawDir: string,
   site: string | undefined,
-): Promise<number[]> {
+): Promise<{ resolved: number[]; placedCount: number }> {
   const entryByPath = new Map(row.files.map((f) => [f.path, f]));
   const resolved: number[] = [];
+  let placedCount = 0;
 
   const unmatchedPaths: string[] = [];
   for (const entry of row.files) {
@@ -283,7 +289,10 @@ async function matchArchiveRow(
     const t = matchDeterministic(missing, entry, job.target_kind === 'movie');
     if (t) {
       const placedLang = await driftAndPlace(ctx, job, row, entry, t, media, placedFiles, refCache, refDir, rawDir, site);
-      if (placedLang !== undefined) notePlacement(missing, resolved, t, placedLang);
+      if (placedLang !== undefined) {
+        placedCount++;
+        notePlacement(missing, resolved, t, placedLang);
+      }
     } else {
       unmatchedPaths.push(entry.path);
     }
@@ -298,9 +307,12 @@ async function matchArchiveRow(
       if (!missing.includes(only)) break;
       const entry = entryByPath.get(path)!;
       const placedLang = await driftAndPlace(ctx, job, row, entry, only, media, placedFiles, refCache, refDir, rawDir, site);
-      if (placedLang !== undefined) notePlacement(missing, resolved, only, placedLang);
+      if (placedLang !== undefined) {
+        placedCount++;
+        notePlacement(missing, resolved, only, placedLang);
+      }
     }
-    return resolved;
+    return { resolved, placedCount };
   }
 
   if (unmatchedPaths.length > 0 && missing.length > 0) {
@@ -328,11 +340,14 @@ async function matchArchiveRow(
       // (and removed from `missing`); skip rather than re-placing over a closed gap.
       if (!t) continue;
       const placedLang = await driftAndPlace(ctx, job, row, unmatchedEntries[i]!, t, media, placedFiles, refCache, refDir, rawDir, site);
-      if (placedLang !== undefined) notePlacement(missing, resolved, t, placedLang);
+      if (placedLang !== undefined) {
+        placedCount++;
+        notePlacement(missing, resolved, t, placedLang);
+      }
     }
   }
 
-  return resolved;
+  return { resolved, placedCount };
 }
 
 /** Deterministically matches an archive entry to a still-missing episode. The extracted path
@@ -661,30 +676,34 @@ async function siteSearchPass(
     if (missing.length === 0) break;
 
     const result = await search(ctx, job, site, hints, rawDir);
-    const verifiedSuccess = result.download
-      ? await extractAndMatch(ctx, job, site, result.download, seriesTitle, missing, media, placedFiles, refCache, refDir, rawDir, cache)
-      : false;
-
     // A cooldown means the site never ran at all this job — nothing happened worth writing
     // to its notes file. Every other outcome (a download that placed nothing, an archive
-    // that failed to extract, a give-up, a hard failure) is a completed run and reflects,
-    // with verifiedSuccess carrying whether it actually placed something.
-    if (result.outcome !== 'cooldown') {
-      await reflect({
-        ctx,
-        job,
-        site,
-        transcript: result.transcript,
-        verifiedSuccess,
-        today: new Date(Date.now()).toISOString().slice(0, 10),
-      });
+    // that failed to extract, a give-up, a hard failure) is a completed run and reflects.
+    if (result.outcome === 'cooldown') continue;
+
+    const today = new Date(Date.now()).toISOString().slice(0, 10);
+    let verifiedSuccess = false;
+    try {
+      verifiedSuccess = result.download
+        ? await extractAndMatch(ctx, job, site, result.download, seriesTitle, missing, media, placedFiles, refCache, refDir, rawDir, cache)
+        : false;
+    } catch (err) {
+      // A hard extraction failure (not UnsupportedArchiveError, which extractAndMatch
+      // already turns into `false`) is still a completed, non-cooldown run — it reflects
+      // with verifiedSuccess: false before the error propagates. The propagation itself is
+      // unchanged: the job fails and the runner retries.
+      await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess: false, today });
+      throw err;
     }
+
+    await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today });
   }
 }
 
 /** Extracts one site's downloaded payload into the archive cache and matches it against the
  * still-missing episodes. Returns whether anything actually got placed this call —
- * `matchArchiveRow`'s resolved-episode-ids list is the placement oracle, not "a download
+ * `matchArchiveRow`'s `placedCount` is the placement oracle (at least one subtitle file
+ * landed on disk), not "every target language for an episode landed" and not "a download
  * happened" or "extraction succeeded". `false` covers every non-placing case alike: not an
  * ingestible payload, an archive format extractArchive can't open, an archive with nothing
  * in it, or one that extracted fine but matched no missing episode. */
@@ -738,8 +757,8 @@ async function extractAndMatch(
     created_at: Date.now(),
   };
   // matchArchiveRow drops fully-resolved episodes from `missing` itself.
-  const resolved = await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, siteLabel(site.baseUrl));
-  return resolved.length > 0;
+  const { placedCount } = await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, siteLabel(site.baseUrl));
+  return placedCount > 0;
 }
 
 /** Replaces path-breaking chars in a filename so it can't escape the ref/resync dirs. */
