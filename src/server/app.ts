@@ -743,16 +743,16 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // this 400 should reach for `## Operator notes` instead: an over-cap bullet the agent
     // itself could never have written (`MAX_BULLET_CHARS`, `siteReflection.ts`'s
     // `applyOps`) freezes that site's learning forever, silently — `applyOps` drops any
-    // `remove`/`update` whose `target` is over the cap, so the bullet becomes permanent,
-    // and if it also pushes the agent sections over `KNOWLEDGE_CHAR_CAP`, every future
-    // reflection write for the site is dropped whole (`reflectOnRun`'s overflow guard).
+    // `update` whose `target` is over the cap, so the bullet becomes permanent, and if it
+    // also pushes the agent sections over `KNOWLEDGE_CHAR_CAP`, every future reflection
+    // write for the site is dropped whole (`reflectOnRun`'s overflow guard).
     // The operator is still trusted and still not injection-scanned or ceiling-truncated —
     // this just holds a hand-edit to the same shape limit the agent is held to, with a
     // 400 that says where the room to write freely actually is.
     function agentSectionInvariantError(k: SiteKnowledge): string | null {
       const oversizedBullet = AGENT_SECTIONS.some((section) => k.sections[section].some((b) => b.length > MAX_BULLET_CHARS));
       if (oversizedBullet) {
-        return `a bullet in an agent section is over ${MAX_BULLET_CHARS} characters — the browse agent can never write one this long and could never remove or update it either, freezing that section. Put freeform or long content in "## Operator notes" instead, which has no length limit.`;
+        return `a bullet in an agent section is over ${MAX_BULLET_CHARS} characters — the browse agent can never write one this long and could never update it either, freezing that section. Put freeform or long content in "## Operator notes" instead, which has no length limit.`;
       }
       const size = agentCharCount(k);
       if (size > KNOWLEDGE_CHAR_CAP) {

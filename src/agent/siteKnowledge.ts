@@ -373,7 +373,7 @@ function readKnowledgeFile(dataDir: string, baseUrl: string, seedsDir?: string):
 /**
  * Loads a site's knowledge file: the local copy if one exists, else a seed under
  * `seedsDir` (materialized to the local path first, so the local file exists from then on
- * and every later save/prune only ever touches the local copy), else empty knowledge.
+ * and every later save only ever touches the local copy), else empty knowledge.
  */
 export function loadKnowledge(dataDir: string, baseUrl: string, seedsDir?: string): SiteKnowledge {
   const raw = readKnowledgeFile(dataDir, baseUrl, seedsDir);

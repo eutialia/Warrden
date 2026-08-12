@@ -117,7 +117,7 @@ export interface DroppedOp {
   hostile?: true;
 }
 
-/** Bullet text without any `(confirmed …)` stamp — what `update`/`remove` match on, so
+/** Bullet text without any `(confirmed …)` stamp — what `update` matches on, so
  * re-confirming a rule doesn't make its own earlier stamp a mismatch. Every occurrence
  * goes, not just a trailing one, and each leaves a single space behind so removing one
  * from mid-sentence doesn't run two words together. */
@@ -178,9 +178,9 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  *    section, so a well-formed response never reaches this; it is here because a schema is
  *    a contract with a cooperative model, not a security boundary.
  * 2. `allowProtocol` false refuses `add`/`update` against `Access`/`Search`/`Download`.
- *    Agents that wrote protocol lessons after every run, successful or not, scored worse
- *    than agents with no memory at all, so those writes need a verified success behind
- *    them. `Pitfalls` stays open either way.
+ *    Agents that wrote protocol lessons regardless of outcome scored worse than agents with
+ *    no memory at all, so those writes need a verified success behind them. `Pitfalls` stays
+ *    open either way.
  * 3. The text may not forge file structure (`FORGERY_CHECKS`) and is scanned at `'strict'`
  *    before it can land. Stored knowledge is replayed into a later system prompt, so a
  *    bullet is the one place an injection gets to persist past the page it came from.
@@ -335,9 +335,9 @@ function buildSystemPrompt(input: {
   return [
     `You keep the notes on ${site.baseUrl} for an agent that searches it for subtitle files. A run just finished. Decide what, if anything, the notes should now say.`,
     '',
-    // The whole file, operator half included: `update`/`remove` targets are copied from
-    // here rather than remembered, and the operator's rules are what the agent's own have
-    // to stay consistent with.
+    // The whole file, operator half included: `update` targets are copied from here rather
+    // than remembered, and the operator's rules are what the agent's own have to stay
+    // consistent with.
     // Fenced with `~~~`, not backticks: operator notes are free text a human wrote, and a
     // code sample in them would close a backtick fence early and spill the rest of the file
     // out of the block.

@@ -178,7 +178,7 @@ describe('site knowledge routes', () => {
       expect(loadKnowledge(ctx.dataDir, 'https://x.test').sections.Access).toContain(hostile);
     });
 
-    it('400s a bullet over MAX_BULLET_CHARS — the agent could never write, update or remove one this long, so an operator PUT is the only way to freeze that site\'s learning', async () => {
+    it('400s a bullet over MAX_BULLET_CHARS — the agent could never write or update one this long, so an operator PUT is the only way to freeze that site\'s learning', async () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
       const app = createApp(ctx);
       // I-01: over MAX_BULLET_CHARS (400) but well under KNOWLEDGE_CHAR_CAP (10,000), so
