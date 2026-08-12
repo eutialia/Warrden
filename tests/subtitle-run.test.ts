@@ -11,7 +11,7 @@ import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import type { MediaStream } from '../src/media/tools.js';
-import { enqueueAndClaim, FakeGenerator, findEvent, hasEvent, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
+import { enqueueAndClaim, FakeGenerator, findEvent, hasEvent, seriesResource, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
 
 /** A video with one embedded ASS track (stream index 2) — the drift reference. The track's
  * language must NOT be a target language: reconcile treats an embedded zh-Hans track as
@@ -507,6 +507,34 @@ describe('runSubtitleJob', () => {
     expect(items).toHaveLength(1);
     expect(items[0]!.data.reason).toContain('Cloudflare');
     expect(JSON.stringify(items[0]!.data)).toContain('403');
+  });
+
+  it('dedupes the unusable-site item per SITE, not per target: two different jobs against two different series that hit the same site still collapse into one open item', async () => {
+    // Regression guard for the deliberate deviation from targetEventData's per-target
+    // dedupe grain (see raiseUnusable's doc comment in src/pipelines/subtitle/run.ts):
+    // the verdict is a fact about the SITE, so a second series hitting the same wall must
+    // not spam a second card. Two distinct claimed jobs against two distinct series ids
+    // sharing this fixture's one configured site (https://acg.rip).
+    const fx = subtitleFixture();
+    fx.client.series.push(seriesResource({ id: 99, title: 'Second Show' }));
+    const jobA = claimSubtitleJob(fx);
+    const jobB = enqueueAndClaim(fx.ctx, {
+      pipeline: 'subtitle',
+      targetKind: 'series',
+      targetId: 99,
+      arrInstance: fx.arrInstance,
+    });
+    const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
+    const deps = {
+      searchSite: async () => ({ download: null, transcript, outcome: 'exhausted' as const }),
+      reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
+    };
+
+    await runSubtitleJob(fx.ctx, jobA, deps);
+    await runSubtitleJob(fx.ctx, jobB, deps);
+
+    const items = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.site-unusable');
+    expect(items).toHaveLength(1);
   });
 
   it('skips a disabled site without spending a run', async () => {
