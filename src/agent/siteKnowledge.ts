@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -336,41 +337,127 @@ export function renderKnowledge(k: SiteKnowledge): string {
   return `${lines.join('\n')}\n`;
 }
 
-/**
- * Loads a site's knowledge file: the local copy if one exists, else a seed under
- * `seedsDir` (copied to the local path first, so the local file exists from then on and
- * every later save/prune only ever touches the local copy), else empty knowledge.
- */
-export function loadKnowledge(dataDir: string, baseUrl: string, seedsDir?: string): SiteKnowledge {
+/** Opaque token for "what was on disk when this was loaded" — a content hash, not
+ * `mtimeMs`. Two writes issued in the same request (or the same test, or just the same
+ * filesystem-timestamp tick) can share an mtime, which would make a same-tick conflict
+ * invisible to the exact check it exists to catch. A hash never collides on different
+ * bytes, and costs nothing extra to compute: the file is already read fully into memory to
+ * parse it. */
+export type KnowledgeVersion = string;
+
+/** The version of "nothing was on disk yet" — its own sentinel rather than `null`, so a
+ * save can still conflict if a file was created between the load that saw none and this
+ * save. */
+const NO_FILE_VERSION: KnowledgeVersion = 'none';
+
+function hashKnowledgeVersion(raw: string): KnowledgeVersion {
+  return createHash('sha256').update(raw, 'utf8').digest('hex');
+}
+
+/** Thrown by `saveKnowledge` when `expectedVersion` no longer matches what's on disk: the
+ * file changed since the caller loaded it (G2 — an operator PUT and a reflection write can
+ * race, since reflection's file read and its save are seconds apart across a provider
+ * round trip, and a PUT's read can be arbitrarily older than its save). Callers that pass
+ * `expectedVersion` are opting into "refuse rather than clobber" and must handle this. */
+export class KnowledgeConflictError extends Error {
+  constructor(message = "the knowledge file changed since it was loaded — reload before saving again") {
+    super(message);
+    this.name = 'KnowledgeConflictError';
+  }
+}
+
+/** Reads the raw bytes on disk for a site's knowledge file, materializing a seed on first
+ * touch if `seedsDir` is given and no local copy exists yet. `null` means there is nothing
+ * — no local file and no seed to fall back to. Shared by `loadKnowledge`/
+ * `loadKnowledgeWithVersion` (which parse the result) and `saveKnowledge`'s CAS check
+ * (which only ever hashes it) so all three agree on what "on disk" means. */
+function readKnowledgeFile(dataDir: string, baseUrl: string, seedsDir?: string): string | null {
   const path = knowledgePath(dataDir, baseUrl);
 
   if (!existsSync(path) && seedsDir) {
     const seedPath = join(seedsDir, `${siteKey(baseUrl)}.md`);
     if (existsSync(seedPath)) {
       ensureDataSubdir(dataDir, 'sites');
-      copyFileSync(seedPath, path);
+      // Seed materialization goes through the same temp-file-then-rename shape as
+      // `saveKnowledge` (G5): without it, a crash mid-copy on a site's very first touch
+      // could leave a partial file at the local path, which then reads as real (if
+      // truncated) knowledge on every run after — worse than the seed never having
+      // existed at all.
+      const raw = readFileSync(seedPath, 'utf8');
+      const tmpPath = `${path}.tmp`;
+      writeFileSync(tmpPath, raw, 'utf8');
+      renameSync(tmpPath, path);
     }
   }
 
-  if (!existsSync(path)) return emptyKnowledge(baseUrl);
-  return parseKnowledge(baseUrl, readFileSync(path, 'utf8'));
+  return existsSync(path) ? readFileSync(path, 'utf8') : null;
+}
+
+/**
+ * Loads a site's knowledge file: the local copy if one exists, else a seed under
+ * `seedsDir` (materialized to the local path first, so the local file exists from then on
+ * and every later save/prune only ever touches the local copy), else empty knowledge.
+ */
+export function loadKnowledge(dataDir: string, baseUrl: string, seedsDir?: string): SiteKnowledge {
+  const raw = readKnowledgeFile(dataDir, baseUrl, seedsDir);
+  return raw === null ? emptyKnowledge(baseUrl) : parseKnowledge(baseUrl, raw);
+}
+
+/**
+ * Same as `loadKnowledge`, plus the content-hash `version` a later `saveKnowledge` can be
+ * given back as `expectedVersion` to refuse the write rather than silently overwrite
+ * something that changed underneath it (G2). Used by the two call sites whose read and
+ * write are far enough apart in wall-clock time for another writer to land in between:
+ * `reflectOnRun` (a provider round trip sits between the two) and the dashboard's GET, held
+ * in the open editor until the operator clicks Save.
+ */
+export function loadKnowledgeWithVersion(
+  dataDir: string,
+  baseUrl: string,
+  seedsDir?: string,
+): { knowledge: SiteKnowledge; version: KnowledgeVersion } {
+  const raw = readKnowledgeFile(dataDir, baseUrl, seedsDir);
+  return {
+    knowledge: raw === null ? emptyKnowledge(baseUrl) : parseKnowledge(baseUrl, raw),
+    version: raw === null ? NO_FILE_VERSION : hashKnowledgeVersion(raw),
+  };
 }
 
 /**
  * Writes a site's knowledge file, keeping the previous version as `<path>.bak` and never
- * leaving a partially-written file at the target: any existing file is copied to `.bak`
- * first, the new content is written to `<path>.tmp`, then renamed over the target (atomic
- * on the same filesystem).
+ * leaving a partially-written file at the target: the new content is written to
+ * `<path>.tmp` first, then (once that succeeded) any existing file is copied to `.bak`,
+ * then the temp file is renamed over the target (atomic on the same filesystem). Copying to
+ * `.bak` after the temp write, not before, means a failure in the write itself can never
+ * cost a generation of rollback — only a failure in the `.bak` copy or the rename can, and
+ * both leave the live file exactly as it was.
+ *
+ * When `expectedVersion` is given (G2's compare-and-swap), the file on disk is hashed and
+ * compared against it before anything is written; a mismatch throws
+ * `KnowledgeConflictError` and touches nothing, `.bak` included. Omitting it keeps the
+ * unconditional overwrite every caller used before G2 — reflection and the dashboard PUT
+ * pass it, the seed-reset route deliberately does not (a reset is its own explicit
+ * overwrite).
+ *
+ * Returns the new version, so a caller that just wrote the file doesn't have to re-read
+ * and re-hash it to know what to compare the next load against.
  */
-export function saveKnowledge(dataDir: string, k: SiteKnowledge): void {
+export function saveKnowledge(dataDir: string, k: SiteKnowledge, expectedVersion?: KnowledgeVersion): KnowledgeVersion {
   ensureDataSubdir(dataDir, 'sites');
   const path = knowledgePath(dataDir, k.baseUrl);
 
-  if (existsSync(path)) copyFileSync(path, `${path}.bak`);
+  if (expectedVersion !== undefined) {
+    const onDisk = existsSync(path) ? hashKnowledgeVersion(readFileSync(path, 'utf8')) : NO_FILE_VERSION;
+    if (onDisk !== expectedVersion) throw new KnowledgeConflictError();
+  }
 
+  const rendered = renderKnowledge(k);
   const tmpPath = `${path}.tmp`;
-  writeFileSync(tmpPath, renderKnowledge(k), 'utf8');
+  writeFileSync(tmpPath, rendered, 'utf8');
+  if (existsSync(path)) copyFileSync(path, `${path}.bak`);
   renameSync(tmpPath, path);
+
+  return hashKnowledgeVersion(rendered);
 }
 
 /** Renders a subset of agent sections as `## <Section>` headings and their bullets, joined

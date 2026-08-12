@@ -9,10 +9,11 @@ import { z } from 'zod';
 import {
   AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
+  KnowledgeConflictError,
   MAX_BULLET_CHARS,
   agentCharCount,
   defaultSeedsDir,
-  loadKnowledge,
+  loadKnowledgeWithVersion,
   parseKnowledge,
   renderKnowledge,
   saveKnowledge,
@@ -734,8 +735,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const { baseUrl } = parsed.data;
       if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
 
-      const knowledge = loadKnowledge(dataDir, baseUrl, seedsDir);
-      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge) });
+      const { knowledge, version } = loadKnowledgeWithVersion(dataDir, baseUrl, seedsDir);
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge), version });
     });
 
     // Longest a single agent-section bullet in a PUT may be, and why an operator seeing
@@ -766,9 +767,16 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // whole (operator notes are unbounded by design and can be most of that budget) —
       // the real invariant is `agentSectionInvariantError` below, checked after parsing so
       // it can measure the agent sections on their own rather than the whole file.
-      const parsed = z.object({ baseUrl: z.url(), markdown: z.string().min(1).max(200_000) }).safeParse(body);
+      // `version` is optional: the token `GET` handed back with the file this edit started
+      // from. When present it's enforced as a compare-and-swap (G2) — a write since then
+      // (almost always a reflection run) is refused with 409 rather than silently
+      // overwritten. Omitting it keeps the old unconditional-overwrite behaviour for any
+      // caller that hasn't been updated to carry the token; the dashboard always sends it.
+      const parsed = z
+        .object({ baseUrl: z.url(), markdown: z.string().min(1).max(200_000), version: z.string().optional() })
+        .safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
-      const { baseUrl, markdown } = parsed.data;
+      const { baseUrl, markdown, version } = parsed.data;
       if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
 
       // A hand-edit is trusted operator input: parsed through the same reader the agent's
@@ -785,8 +793,15 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const invariantError = agentSectionInvariantError(knowledge);
       if (invariantError) return c.json({ error: invariantError }, 400);
 
-      saveKnowledge(dataDir, knowledge);
-      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge) });
+      try {
+        const newVersion = saveKnowledge(dataDir, knowledge, version);
+        return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge), version: newVersion });
+      } catch (err) {
+        if (!(err instanceof KnowledgeConflictError)) throw err;
+        // Almost always a reflection run landing between this dialog's GET and this PUT.
+        // The file on disk is left alone — reload picks up whatever changed underneath.
+        return c.json({ error: 'this site\'s knowledge file changed since it was loaded — reload it and re-apply your edit' }, 409);
+      }
     });
 
     app.post('/api/site-knowledge/reset', async (c) => {
@@ -808,8 +823,10 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // copying the seed file over the local one directly. The seed path is only ever a
       // read source here; nothing in this route can write back to `seedsDir`.
       const knowledge = parseKnowledge(baseUrl, readFileSync(seedPath, 'utf8'));
-      saveKnowledge(dataDir, knowledge);
-      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge) });
+      // Deliberately unconditional, not compare-and-swap: a reset is its own explicit
+      // overwrite, chosen by the operator with the current file already in front of them.
+      const version = saveKnowledge(dataDir, knowledge);
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge), version });
     });
 
     // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).

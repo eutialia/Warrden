@@ -138,11 +138,15 @@ export interface SiteProfileUpdate {
  * `## Operator notes` and all, plus the rendered length of the agent-owned sections alone
  * (frontmatter, title and operator notes excluded) — what `KNOWLEDGE_CHAR_CAP` below is
  * measured against. `GET`, `PUT` and `POST .../reset` on `/api/site-knowledge` all return
- * this shape. */
+ * this shape. `version` is an opaque compare-and-swap token: hold onto whatever the last
+ * response gave you and send it back on the next `PUT` (`updateSiteKnowledge`) so the
+ * server can tell whether something else — almost always a reflection run — wrote the file
+ * in between and refuse (409) rather than silently overwrite it. */
 export interface SiteKnowledge {
   baseUrl: string;
   markdown: string;
   agentChars: number;
+  version: string;
 }
 
 /** Hand-copied from `KNOWLEDGE_CHAR_CAP` in `src/agent/siteKnowledge.ts` (no shared package
@@ -294,8 +298,13 @@ export function fetchSiteKnowledge(baseUrl: string): Promise<SiteKnowledge> {
 /** `PUT /api/site-knowledge` — a hand-edit. The response is the post-normalization
  * markdown actually saved (bullets reflowed, sections reordered), not an echo of what was
  * sent — the editor should replace its contents with it. `agentChars` is server-computed
- * and never part of the request body, hence `Pick`, not the full `SiteKnowledge`. */
-export function updateSiteKnowledge(input: Pick<SiteKnowledge, 'baseUrl' | 'markdown'>): Promise<SiteKnowledge> {
+ * and never part of the request body, hence `Pick`, not the full `SiteKnowledge`.
+ *
+ * `version` is the token from the `GET` (or prior `PUT`/`reset`) this edit started from.
+ * The server 409s, leaving the file untouched, when it no longer matches what's on disk —
+ * the caller should reload and let the operator re-apply their edit rather than retry
+ * blind. */
+export function updateSiteKnowledge(input: Pick<SiteKnowledge, 'baseUrl' | 'markdown' | 'version'>): Promise<SiteKnowledge> {
   return fetchJson<SiteKnowledge>('/api/site-knowledge', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },

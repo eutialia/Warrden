@@ -624,6 +624,36 @@ describe('reflectOnRun', () => {
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-overflow')).toBe(true);
   });
 
+  // G2: reflection's read (loadKnowledge) and write (saveKnowledge) are a provider round
+  // trip apart. An operator PUT landing in that window must win — not be silently
+  // overwritten by whatever the reflection decides to write from a now-stale read.
+  it('drops its own write when an operator PUT lands mid-flight, keeping the operator edit', async () => {
+    const ctx = reflectCtx();
+    saveKnowledge(ctx.dataDir, base());
+
+    // A generator whose `generate` call simulates the race: it writes to the file — as an
+    // operator PUT would — before resolving, landing exactly in reflectOnRun's window
+    // between its load and its save.
+    ctx.llm = {
+      generate: async (opts) => {
+        const midFlight = base();
+        midFlight.operatorNotes = 'Operator edited this mid-reflection.';
+        saveKnowledge(ctx.dataDir, midFlight);
+        return opts.schema.parse(reflection({ ops: [{ op: 'add', section: 'Pitfalls', text: 'IF 503 THEN retry.', target: '' }] }));
+      },
+    };
+
+    const out = await reflect(ctx);
+    expect(out?.verdict).toBe('usable');
+
+    const saved = loadKnowledge(ctx.dataDir, SITE);
+    // The operator's edit survives; the reflection's own bullet never landed.
+    expect(saved.operatorNotes).toBe('Operator edited this mid-reflection.');
+    expect(saved.sections.Pitfalls).toEqual([]);
+    expect(findEvent(ctx.events.list({}), 'subtitle.knowledge-conflict')?.level).toBe('warn');
+    expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-updated')).toBe(false);
+  });
+
   it('prunes a stale bullet on a verified success', async () => {
     const ctx = reflectCtx({
       llm: new FakeGenerator([

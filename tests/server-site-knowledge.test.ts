@@ -32,6 +32,10 @@ describe('site knowledge routes', () => {
       const body = await res.json();
       expect(body).toMatchObject({ baseUrl: 'https://x.test', agentChars: 0 });
       expect(body.markdown).toContain('## Operator notes');
+      // G2: the compare-and-swap token a later PUT threads back to detect a mid-flight
+      // write by something else (typically a reflection run).
+      expect(typeof body.version).toBe('string');
+      expect(body.version.length).toBeGreaterThan(0);
     });
 
     it('404s for a site that is not configured', async () => {
@@ -216,6 +220,58 @@ describe('site knowledge routes', () => {
       const body = await res.json();
       expect(body.error).toContain(String(KNOWLEDGE_CHAR_CAP));
       expect(body.error).toContain('Operator notes');
+    });
+
+    it('saves when the version matches what a prior GET returned', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
+      const app = createApp(ctx);
+      const got = await (await app.request('/api/site-knowledge?baseUrl=https%3A%2F%2Fx.test')).json();
+
+      const res = await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          baseUrl: 'https://x.test',
+          markdown: '# x.test\n\n## Access\n- learned\n\n## Operator notes\n',
+          version: got.version,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(typeof body.version).toBe('string');
+      expect(body.version).not.toBe(got.version);
+    });
+
+    // G2: PUT loses to a mid-flight write (standing in for a reflection run landing between
+    // this dialog's GET and its Save).
+    it('409s when the version is stale — something else wrote the file in the meantime', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
+      const app = createApp(ctx);
+      const got = await (await app.request('/api/site-knowledge?baseUrl=https%3A%2F%2Fx.test')).json();
+
+      // Something else — a reflection run — saves in between.
+      await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://x.test', markdown: '# x.test\n\n## Access\n- from reflection\n\n## Operator notes\n' }),
+      });
+
+      const res = await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          baseUrl: 'https://x.test',
+          markdown: '# x.test\n\n## Access\n\n## Operator notes\nmy stale edit\n',
+          version: got.version,
+        }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toMatch(/reload/i);
+
+      // The file on disk keeps whatever landed in between — the stale PUT never touched it.
+      const saved = loadKnowledge(ctx.dataDir, 'https://x.test');
+      expect(saved.sections.Access).toContain('from reflection');
     });
 
     it('keeps the previous version as .bak, same as an agent write', async () => {

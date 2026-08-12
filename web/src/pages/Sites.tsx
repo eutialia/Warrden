@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Globe, Pencil, Plus, Power, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
+  ApiError,
   apiErrorMessage,
   fetchConfig,
   fetchSiteKnowledge,
@@ -90,6 +91,10 @@ export default function Sites() {
   const [knowledgeSite, setKnowledgeSite] = useState<SubtitleSite | null>(null);
   const [knowledgeMarkdown, setKnowledgeMarkdown] = useState('');
   const [knowledgeAgentChars, setKnowledgeAgentChars] = useState(0);
+  // The compare-and-swap token the last GET/PUT/reset response returned. Threaded back on
+  // the next Save so the server can tell a reflection run wrote the file in the meantime
+  // and refuse (409) rather than silently overwrite it.
+  const [knowledgeVersion, setKnowledgeVersion] = useState('');
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSaving, setKnowledgeSaving] = useState(false);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
@@ -225,6 +230,7 @@ export default function Sites() {
     setKnowledgeSite(site);
     setKnowledgeMarkdown('');
     setKnowledgeAgentChars(0);
+    setKnowledgeVersion('');
     setKnowledgeError(null);
     setKnowledgeLoading(true);
     // A fresh open is a clean slate: an abandoned save/reset from before this dialog was
@@ -243,6 +249,7 @@ export default function Sites() {
         if (isStale()) return;
         setKnowledgeMarkdown(k.markdown);
         setKnowledgeAgentChars(k.agentChars);
+        setKnowledgeVersion(k.version);
       })
       .catch((err: unknown) => {
         if (isStale()) return;
@@ -265,14 +272,27 @@ export default function Sites() {
       // The response is the post-normalization markdown that actually landed on disk
       // (bullets reflowed, sections reordered) — the editor shows that, not an echo of
       // what was typed, so a hand-edit round-trips visibly rather than silently.
-      const saved = await updateSiteKnowledge({ baseUrl: knowledgeSite.baseUrl, markdown: knowledgeMarkdown });
+      const saved = await updateSiteKnowledge({
+        baseUrl: knowledgeSite.baseUrl,
+        markdown: knowledgeMarkdown,
+        version: knowledgeVersion,
+      });
       if (isStale()) return;
       setKnowledgeMarkdown(saved.markdown);
       setKnowledgeAgentChars(saved.agentChars);
+      setKnowledgeVersion(saved.version);
       toast.success('Knowledge saved');
     } catch (err) {
       if (isStale()) return;
-      toast.error(apiErrorMessage(err, 'Failed to save knowledge'));
+      // A 409 means the file changed underneath this edit (almost always a reflection run)
+      // — the server already refused the write, so the message just has to say why the
+      // dashboard's copy is now stale rather than let the operator assume the save failed
+      // for some other reason and retry blind into a second 409.
+      const message =
+        err instanceof ApiError && err.status === 409
+          ? 'This site\'s knowledge changed since it was loaded (probably a background run). Reopen the file to see the current version before editing again.'
+          : apiErrorMessage(err, 'Failed to save knowledge');
+      toast.error(message);
     } finally {
       if (!isStale()) setKnowledgeSaving(false);
     }
@@ -289,6 +309,7 @@ export default function Sites() {
       if (isStale()) return;
       setKnowledgeMarkdown(seeded.markdown);
       setKnowledgeAgentChars(seeded.agentChars);
+      setKnowledgeVersion(seeded.version);
       toast.success('Reset to the shipped seed');
       setConfirmingReset(false);
     } catch (err) {

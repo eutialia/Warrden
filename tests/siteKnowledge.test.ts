@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   agentCharCount,
   defaultSeedsDir,
   emptyKnowledge,
   KNOWLEDGE_CHAR_CAP,
+  KnowledgeConflictError,
   knowledgeForPrompt,
   knowledgePath,
   loadKnowledge,
+  loadKnowledgeWithVersion,
   parseKnowledge,
   pruneStale,
   renderKnowledge,
@@ -594,6 +596,114 @@ describe('load and save', () => {
     const path = knowledgePath(dataDir, 'https://subhd.tv');
     expect(readFileSync(`${path}.bak`, 'utf8')).toBe(SAMPLE);
     expect(readFileSync(path, 'utf8')).toContain('IF x THEN y.');
+  });
+
+  // M-02: a failed write must not cost a generation of rollback. `.bak` is now copied
+  // AFTER the new content is safely on disk at the temp path, so a failure in the write
+  // itself (the case here — the temp path is blocked) leaves both the live file and its
+  // `.bak` exactly as they were, rather than `.bak` already having been overwritten with
+  // the generation that's now failing to land.
+  it('does not overwrite .bak when the write itself fails', () => {
+    const dataDir = tmpDir();
+    const gen1 = parseKnowledge('https://subhd.tv', SAMPLE);
+    saveKnowledge(dataDir, gen1);
+    const gen2 = { ...gen1, sections: { ...gen1.sections, Pitfalls: ['IF x THEN y. (confirmed 2026-08-10)'] } };
+    saveKnowledge(dataDir, gen2);
+
+    const path = knowledgePath(dataDir, 'https://subhd.tv');
+    const bakBefore = readFileSync(`${path}.bak`, 'utf8');
+    expect(bakBefore).toBe(SAMPLE); // gen1
+
+    // Force the write itself to fail: a directory sitting where the .tmp file needs to go.
+    mkdirSync(`${path}.tmp`, { recursive: true });
+    const gen3 = { ...gen1, sections: { ...gen1.sections, Pitfalls: ['IF a THEN b. (confirmed 2026-08-10)'] } };
+    expect(() => saveKnowledge(dataDir, gen3)).toThrow();
+
+    expect(readFileSync(path, 'utf8')).toContain('IF x THEN y.'); // still gen2, unchanged
+    expect(readFileSync(`${path}.bak`, 'utf8')).toBe(bakBefore); // still gen1, not overwritten
+  });
+
+  // G5: seed materialization on first touch goes through the same temp-file-then-rename
+  // shape as saveKnowledge, not a direct copy — so a crash mid-copy can't leave a partial
+  // file at the local path (which would then read as real, truncated knowledge forever).
+  it('materializes the seed via temp-file-then-rename, not a direct copy (G5)', () => {
+    const dataDir = tmpDir();
+    const seedsDir = ensureDataSubdir(tmpDir(), 'sites');
+    writeFileSync(join(seedsDir, 'subhd.tv.md'), SAMPLE, 'utf8');
+    const path = knowledgePath(dataDir, 'https://subhd.tv');
+
+    // Force the temp write to fail. A direct copyFileSync(seedPath, path) would be
+    // unaffected by this and would still succeed — this only fails if materialization
+    // goes through `<path>.tmp` first.
+    mkdirSync(`${path}.tmp`, { recursive: true });
+    expect(() => loadKnowledge(dataDir, 'https://subhd.tv', seedsDir)).toThrow();
+    expect(existsSync(path)).toBe(false);
+  });
+});
+
+describe('compare-and-swap (G2)', () => {
+  it('loadKnowledgeWithVersion returns a stable token for the same on-disk bytes', () => {
+    const dataDir = tmpDir();
+    const k = parseKnowledge('https://subhd.tv', SAMPLE);
+    saveKnowledge(dataDir, k);
+
+    const first = loadKnowledgeWithVersion(dataDir, 'https://subhd.tv');
+    const second = loadKnowledgeWithVersion(dataDir, 'https://subhd.tv');
+    expect(first.version).toBe(second.version);
+    expect(first.version).not.toBe('');
+  });
+
+  it('gives a distinct version for a fresh site with no file yet', () => {
+    const { version } = loadKnowledgeWithVersion(tmpDir(), 'https://nowhere.test');
+    expect(version).toBeTruthy();
+  });
+
+  it('saves normally when expectedVersion matches what is on disk, and returns the new version', () => {
+    const dataDir = tmpDir();
+    const k = parseKnowledge('https://subhd.tv', SAMPLE);
+    saveKnowledge(dataDir, k);
+    const { knowledge, version } = loadKnowledgeWithVersion(dataDir, 'https://subhd.tv');
+
+    knowledge.sections.Pitfalls.push('IF x THEN y. (confirmed 2026-08-10)');
+    const newVersion = saveKnowledge(dataDir, knowledge, version);
+
+    expect(newVersion).not.toBe(version);
+    expect(readFileSync(knowledgePath(dataDir, 'https://subhd.tv'), 'utf8')).toContain('IF x THEN y.');
+    // The new version really does describe what's on disk now.
+    expect(loadKnowledgeWithVersion(dataDir, 'https://subhd.tv').version).toBe(newVersion);
+  });
+
+  it('refuses to save over a file that changed since expectedVersion was captured, leaving it untouched', () => {
+    const dataDir = tmpDir();
+    const k = parseKnowledge('https://subhd.tv', SAMPLE);
+    saveKnowledge(dataDir, k);
+    const { knowledge, version } = loadKnowledgeWithVersion(dataDir, 'https://subhd.tv');
+
+    // Someone else writes in between.
+    const intervening = { ...k, operatorNotes: 'Someone else edited this in the meantime.' };
+    saveKnowledge(dataDir, intervening);
+    const path = knowledgePath(dataDir, 'https://subhd.tv');
+    const onDiskBefore = readFileSync(path, 'utf8');
+
+    knowledge.sections.Pitfalls.push('IF x THEN y. (confirmed 2026-08-10)');
+    expect(() => saveKnowledge(dataDir, knowledge, version)).toThrow(KnowledgeConflictError);
+    expect(readFileSync(path, 'utf8')).toBe(onDiskBefore);
+  });
+
+  it('conflicts when expectedVersion says "no file" but one now exists', () => {
+    const dataDir = tmpDir();
+    const { version } = loadKnowledgeWithVersion(dataDir, 'https://x.test'); // no file yet
+    saveKnowledge(dataDir, emptyKnowledge('https://x.test')); // someone else creates it
+
+    expect(() => saveKnowledge(dataDir, emptyKnowledge('https://x.test'), version)).toThrow(KnowledgeConflictError);
+  });
+
+  it('omitting expectedVersion keeps the unconditional overwrite', () => {
+    const dataDir = tmpDir();
+    const k = parseKnowledge('https://subhd.tv', SAMPLE);
+    saveKnowledge(dataDir, k);
+    saveKnowledge(dataDir, { ...k, operatorNotes: 'no CAS, always wins' });
+    expect(loadKnowledge(dataDir, 'https://subhd.tv').operatorNotes).toBe('no CAS, always wins');
   });
 });
 

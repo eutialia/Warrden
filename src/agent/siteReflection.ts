@@ -10,10 +10,11 @@ import { errorMessage } from '../util/errors.js';
 import {
   AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
+  KnowledgeConflictError,
   MAX_BULLET_CHARS,
   agentCharCount,
   defaultSeedsDir,
-  loadKnowledge,
+  loadKnowledgeWithVersion,
   pruneStale,
   renderKnowledge,
   saveKnowledge,
@@ -437,7 +438,10 @@ export async function reflectOnRun(input: {
     // again. Inside this guard because an unreadable notes file (bad permissions, a
     // directory where the file should be) is exactly the kind of failure this function
     // promises never to let escape.
-    const knowledge = loadKnowledge(ctx.dataDir, site.baseUrl, input.seedsDir ?? defaultSeedsDir());
+    // The version is captured here, before the provider round trip below — an operator PUT
+    // landing in that window (G2) must be caught by the save's compare-and-swap rather than
+    // silently overwritten by whatever this reflection decides to write.
+    const { knowledge, version } = loadKnowledgeWithVersion(ctx.dataDir, site.baseUrl, input.seedsDir ?? defaultSeedsDir());
 
     const reflection = await ctx.llm.generate({
       callsite: REFLECT_CALLSITE,
@@ -508,7 +512,24 @@ export async function reflectOnRun(input: {
       return { verdict: reflection.verdict, reason: reflection.reason };
     }
 
-    saveKnowledge(ctx.dataDir, { ...pruned, updated: today });
+    try {
+      saveKnowledge(ctx.dataDir, { ...pruned, updated: today }, version);
+    } catch (err) {
+      if (!(err instanceof KnowledgeConflictError)) throw err;
+      // Someone else — almost always an operator's dashboard PUT — wrote the file in the
+      // window between the load above and this save (a provider round trip wide). This
+      // run's edits are dropped rather than overwriting whatever they just saved: the
+      // operator's file wins, and the next reflection sees it and can re-derive whatever
+      // this run would have written.
+      ctx.events.append({
+        kind: 'subtitle.knowledge-conflict',
+        level: 'warn',
+        jobId: job.id,
+        message: `Site knowledge for ${label} was edited elsewhere while this run's reflection was in progress; its edits were dropped rather than overwrite that change`,
+        data: targetEventData(job, { site: label }),
+      });
+      return { verdict: reflection.verdict, reason: reflection.reason };
+    }
     ctx.events.append({
       kind: 'subtitle.knowledge-updated',
       jobId: job.id,
