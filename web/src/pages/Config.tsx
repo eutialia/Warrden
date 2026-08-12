@@ -267,8 +267,7 @@ export default function ConfigPage() {
       loadStorage();
     } catch (err) {
       if (err instanceof ApiError) {
-        const issueText = err.issues?.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
-        setSaveError(issueText ? `${err.message} — ${issueText}` : err.message);
+        setSaveError(err.message);
         toast.error(err.message);
       } else {
         setSaveError('Failed to save');

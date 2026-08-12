@@ -103,6 +103,14 @@ export default function Sites() {
   const prefsDirtyRef = useRef(false);
 
   const beginFetch = useFetchGeneration();
+  // The knowledge dialog gets its own counter, separate from `refetch`'s. Sharing one
+  // (round 1's approach) meant any SSE event or the 45 s heartbeat landing mid-open bumped
+  // the same generation the dialog was waiting on, wedging it on a permanent skeleton —
+  // `refetch` and the dialog are unrelated resources and must not be able to cancel each
+  // other. This same counter also guards `saveKnowledge` and `resetKnowledge`: without it,
+  // closing a slow save and opening a different site's dialog let the stale response
+  // overwrite that other site's editor and, on the next Save, its file.
+  const beginKnowledgeFetch = useFetchGeneration();
   const refetch = useCallback(() => {
     const isStale = beginFetch();
     Promise.all([fetchConfig(), fetchSiteProfiles()])
@@ -219,10 +227,17 @@ export default function Sites() {
     setKnowledgeAgentChars(0);
     setKnowledgeError(null);
     setKnowledgeLoading(true);
-    // Same guard `refetch` uses: opening a different site (or reopening the same one)
-    // before a slow fetch resolves must not let that stale response land in whichever
-    // site's editor happens to be open by the time it does.
-    const isStale = beginFetch();
+    // A fresh open is a clean slate: an abandoned save/reset from before this dialog was
+    // closed (its own state writes below are already gated by generation) must not leave
+    // this site's Save/Reset buttons stuck disabled from a "Saving…"/"Resetting…" that
+    // will now never clear, since its `finally` will see itself as stale and skip.
+    setKnowledgeSaving(false);
+    setResettingKnowledge(false);
+    // The dialog's own generation, shared by all three of its async flows (this one,
+    // `saveKnowledge`, `resetKnowledge`) — never `beginFetch`, which belongs to `refetch`
+    // and fires on every SSE event and the 45 s heartbeat. Sharing it with `refetch` would
+    // let an unrelated page refresh wedge the dialog on its skeleton forever.
+    const isStale = beginKnowledgeFetch();
     fetchSiteKnowledge(site.baseUrl)
       .then((k) => {
         if (isStale()) return;
@@ -242,34 +257,45 @@ export default function Sites() {
   async function saveKnowledge(): Promise<void> {
     if (!knowledgeSite) return;
     setKnowledgeSaving(true);
+    // Captured before the await, same as `openKnowledge`: if the dialog closes (bumping
+    // this on its way out) or switches to another site before the PUT resolves, the
+    // response below must not land in whichever editor happens to be open by then.
+    const isStale = beginKnowledgeFetch();
     try {
       // The response is the post-normalization markdown that actually landed on disk
       // (bullets reflowed, sections reordered) — the editor shows that, not an echo of
       // what was typed, so a hand-edit round-trips visibly rather than silently.
       const saved = await updateSiteKnowledge({ baseUrl: knowledgeSite.baseUrl, markdown: knowledgeMarkdown });
+      if (isStale()) return;
       setKnowledgeMarkdown(saved.markdown);
       setKnowledgeAgentChars(saved.agentChars);
       toast.success('Knowledge saved');
     } catch (err) {
+      if (isStale()) return;
       toast.error(apiErrorMessage(err, 'Failed to save knowledge'));
     } finally {
-      setKnowledgeSaving(false);
+      if (!isStale()) setKnowledgeSaving(false);
     }
   }
 
   async function resetKnowledge(): Promise<void> {
     if (!knowledgeSite) return;
     setResettingKnowledge(true);
+    // Same guard as `saveKnowledge`, and for the same reason: a reset is a write, so a
+    // stale response is exactly as dangerous as a stale save.
+    const isStale = beginKnowledgeFetch();
     try {
       const seeded = await resetSiteKnowledge(knowledgeSite.baseUrl);
+      if (isStale()) return;
       setKnowledgeMarkdown(seeded.markdown);
       setKnowledgeAgentChars(seeded.agentChars);
       toast.success('Reset to the shipped seed');
       setConfirmingReset(false);
     } catch (err) {
+      if (isStale()) return;
       toast.error(apiErrorMessage(err, 'No seed exists for this site'));
     } finally {
-      setResettingKnowledge(false);
+      if (!isStale()) setResettingKnowledge(false);
     }
   }
 
@@ -518,7 +544,18 @@ export default function Sites() {
       </AlertDialog>
 
       {/* Knowledge: what the browse agent has learned about a site, hand-editable */}
-      <Dialog open={knowledgeSite !== null} onOpenChange={(open) => !open && setKnowledgeSite(null)}>
+      <Dialog
+        open={knowledgeSite !== null}
+        onOpenChange={(open) => {
+          if (open) return;
+          // Escape/overlay-click closes even while a save or reset is in flight (the
+          // buttons are disabled, but the dialog itself isn't). Bump the generation here,
+          // on the way out, so that response — whenever it lands — finds itself stale
+          // rather than repopulating whatever site's editor happens to be open by then.
+          beginKnowledgeFetch();
+          setKnowledgeSite(null);
+        }}
+      >
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{knowledgeSite && siteLabel(knowledgeSite.baseUrl)} knowledge</DialogTitle>

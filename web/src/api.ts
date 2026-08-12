@@ -252,7 +252,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     // what was actually wrong, not just that something was, without each page having to
     // know `ApiError` carries a separate `issues` array at all.
     if (issues && issues.length > 0) {
-      message = `${message}: ${issues.map((issue) => issue.message).join('; ')}`;
+      message = `${message}: ${issues.map((issue) => (issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message)).join('; ')}`;
     }
     throw new ApiError(message, res.status, issues);
   }
