@@ -107,6 +107,26 @@ describe('site knowledge routes', () => {
       expect(res.status).toBe(404);
     });
 
+    it('400s an empty markdown body, never writing a near-empty file over what was there', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
+      const app = createApp(ctx);
+      await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://x.test', markdown: '# x.test\n\n## Access\n- learned\n\n## Operator notes\n' }),
+      });
+
+      const res = await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://x.test', markdown: '' }),
+      });
+      expect(res.status).toBe(400);
+
+      const saved = loadKnowledge(ctx.dataDir, 'https://x.test');
+      expect(saved.sections.Access).toContain('learned');
+    });
+
     it('400s a markdown body over the 200,000-char route ceiling', async () => {
       const app = createApp(ctxWithSites([{ baseUrl: 'https://x.test' }]));
       const res = await app.request('/api/site-knowledge', {

@@ -766,7 +766,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // whole (operator notes are unbounded by design and can be most of that budget) —
       // the real invariant is `agentSectionInvariantError` below, checked after parsing so
       // it can measure the agent sections on their own rather than the whole file.
-      const parsed = z.object({ baseUrl: z.url(), markdown: z.string().max(200_000) }).safeParse(body);
+      const parsed = z.object({ baseUrl: z.url(), markdown: z.string().min(1).max(200_000) }).safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       const { baseUrl, markdown } = parsed.data;
       if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);

@@ -596,7 +596,10 @@ export default function Sites() {
             </Button>
             <div className="flex gap-2">
               <DialogClose render={<Button variant="ghost">Close</Button>} />
-              <Button disabled={knowledgeLoading || knowledgeSaving} onClick={() => void saveKnowledge()}>
+              <Button
+                disabled={knowledgeLoading || knowledgeSaving || resettingKnowledge || knowledgeError !== null}
+                onClick={() => void saveKnowledge()}
+              >
                 {knowledgeSaving ? 'Saving…' : 'Save'}
               </Button>
             </div>
@@ -616,7 +619,7 @@ export default function Sites() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel render={<Button variant="ghost">Cancel</Button>} />
+            <AlertDialogCancel render={<Button variant="ghost" disabled={resettingKnowledge}>Cancel</Button>} />
             <AlertDialogAction
               render={
                 <Button variant="destructive" disabled={resettingKnowledge} onClick={() => void resetKnowledge()}>
