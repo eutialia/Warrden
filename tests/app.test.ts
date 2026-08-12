@@ -797,6 +797,42 @@ describe('app', () => {
       // Resetting failures also clears last_failure_at so the site is not left in cooldown.
       expect(profiles.get('https://acg.rip')).toMatchObject({ fail_count: 0, last_failure_at: null });
     });
+
+    it('PUT /api/site-profiles accepts disabledAt: null (the dashboard re-enable button) and clears the whole disabled state', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
+      const profiles = new SiteProfiles(ctx.db);
+      profiles.upsert({ baseUrl: 'https://acg.rip' });
+      profiles.update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'unusable', failCount: 3, lastFailureAt: Date.now() });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/site-profiles', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://acg.rip', disabledAt: null }),
+      });
+      expect(res.status).toBe(200);
+      expect(profiles.get('https://acg.rip')).toMatchObject({
+        disabled_at: null,
+        disabled_reason: '',
+        fail_count: 0,
+        last_failure_at: null,
+      });
+    });
+
+    it('PUT /api/site-profiles rejects a non-null disabledAt — a site can only be disabled through the attention accept route', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
+      const profiles = new SiteProfiles(ctx.db);
+      profiles.upsert({ baseUrl: 'https://acg.rip' });
+      const app = createApp(ctx);
+
+      const res = await app.request('/api/site-profiles', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://acg.rip', disabledAt: Date.now() }),
+      });
+      expect(res.status).toBe(400);
+      expect(profiles.get('https://acg.rip')!.disabled_at).toBeNull();
+    });
   });
 
   describe('GET /api/jobs/:id subtitleRuns', () => {

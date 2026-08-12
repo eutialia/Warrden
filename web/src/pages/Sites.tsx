@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Globe, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { BookOpen, Globe, Pencil, Plus, Power, RotateCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   apiErrorMessage,
   fetchConfig,
+  fetchSiteKnowledge,
   fetchSiteProfiles,
+  resetSiteKnowledge,
   saveConfig,
+  updateSiteKnowledge,
   updateSiteProfile,
   type Config,
   type SiteProfileRow,
@@ -43,6 +46,7 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Textarea } from '@/components/ui/textarea';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { siteLabel, tierLabel } from '@/lib/labels';
@@ -79,6 +83,16 @@ export default function Sites() {
 
   const [draft, setDraft] = useState<SiteDraft | null>(null);
   const [removing, setRemoving] = useState<SubtitleSite | null>(null);
+
+  // Knowledge view: which site's file is open, its markdown draft, and the three async
+  // states a hand-editor needs (loading the file in, saving an edit, resetting to seed).
+  const [knowledgeSite, setKnowledgeSite] = useState<SubtitleSite | null>(null);
+  const [knowledgeMarkdown, setKnowledgeMarkdown] = useState('');
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [knowledgeSaving, setKnowledgeSaving] = useState(false);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const [resettingKnowledge, setResettingKnowledge] = useState(false);
 
   // Whether the two tag fields hold edits nobody has saved yet. Held in a ref because
   // `refetch` runs on a 45-second heartbeat and on every server event: re-seeding the
@@ -182,6 +196,61 @@ export default function Sites() {
       toast.success(`Cleared failures for ${siteLabel(row.base_url)}`);
     } catch (err) {
       toast.error(apiErrorMessage(err, 'Failed to clear failures'));
+    }
+  }
+
+  /** Clears a site's disabled flag — the operator override for a site the browse agent's
+   * evidence-gated verdict shut off. Same reset seam as `clearFailures`, one field wider. */
+  async function reEnableSite(row: SiteProfileRow): Promise<void> {
+    try {
+      const updated = await updateSiteProfile({ baseUrl: row.base_url, disabledAt: null });
+      setProfiles((prev) => prev.map((p) => (p.base_url === updated.base_url ? updated : p)));
+      toast.success(`Re-enabled ${siteLabel(row.base_url)}`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to re-enable site'));
+    }
+  }
+
+  function openKnowledge(site: SubtitleSite): void {
+    setKnowledgeSite(site);
+    setKnowledgeMarkdown('');
+    setKnowledgeError(null);
+    setKnowledgeLoading(true);
+    fetchSiteKnowledge(site.baseUrl)
+      .then((k) => setKnowledgeMarkdown(k.markdown))
+      .catch((err: unknown) => setKnowledgeError(apiErrorMessage(err, 'Failed to load knowledge file')))
+      .finally(() => setKnowledgeLoading(false));
+  }
+
+  async function saveKnowledge(): Promise<void> {
+    if (!knowledgeSite) return;
+    setKnowledgeSaving(true);
+    try {
+      // The response is the post-normalization markdown that actually landed on disk
+      // (bullets reflowed, sections reordered) — the editor shows that, not an echo of
+      // what was typed, so a hand-edit round-trips visibly rather than silently.
+      const saved = await updateSiteKnowledge({ baseUrl: knowledgeSite.baseUrl, markdown: knowledgeMarkdown });
+      setKnowledgeMarkdown(saved.markdown);
+      toast.success('Knowledge saved');
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'Failed to save knowledge'));
+    } finally {
+      setKnowledgeSaving(false);
+    }
+  }
+
+  async function resetKnowledge(): Promise<void> {
+    if (!knowledgeSite) return;
+    setResettingKnowledge(true);
+    try {
+      const seeded = await resetSiteKnowledge(knowledgeSite.baseUrl);
+      setKnowledgeMarkdown(seeded.markdown);
+      toast.success('Reset to the shipped seed');
+      setConfirmingReset(false);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, 'No seed exists for this site'));
+    } finally {
+      setResettingKnowledge(false);
     }
   }
 
@@ -291,6 +360,7 @@ export default function Sites() {
               {config.subtitle.sites.map((site, rank) => {
                 const profile = profiles.find((p) => p.base_url === site.baseUrl);
                 const failing = (profile?.fail_count ?? 0) > 0;
+                const disabled = profile?.disabled_at != null;
                 return (
                   <div key={site.baseUrl} className="border-t pt-4">
                     <div className="flex flex-wrap items-start gap-3">
@@ -301,29 +371,46 @@ export default function Sites() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <StatusDot tone={siteTone(profile)} />
+                          <StatusDot tone={disabled ? 'danger' : siteTone(profile)} />
                           <span className="font-medium">{siteLabel(site.baseUrl)}</span>
                           <Badge variant="outline" className="text-muted-foreground">
                             {tierLabel(profile?.last_working_tier ?? null)}
                           </Badge>
-                          {failing && (
+                          {disabled && <ToneBadge tone="danger">Disabled</ToneBadge>}
+                          {!disabled && failing && (
                             <ToneBadge tone="warning">
                               {profile!.fail_count} recent {profile!.fail_count === 1 ? 'failure' : 'failures'}
                             </ToneBadge>
                           )}
                         </div>
                         <code className="mt-1 block truncate text-xs text-muted-foreground">{site.baseUrl}</code>
+                        {disabled && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            The browse agent gave up on this site: {profile!.disabled_reason || 'no reason recorded'}.
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="sm" onClick={() => openKnowledge(site)}>
+                          <BookOpen />
+                          Knowledge
+                        </Button>
                         <Button variant="ghost" size="sm" onClick={() => setDraft({ original: site, value: { ...site } })}>
                           <Pencil />
                           Edit
                         </Button>
-                        {failing && (
-                          <Button variant="ghost" size="sm" onClick={() => void clearFailures(profile!)}>
-                            <RotateCcw />
-                            Clear failures
+                        {disabled ? (
+                          <Button variant="ghost" size="sm" onClick={() => void reEnableSite(profile!)}>
+                            <Power />
+                            Re-enable
                           </Button>
+                        ) : (
+                          failing && (
+                            <Button variant="ghost" size="sm" onClick={() => void clearFailures(profile!)}>
+                              <RotateCcw />
+                              Clear failures
+                            </Button>
+                          )
                         )}
                         <Button variant="ghost" size="sm" onClick={() => setRemoving(site)}>
                           <Trash2 />
@@ -404,6 +491,71 @@ export default function Sites() {
               render={
                 <Button variant="destructive" disabled={saving} onClick={() => void removeSite()}>
                   Remove site
+                </Button>
+              }
+            />
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Knowledge: what the browse agent has learned about a site, hand-editable */}
+      <Dialog open={knowledgeSite !== null} onOpenChange={(open) => !open && setKnowledgeSite(null)}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{knowledgeSite && siteLabel(knowledgeSite.baseUrl)} knowledge</DialogTitle>
+            <DialogDescription>
+              The browse agent keeps this file up to date on its own — access method, search and download steps, and
+              pitfalls it has hit. <code>## Operator notes</code> is yours; the agent reads it but never writes to it.
+            </DialogDescription>
+          </DialogHeader>
+          {knowledgeError && <StatusNotice message={knowledgeError} onRetry={() => knowledgeSite && openKnowledge(knowledgeSite)} />}
+          {knowledgeLoading ? (
+            <Skeleton className="h-96 w-full" />
+          ) : (
+            !knowledgeError && (
+              <Textarea
+                rows={24}
+                className="font-mono text-xs"
+                value={knowledgeMarkdown}
+                onChange={(e) => setKnowledgeMarkdown(e.target.value)}
+              />
+            )
+          )}
+          <DialogFooter className="sm:justify-between">
+            <Button
+              variant="outline"
+              disabled={knowledgeLoading || knowledgeSaving || resettingKnowledge}
+              onClick={() => setConfirmingReset(true)}
+            >
+              Reset to seed
+            </Button>
+            <div className="flex gap-2">
+              <DialogClose render={<Button variant="ghost">Close</Button>} />
+              <Button disabled={knowledgeLoading || knowledgeSaving} onClick={() => void saveKnowledge()}>
+                {knowledgeSaving ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reset knowledge to seed — discards everything learned since, so it gets its own
+          confirmation on top of the knowledge editor. */}
+      <AlertDialog open={confirmingReset} onOpenChange={(open) => !open && setConfirmingReset(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset {knowledgeSite && siteLabel(knowledgeSite.baseUrl)} to the shipped seed?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Discards everything the agent has learned since (and your operator notes, if any), replacing this
+              file with the seed Warrden ships. Sites with no shipped seed can't be reset this way.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel render={<Button variant="ghost">Cancel</Button>} />
+            <AlertDialogAction
+              render={
+                <Button variant="destructive" disabled={resettingKnowledge} onClick={() => void resetKnowledge()}>
+                  {resettingKnowledge ? 'Resetting…' : 'Reset to seed'}
                 </Button>
               }
             />

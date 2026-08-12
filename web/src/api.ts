@@ -129,6 +129,16 @@ export interface SiteProfileUpdate {
   searchUrlPatterns?: string[];
   failCount?: number;
   lastFailureAt?: number | null;
+  /** Only `null` is accepted server-side — the "re-enable" button. A site can only be
+   * disabled through the evidence-gated attention accept route, never through this one. */
+  disabledAt?: null;
+}
+
+/** A site's learned knowledge file (`src/agent/siteKnowledge.ts`): the rendered markdown,
+ * `## Operator notes` and all. `GET`/`PUT /api/site-knowledge` both return this shape. */
+export interface SiteKnowledge {
+  baseUrl: string;
+  markdown: string;
 }
 
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
@@ -155,7 +165,7 @@ export interface CallsiteModel {
 /** Every LLM call-site Warrden knows about, in the order each phase introduced it —
  * `llm.profiles` (a raw JSON editor on the Config page) accepts any string key, so this
  * exists purely as a discoverability hint for what to name one, not a validated list. */
-export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map', 'site-search', 'archive-map'] as const;
+export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map', 'site-search', 'archive-map', 'site-notes'] as const;
 
 export interface SubtitleSite {
   baseUrl: string;
@@ -253,6 +263,35 @@ export function updateSiteProfile(patch: SiteProfileUpdate): Promise<SiteProfile
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(patch),
+  });
+}
+
+/** `GET /api/site-knowledge?baseUrl=…` — the site's current knowledge file, seeded from
+ * `seeds/sites` on first read if a local copy doesn't exist yet. 404s for a site not in
+ * `config.subtitle.sites`. */
+export function fetchSiteKnowledge(baseUrl: string): Promise<SiteKnowledge> {
+  return fetchJson<SiteKnowledge>(`/api/site-knowledge?baseUrl=${encodeURIComponent(baseUrl)}`);
+}
+
+/** `PUT /api/site-knowledge` — a hand-edit. The response is the post-normalization
+ * markdown actually saved (bullets reflowed, sections reordered), not an echo of what was
+ * sent — the editor should replace its contents with it. */
+export function updateSiteKnowledge(input: SiteKnowledge): Promise<SiteKnowledge> {
+  return fetchJson<SiteKnowledge>('/api/site-knowledge', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+/** `POST /api/site-knowledge/reset` — discards the local file (including everything the
+ * agent has learned) and copies the shipped seed in its place. 404s when the site has no
+ * seed to reset to. */
+export function resetSiteKnowledge(baseUrl: string): Promise<SiteKnowledge> {
+  return fetchJson<SiteKnowledge>('/api/site-knowledge/reset', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ baseUrl }),
   });
 }
 

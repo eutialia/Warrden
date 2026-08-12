@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serveStatic } from '@hono/node-server/serve-static';
@@ -6,9 +6,11 @@ import { Hono } from 'hono';
 import { csrf } from 'hono/csrf';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
+import { defaultSeedsDir, loadKnowledge, parseKnowledge, renderKnowledge, saveKnowledge } from '../agent/siteKnowledge.js';
 import type { ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
 import { ConfigSchema, SECRET_PLACEHOLDER, type Config } from '../config/schema.js';
+import { siteKey } from '../config/siteLabel.js';
 import { saveConfig } from '../config/store.js';
 import type { AppContext } from '../context.js';
 import { AcquireRecords } from '../db/acquireRecords.js';
@@ -150,9 +152,12 @@ const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).option
 // what the client sent. `lastWorkingTier` is the full AccessTier union or explicit null
 // (clears the "known-good" tier), `searchUrlPatterns` capped at 5 non-empty entries.
 // `failCount` is the accessible reset seam: PUT `{ failCount: 0 }` clears the
-// escalation/backoff bookkeeping. `disabledAt`/`disabledReason` are not writable here —
-// those flow only through the attention accept/dismiss routes below, which are the
-// evidence-gated path onto and off of "this site cannot be automated".
+// escalation/backoff bookkeeping. Setting `disabledAt` is not writable here — a site is
+// only ever disabled through the evidence-gated attention accept route below. Clearing it
+// (`disabledAt: null`) is: the Sites page's "re-enable" button, an operator override for a
+// site the evidence-gated path shut off and the operator disagrees with, distinct from
+// dismissing an still-open attention item (which clears the same flag on its own path,
+// before a disable was ever accepted).
 const SiteProfileUpdateSchema = z.object({
   /** Which site to write to — its base URL, the only identity a site has. */
   baseUrl: z.url(),
@@ -161,6 +166,9 @@ const SiteProfileUpdateSchema = z.object({
   failCount: z.number().int().min(0).optional(),
   // Explicit null clears the timestamp (used with failCount: 0 by "reset failures").
   lastFailureAt: z.number().int().nullable().optional(),
+  // Only `null` (re-enable) validates; any other value is rejected by the literal, so this
+  // route can never be used to set the timestamp that disables a site.
+  disabledAt: z.literal(null).optional(),
 });
 
 // What `runIngestJob`'s rescue stage (`src/pipelines/ingest/run.ts`) actually puts in an
@@ -659,13 +667,17 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // whose `!== undefined` guard still writes the column to null while an absent field
       // is untouched. When the client only sends `failCount: 0` (the dashboard "reset
       // failures" button), also clear lastFailureAt so the cooldown bookkeeping is fully
-      // wiped — fail_count alone is not enough if a stale last_failure_at remains.
+      // wiped — fail_count alone is not enough if a stale last_failure_at remains. Same
+      // reasoning for `disabledAt: null` (the "re-enable" button): a re-enabled site starts
+      // its own clean slate, so the reason text and failure bookkeeping clear with it,
+      // exactly what dismissing a still-open site-unusable item already does below.
       const { baseUrl: _baseUrl, ...fields } = parsed.data;
       const patch: UpdateSiteProfileInput = {
         ...fields,
         ...(parsed.data.failCount === 0 && parsed.data.lastFailureAt === undefined
           ? { lastFailureAt: null }
           : {}),
+        ...(parsed.data.disabledAt === null ? { disabledReason: '', failCount: 0, lastFailureAt: null } : {}),
       };
       // 404 for any URL outside the configured site set — the dashboard only edits what
       // config declares, so a stale/typo'd site is a caller mistake, not a silent no-op.
@@ -693,6 +705,71 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
   if (ctx.config && ctx.dataDir) {
     const dataDir = ctx.dataDir;
+    const seedsDir = defaultSeedsDir();
+
+    // baseUrl arrives from the client and becomes a filename via `siteKey()` inside every
+    // `siteKnowledge.ts` path helper. Restricting these three routes to sites already
+    // present in config (same 404 guard `/api/site-profiles` uses) means the filesystem is
+    // only ever touched for a URL the operator already typed into config, never one a
+    // request supplies fresh — a stronger guard than `siteKey`'s own character filtering,
+    // and the one this route actually relies on.
+    function requireConfiguredSite(baseUrl: string): boolean {
+      return requireConfig(ctx).subtitle.sites.some((s) => s.baseUrl === baseUrl);
+    }
+
+    app.get('/api/site-knowledge', (c) => {
+      const parsed = z.object({ baseUrl: z.url() }).safeParse({ baseUrl: c.req.query('baseUrl') });
+      if (!parsed.success) return c.json({ error: 'invalid baseUrl' }, 400);
+      const { baseUrl } = parsed.data;
+      if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
+
+      const knowledge = loadKnowledge(dataDir, baseUrl, seedsDir);
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge) });
+    });
+
+    app.put('/api/site-knowledge', async (c) => {
+      const body: unknown = await c.req.json().catch(() => undefined);
+      const parsed = z.object({ baseUrl: z.url(), markdown: z.string().max(20_000) }).safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
+      const { baseUrl, markdown } = parsed.data;
+      if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
+
+      // A hand-edit is trusted operator input: parsed through the same reader the agent's
+      // own writes go through (so a stray line can't corrupt the file's shape) and saved as
+      // submitted. Two things it is deliberately NOT: not injection-scanned — that guard
+      // exists for content the agent itself might inject into a prompt unsupervised, not
+      // for content a human just typed into their own dashboard, and scan-on-load (the
+      // browse loop's own read, Task 3) still catches it before the next run either way —
+      // and not rejected for exceeding `KNOWLEDGE_CHAR_CAP`, which throttles only the
+      // agent's own delta-op writes (Task 4). The 20,000-char ceiling above is this route's
+      // own, on the whole file, operator notes included.
+      const knowledge = parseKnowledge(baseUrl, markdown);
+      saveKnowledge(dataDir, knowledge);
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge) });
+    });
+
+    app.post('/api/site-knowledge/reset', async (c) => {
+      const body: unknown = await c.req.json().catch(() => undefined);
+      const parsed = z.object({ baseUrl: z.url() }).safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid baseUrl' }, 400);
+      const { baseUrl } = parsed.data;
+      if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
+
+      const seedPath = join(seedsDir, `${siteKey(baseUrl)}.md`);
+      if (!existsSync(seedPath)) {
+        // Meaningful refusal, not a silent no-op: there is nothing to reset to, and
+        // deleting the local file anyway would erase every bullet the agent has learned
+        // with nothing to fall back on but an empty file.
+        return c.json({ error: `no seed knowledge exists for "${baseUrl}"` }, 404);
+      }
+      // Read the seed and save it through the normal write path — parse, render, atomic
+      // temp-file-then-rename, `.bak` of whatever local copy this replaces — rather than
+      // copying the seed file over the local one directly. The seed path is only ever a
+      // read source here; nothing in this route can write back to `seedsDir`.
+      const knowledge = parseKnowledge(baseUrl, readFileSync(seedPath, 'utf8'));
+      saveKnowledge(dataDir, knowledge);
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge) });
+    });
 
     // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
     app.get('/api/health/storage', (c) => c.json({ checks: probeStorage() }));
