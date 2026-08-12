@@ -42,10 +42,6 @@ export const KNOWLEDGE_CHAR_CAP = 10_000;
  * dependency of the two. */
 export const MAX_BULLET_CHARS = 400;
 
-/** A bullet older than this, once the site has succeeded again since, is assumed
- * superseded and dropped by `pruneStale`. */
-export const STALE_AFTER_DAYS = 90;
-
 /**
  * One site's learned knowledge file, parsed into structure. `sections` holds bullet text
  * with the leading `- ` marker stripped — callers re-add it when rendering. `operatorNotes`
@@ -67,9 +63,7 @@ const ANY_HEADING_RE = /^#{1,6}\s/;
 const SECTION_HEADING_RE = /^##\s/;
 const BULLET_RE = /^-\s(.*)$/;
 const UPDATED_RE = /^updated:\s*(.*)$/;
-const CONFIRMED_RE = /\(confirmed (\d{4}-\d{2}-\d{2})\)/;
 const FENCE_RE = /^```/;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** The line that hands the rest of the file to the human. Matched case-insensitively, with
  * a variable-width `#{2,6}` run, optional leading indentation, and anything at all after
@@ -82,23 +76,6 @@ const OPERATOR_HEADING_RE = /^\s*#{2,6}\s+operator\s+notes\b.*$/i;
 
 /** How `renderKnowledge` always spells that heading, whatever case the file used. */
 const OPERATOR_HEADING = '## Operator notes';
-
-/** Parses a `YYYY-MM-DD` stamp strictly, rejecting anything `Date.parse` would otherwise
- * silently roll over (a hallucinated `2026-02-30` becomes March 2 under plain
- * `Date.parse`) as well as anything shaped wrong. Returns `null` — never `NaN` — for
- * "can't judge this", so a caller can treat it the same as "no stamp at all" instead of
- * having a bad date silently compare as always-stale. */
-function parseStrictDate(stamp: string): number | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(stamp);
-  if (!m) return null;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  const ms = Date.UTC(year, month - 1, day);
-  const roundTrip = new Date(ms);
-  const valid = roundTrip.getUTCFullYear() === year && roundTrip.getUTCMonth() === month - 1 && roundTrip.getUTCDate() === day;
-  return valid ? ms : null;
-}
 
 /** The local path a site's knowledge file lives at. */
 export function knowledgePath(dataDir: string, baseUrl: string): string {
@@ -535,48 +512,6 @@ export function knowledgeForPrompt(k: SiteKnowledge): string {
   if (pitfallsPart) parts.push(`${PITFALLS_KNOWLEDGE_HEADER}\n${pitfallsPart}`);
 
   return parts.join('\n\n');
-}
-
-/**
- * Drops agent-section bullets whose `(confirmed YYYY-MM-DD)` stamp is older than
- * `STALE_AFTER_DAYS` before `today` — but only once `hadSuccessSince` is true, i.e. the
- * site has actually run again since that bullet was confirmed and had the chance to
- * contradict it. Without a success to judge them by, stale bullets are the only knowledge
- * there is and are kept. Operator notes are never touched — they're human-owned, not the
- * agent's to decay. Returns a new object; `k` is never mutated.
- *
- * Kept, not dropped, on anything this can't confidently judge: a bullet with no stamp at
- * all, a bullet whose stamp is shaped right but calendar-invalid (an LLM-hallucinated
- * `2026-13-45`, which writes this stamp in a later task), and — since one bad date
- * shouldn't cost every bullet in every section — a `today` that itself fails to parse.
- * `today` is read as its first 10 characters, so a full ISO timestamp
- * (`new Date().toISOString()`, the obvious thing to pass) lands on the same UTC-midnight
- * cutoff as a bare `YYYY-MM-DD` instead of shifting the boundary by up to a day.
- */
-export function pruneStale(k: SiteKnowledge, today: string, hadSuccessSince: boolean): SiteKnowledge {
-  const todayMs = hadSuccessSince ? parseStrictDate(today.slice(0, 10)) : null;
-  const cutoffMs = todayMs !== null ? todayMs - STALE_AFTER_DAYS * MS_PER_DAY : null;
-
-  const clone = (bullets: string[]): string[] => {
-    if (cutoffMs === null) return [...bullets];
-    return bullets.filter((bullet) => {
-      const m = CONFIRMED_RE.exec(bullet);
-      if (!m) return true;
-      const stampMs = parseStrictDate(m[1]);
-      if (stampMs === null) return true;
-      return stampMs >= cutoffMs;
-    });
-  };
-
-  return {
-    ...k,
-    sections: {
-      Access: clone(k.sections.Access),
-      Search: clone(k.sections.Search),
-      Download: clone(k.sections.Download),
-      Pitfalls: clone(k.sections.Pitfalls),
-    },
-  };
 }
 
 /** Rendered length of the agent-owned sections only (no frontmatter, title, or operator

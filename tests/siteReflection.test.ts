@@ -694,16 +694,4 @@ describe('reflectOnRun', () => {
     expect(findEvent(ctx.events.list({}), 'subtitle.knowledge-conflict')?.level).toBe('warn');
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-updated')).toBe(false);
   });
-
-  it('prunes a stale bullet on a verified success', async () => {
-    const ctx = reflectCtx({
-      llm: new FakeGenerator([
-        reflection({ ops: [{ op: 'add', section: 'Pitfalls', text: 'IF 503 THEN retry.', target: '' }] }),
-      ]),
-    });
-    saveKnowledge(ctx.dataDir, base());
-    await reflect(ctx);
-    // OLD is confirmed 2026-01-01, more than 90 days before TODAY.
-    expect(loadKnowledge(ctx.dataDir, SITE).sections.Search).toEqual([]);
-  });
 });

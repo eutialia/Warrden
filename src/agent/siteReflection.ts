@@ -15,7 +15,6 @@ import {
   agentCharCount,
   defaultSeedsDir,
   loadKnowledgeWithVersion,
-  pruneStale,
   renderKnowledge,
   saveKnowledge,
   type KnowledgeSection,
@@ -388,8 +387,10 @@ function buildSystemPrompt(input: {
 /**
  * One reflection call per site run: the model sees the site's current notes, the run's
  * transcript and its outcome, and answers with delta operations plus a verdict on the site.
- * Operations are applied, stale bullets pruned, and the file saved — unless the result
- * would break the ceiling, in which case the previous file stands.
+ * Operations are applied and the file saved — unless the result would break the ceiling, in
+ * which case the previous file stands. Nothing here ever deletes a bullet: the `(confirmed
+ * YYYY-MM-DD)` stamp is the only signal of age, refreshed whenever a bullet is re-confirmed
+ * or updated, and it is the operator's to act on from the dashboard.
  *
  * Returns `null`, having changed nothing, in two cases that are reported differently: the
  * `site-notes` call-site is unconfigured, which is the off switch and is quiet, or anything
@@ -405,7 +406,7 @@ export async function reflectOnRun(input: {
   site: SubtitleSiteConfig;
   transcript: TranscriptEntry[];
   /** The pipeline's own oracle: this run produced at least one usable subtitle file for
-   * this site. Gates protocol writes, and lets decay judge stale bullets. */
+   * this site. Gates protocol writes. */
   verifiedSuccess: boolean;
   today: string;
   /** Overrides `defaultSeedsDir()`, as in `searchSite` — tests point it at a fixture. */
@@ -480,23 +481,17 @@ export async function reflectOnRun(input: {
       });
     }
 
-    const pruned = pruneStale(applied, today, verifiedSuccess);
-    const prunedCount = AGENT_SECTIONS.reduce(
-      (sum, section) => sum + (applied.sections[section].length - pruned.sections[section].length),
-      0,
-    );
-
-    if (appliedCount === 0 && prunedCount === 0) {
+    if (appliedCount === 0) {
       // Nothing changed, so nothing is written: a no-op run leaves the file — and its
       // single `.bak` — exactly as it found them.
       return { verdict: reflection.verdict, reason: reflection.reason };
     }
 
-    const size = agentCharCount(pruned);
+    const size = agentCharCount(applied);
     if (size > KNOWLEDGE_CHAR_CAP) {
       // Not truncated: cutting markdown to fit corrupts a file that was fine, and the old
       // file is still a working one. The next run sees the same over-full file and can
-      // consolidate it with `remove`/`update` operations of its own.
+      // consolidate it with `update` operations of its own.
       ctx.events.append({
         kind: 'subtitle.knowledge-overflow',
         level: 'warn',
@@ -508,7 +503,7 @@ export async function reflectOnRun(input: {
     }
 
     try {
-      saveKnowledge(ctx.dataDir, { ...pruned, updated: today }, version);
+      saveKnowledge(ctx.dataDir, { ...applied, updated: today }, version);
     } catch (err) {
       if (!(err instanceof KnowledgeConflictError)) throw err;
       // Someone else — almost always an operator's dashboard PUT — wrote the file in the
@@ -528,13 +523,12 @@ export async function reflectOnRun(input: {
     ctx.events.append({
       kind: 'subtitle.knowledge-updated',
       jobId: job.id,
-      message: `Site knowledge for ${label} updated (${appliedCount} edit(s), ${prunedCount} stale bullet(s) pruned)`,
+      message: `Site knowledge for ${label} updated (${appliedCount} edit(s))`,
       data: targetEventData(job, {
         site: label,
         applied: appliedCount,
         droppedCount: dropped.length,
         dropped: dropped.slice(0, MAX_DROPPED_REPORTED),
-        pruned: prunedCount,
       }),
     });
 

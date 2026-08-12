@@ -13,7 +13,6 @@ import {
   loadKnowledgeWithVersion,
   MAX_BULLET_CHARS,
   parseKnowledge,
-  pruneStale,
   renderKnowledge,
   saveKnowledge,
   type SiteKnowledge,
@@ -748,67 +747,5 @@ describe('the shipped subhd.tv seed', () => {
       expect(bullet.length).toBeLessThanOrEqual(MAX_BULLET_CHARS);
     }
     expect(scanForThreats(knowledgeForPrompt(k), 'strict')).toEqual([]);
-  });
-});
-
-describe('decay', () => {
-  const stale = 'IF a THEN b. (confirmed 2026-01-01)';
-  const fresh = 'IF c THEN d. (confirmed 2026-08-01)';
-
-  it.each([
-    {
-      name: 'drops a stale bullet once the site has succeeded since',
-      bullets: [stale, fresh],
-      today: '2026-08-10',
-      hadSuccessSince: true,
-      expected: [fresh],
-    },
-    {
-      name: 'keeps a stale bullet when there has been no success to judge it by',
-      bullets: [stale],
-      today: '2026-08-10',
-      hadSuccessSince: false,
-      expected: [stale],
-    },
-    {
-      name: 'keeps a bullet whose confirmed stamp is calendar-invalid rather than treating it as always-stale',
-      bullets: ['IF a THEN b. (confirmed 2026-13-45)'],
-      today: '2026-08-10',
-      hadSuccessSince: true,
-      expected: ['IF a THEN b. (confirmed 2026-13-45)'],
-    },
-    {
-      name: 'keeps every bullet when today itself fails to parse, rather than dropping everything',
-      bullets: [stale, fresh],
-      today: 'not-a-date',
-      hadSuccessSince: true,
-      expected: [stale, fresh],
-    },
-    {
-      // 2026-05-12 is exactly STALE_AFTER_DAYS before 2026-08-10, so it survives — but
-      // only if today's clock time is discarded. Comparing against the raw timestamp puts
-      // the cutoff at 23:59:59 that day and drops the bullet by a few hours.
-      name: 'reads today as a date, so a full ISO timestamp does not shift the boundary by a day',
-      bullets: ['IF a THEN b. (confirmed 2026-05-12)'],
-      today: '2026-08-10T23:59:59Z',
-      hadSuccessSince: true,
-      expected: ['IF a THEN b. (confirmed 2026-05-12)'],
-    },
-  ])('$name', ({ bullets, today, hadSuccessSince, expected }) => {
-    const k = emptyKnowledge('https://x.test');
-    k.sections.Access.push(...bullets);
-    expect(pruneStale(k, today, hadSuccessSince).sections.Access).toEqual(expected);
-  });
-
-  it('never prunes operator notes', () => {
-    const k = parseKnowledge('https://subhd.tv', SAMPLE);
-    expect(pruneStale(k, '2030-01-01', true).operatorNotes).toBe('Never use this site for anime.');
-  });
-
-  it('does not mutate its input', () => {
-    const k = emptyKnowledge('https://x.test');
-    k.sections.Access.push(stale, fresh);
-    pruneStale(k, '2026-08-10', true);
-    expect(k.sections.Access).toEqual([stale, fresh]);
   });
 });
