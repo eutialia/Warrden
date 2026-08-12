@@ -135,11 +135,21 @@ export interface SiteProfileUpdate {
 }
 
 /** A site's learned knowledge file (`src/agent/siteKnowledge.ts`): the rendered markdown,
- * `## Operator notes` and all. `GET`/`PUT /api/site-knowledge` both return this shape. */
+ * `## Operator notes` and all, plus the rendered length of the agent-owned sections alone
+ * (frontmatter, title and operator notes excluded) — what `KNOWLEDGE_CHAR_CAP` below is
+ * measured against. `GET`, `PUT` and `POST .../reset` on `/api/site-knowledge` all return
+ * this shape. */
 export interface SiteKnowledge {
   baseUrl: string;
   markdown: string;
+  agentChars: number;
 }
+
+/** Hand-copied from `KNOWLEDGE_CHAR_CAP` in `src/agent/siteKnowledge.ts` (no shared package
+ * between `web/` and the backend) — the ceiling the browse agent's own writes are held to,
+ * shown next to `agentChars` so an operator hand-editing the file can see how much room is
+ * left before the agent itself can no longer update it. Keep in sync if that cap moves. */
+export const KNOWLEDGE_CHAR_CAP = 10_000;
 
 /** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
  * Leaving it untouched on `PUT` preserves the stored secret; sending a new value rotates it. */
@@ -236,6 +246,14 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Non-JSON error body — fall back to the status line above.
     }
+    // A validation 400's `error` is often a generic label ("invalid request") with the
+    // actual reason living only in `issues` — folding the issue text into the message
+    // itself means every caller of `apiErrorMessage` (toasts included) shows the operator
+    // what was actually wrong, not just that something was, without each page having to
+    // know `ApiError` carries a separate `issues` array at all.
+    if (issues && issues.length > 0) {
+      message = `${message}: ${issues.map((issue) => issue.message).join('; ')}`;
+    }
     throw new ApiError(message, res.status, issues);
   }
   // 200s from these routes are always JSON.
@@ -275,8 +293,9 @@ export function fetchSiteKnowledge(baseUrl: string): Promise<SiteKnowledge> {
 
 /** `PUT /api/site-knowledge` — a hand-edit. The response is the post-normalization
  * markdown actually saved (bullets reflowed, sections reordered), not an echo of what was
- * sent — the editor should replace its contents with it. */
-export function updateSiteKnowledge(input: SiteKnowledge): Promise<SiteKnowledge> {
+ * sent — the editor should replace its contents with it. `agentChars` is server-computed
+ * and never part of the request body, hence `Pick`, not the full `SiteKnowledge`. */
+export function updateSiteKnowledge(input: Pick<SiteKnowledge, 'baseUrl' | 'markdown'>): Promise<SiteKnowledge> {
   return fetchJson<SiteKnowledge>('/api/site-knowledge', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },

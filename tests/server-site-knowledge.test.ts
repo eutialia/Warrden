@@ -1,6 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { agentCharCount, defaultSeedsDir, KNOWLEDGE_CHAR_CAP, loadKnowledge, parseKnowledge } from '../src/agent/siteKnowledge.js';
+import {
+  agentCharCount,
+  defaultSeedsDir,
+  KNOWLEDGE_CHAR_CAP,
+  loadKnowledge,
+  MAX_BULLET_CHARS,
+  parseKnowledge,
+} from '../src/agent/siteKnowledge.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import type { AppContext } from '../src/context.js';
 import { createApp } from '../src/server/app.js';
@@ -23,7 +30,7 @@ describe('site knowledge routes', () => {
       const res = await app.request('/api/site-knowledge?baseUrl=https%3A%2F%2Fx.test');
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toMatchObject({ baseUrl: 'https://x.test' });
+      expect(body).toMatchObject({ baseUrl: 'https://x.test', agentChars: 0 });
       expect(body.markdown).toContain('## Operator notes');
     });
 
@@ -62,6 +69,8 @@ describe('site knowledge routes', () => {
         body: JSON.stringify({ baseUrl: 'https://x.test', markdown }),
       });
       expect(put.status).toBe(200);
+      // No agent-section bullets in this file, so operator prose doesn't count against it.
+      expect((await put.json()).agentChars).toBe(0);
 
       const got = await (await app.request('/api/site-knowledge?baseUrl=https%3A%2F%2Fx.test')).json();
       expect(got.markdown).toContain('Go slow.');
@@ -98,14 +107,32 @@ describe('site knowledge routes', () => {
       expect(res.status).toBe(404);
     });
 
-    it('400s a markdown body over the 20,000-char route ceiling', async () => {
+    it('400s a markdown body over the 200,000-char route ceiling', async () => {
       const app = createApp(ctxWithSites([{ baseUrl: 'https://x.test' }]));
       const res = await app.request('/api/site-knowledge', {
         method: 'PUT',
         headers: jsonHeaders,
-        body: JSON.stringify({ baseUrl: 'https://x.test', markdown: 'x'.repeat(20_001) }),
+        body: JSON.stringify({ baseUrl: 'https://x.test', markdown: 'x'.repeat(200_001) }),
       });
       expect(res.status).toBe(400);
+    });
+
+    it('round-trips a file with 21,000 chars of operator notes — the whole-file ceiling is an abuse guard, not the real invariant', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
+      const app = createApp(ctx);
+      const notes = 'n'.repeat(21_000);
+      const markdown = `# x.test\n\n## Access\n\n## Operator notes\n${notes}\n`;
+
+      const res = await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://x.test', markdown }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.markdown).toContain(notes);
+      expect(body.agentChars).toBe(0);
+      expect(loadKnowledge(ctx.dataDir, 'https://x.test').operatorNotes).toBe(notes);
     });
 
     it('is trusted operator input: not injection-scanned, saved as submitted', async () => {
@@ -127,23 +154,48 @@ describe('site knowledge routes', () => {
       expect(loadKnowledge(ctx.dataDir, 'https://x.test').sections.Access).toContain(hostile);
     });
 
-    it('is not rejected for exceeding the agent-section char cap — that ceiling governs only the agent\'s own writes', async () => {
+    it('400s a bullet over MAX_BULLET_CHARS — the agent could never write, update or remove one this long, so an operator PUT is the only way to freeze that site\'s learning', async () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
       const app = createApp(ctx);
-      const bigBullet = 'x'.repeat(KNOWLEDGE_CHAR_CAP + 500);
-      const markdown = `# x.test\n\n## Access\n- ${bigBullet}\n\n## Operator notes\n`;
-      expect(markdown.length).toBeLessThan(20_000);
+      // 12,000 chars — the reviewer's frozen-learning probe.
+      const hugeBullet = 'x'.repeat(12_000);
+      const markdown = `# x.test\n\n## Access\n- ${hugeBullet}\n\n## Operator notes\n`;
+      expect(markdown.length).toBeGreaterThan(MAX_BULLET_CHARS);
 
       const res = await app.request('/api/site-knowledge', {
         method: 'PUT',
         headers: jsonHeaders,
         body: JSON.stringify({ baseUrl: 'https://x.test', markdown }),
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain('Operator notes');
 
+      // Nothing was written — the file this route refused to accept never lands on disk,
+      // so there is no way through the API to create the frozen-learning scenario at all.
       const saved = loadKnowledge(ctx.dataDir, 'https://x.test');
-      expect(agentCharCount(saved)).toBeGreaterThan(KNOWLEDGE_CHAR_CAP);
-      expect(saved.sections.Access[0]).toBe(bigBullet);
+      expect(saved.sections.Access).toHaveLength(0);
+    });
+
+    it('400s when the agent sections total more than KNOWLEDGE_CHAR_CAP, even with no single bullet over MAX_BULLET_CHARS', async () => {
+      const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
+      const app = createApp(ctx);
+      // 30 bullets just under the per-bullet cap: none individually rejected, but together
+      // comfortably over KNOWLEDGE_CHAR_CAP (10,000).
+      const bullet = `- ${'x'.repeat(MAX_BULLET_CHARS - 2)}`;
+      expect(bullet.length).toBeLessThanOrEqual(MAX_BULLET_CHARS);
+      const bullets = Array.from({ length: 30 }, () => bullet);
+      const markdown = `# x.test\n\n## Access\n${bullets.join('\n')}\n\n## Operator notes\n`;
+
+      const res = await app.request('/api/site-knowledge', {
+        method: 'PUT',
+        headers: jsonHeaders,
+        body: JSON.stringify({ baseUrl: 'https://x.test', markdown }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain(String(KNOWLEDGE_CHAR_CAP));
+      expect(body.error).toContain('Operator notes');
     });
 
     it('keeps the previous version as .bak, same as an agent write', async () => {

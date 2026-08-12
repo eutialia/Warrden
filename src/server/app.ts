@@ -6,7 +6,18 @@ import { Hono } from 'hono';
 import { csrf } from 'hono/csrf';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { defaultSeedsDir, loadKnowledge, parseKnowledge, renderKnowledge, saveKnowledge } from '../agent/siteKnowledge.js';
+import {
+  AGENT_SECTIONS,
+  KNOWLEDGE_CHAR_CAP,
+  MAX_BULLET_CHARS,
+  agentCharCount,
+  defaultSeedsDir,
+  loadKnowledge,
+  parseKnowledge,
+  renderKnowledge,
+  saveKnowledge,
+  type SiteKnowledge,
+} from '../agent/siteKnowledge.js';
 import type { ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
 import { ConfigSchema, SECRET_PLACEHOLDER, type Config } from '../config/schema.js';
@@ -724,28 +735,58 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
 
       const knowledge = loadKnowledge(dataDir, baseUrl, seedsDir);
-      return c.json({ baseUrl, markdown: renderKnowledge(knowledge) });
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge) });
     });
+
+    // Longest a single agent-section bullet in a PUT may be, and why an operator seeing
+    // this 400 should reach for `## Operator notes` instead: an over-cap bullet the agent
+    // itself could never have written (`MAX_BULLET_CHARS`, `siteReflection.ts`'s
+    // `applyOps`) freezes that site's learning forever, silently — `applyOps` drops any
+    // `remove`/`update` whose `target` is over the cap, so the bullet becomes permanent,
+    // and if it also pushes the agent sections over `KNOWLEDGE_CHAR_CAP`, every future
+    // reflection write for the site is dropped whole (`reflectOnRun`'s overflow guard).
+    // The operator is still trusted and still not injection-scanned or ceiling-truncated —
+    // this just holds a hand-edit to the same shape limit the agent is held to, with a
+    // 400 that says where the room to write freely actually is.
+    function agentSectionInvariantError(k: SiteKnowledge): string | null {
+      const oversizedBullet = AGENT_SECTIONS.some((section) => k.sections[section].some((b) => b.length > MAX_BULLET_CHARS));
+      if (oversizedBullet) {
+        return `a bullet in an agent section is over ${MAX_BULLET_CHARS} characters — the browse agent can never write one this long and could never remove or update it either, freezing that section. Put freeform or long content in "## Operator notes" instead, which has no length limit.`;
+      }
+      const size = agentCharCount(k);
+      if (size > KNOWLEDGE_CHAR_CAP) {
+        return `the agent sections total ${size} characters, over the ${KNOWLEDGE_CHAR_CAP}-character cap the browse agent itself is held to — every future update it tries to write would be dropped. Put freeform or long content in "## Operator notes" instead, which has no length limit.`;
+      }
+      return null;
+    }
 
     app.put('/api/site-knowledge', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
-      const parsed = z.object({ baseUrl: z.url(), markdown: z.string().max(20_000) }).safeParse(body);
+      // The 200,000-char ceiling here is only an abuse guard on the request body as a
+      // whole (operator notes are unbounded by design and can be most of that budget) —
+      // the real invariant is `agentSectionInvariantError` below, checked after parsing so
+      // it can measure the agent sections on their own rather than the whole file.
+      const parsed = z.object({ baseUrl: z.url(), markdown: z.string().max(200_000) }).safeParse(body);
       if (!parsed.success) return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       const { baseUrl, markdown } = parsed.data;
       if (!requireConfiguredSite(baseUrl)) return c.json({ error: `site "${baseUrl}" is not configured` }, 404);
 
       // A hand-edit is trusted operator input: parsed through the same reader the agent's
       // own writes go through (so a stray line can't corrupt the file's shape) and saved as
-      // submitted. Two things it is deliberately NOT: not injection-scanned — that guard
-      // exists for content the agent itself might inject into a prompt unsupervised, not
-      // for content a human just typed into their own dashboard, and scan-on-load (the
-      // browse loop's own read, Task 3) still catches it before the next run either way —
-      // and not rejected for exceeding `KNOWLEDGE_CHAR_CAP`, which throttles only the
-      // agent's own delta-op writes (Task 4). The 20,000-char ceiling above is this route's
-      // own, on the whole file, operator notes included.
+      // submitted. It is deliberately NOT injection-scanned — that guard exists for content
+      // the agent itself might inject into a prompt unsupervised, not for content a human
+      // just typed into their own dashboard, and scan-on-load (the browse loop's own read,
+      // Task 3) still catches it before the next run either way. It IS held to the same
+      // per-bullet and agent-section-total limits the agent's own writes are held to
+      // (`agentSectionInvariantError` above) — an operator PUT is the one path that can
+      // create knowledge the agent can never again touch, so this is enforced here rather
+      // than left to the next reflection call to notice.
       const knowledge = parseKnowledge(baseUrl, markdown);
+      const invariantError = agentSectionInvariantError(knowledge);
+      if (invariantError) return c.json({ error: invariantError }, 400);
+
       saveKnowledge(dataDir, knowledge);
-      return c.json({ baseUrl, markdown: renderKnowledge(knowledge) });
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge) });
     });
 
     app.post('/api/site-knowledge/reset', async (c) => {
@@ -768,7 +809,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // read source here; nothing in this route can write back to `seedsDir`.
       const knowledge = parseKnowledge(baseUrl, readFileSync(seedPath, 'utf8'));
       saveKnowledge(dataDir, knowledge);
-      return c.json({ baseUrl, markdown: renderKnowledge(knowledge) });
+      return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge) });
     });
 
     // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).

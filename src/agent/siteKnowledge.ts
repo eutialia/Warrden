@@ -32,6 +32,15 @@ export const AGENT_SECTIONS: readonly KnowledgeSection[] = ['Access', 'Search', 
 /** Ceiling on the agent-owned portion of a knowledge file (Task 4 enforces this). */
 export const KNOWLEDGE_CHAR_CAP = 10_000;
 
+/** Longest a single bullet in an agent section may be. A rule is one sentence; anything
+ * far longer is prose that belongs in `## Operator notes`, the one section with no length
+ * limit. Lives here rather than in `siteReflection.ts` (where it originated, bounding the
+ * agent's own delta-op writes) because it is really a property of the file *format* — both
+ * the agent's writes and an operator's raw PUT need to hold the same line, and a route
+ * under `server/` importing from the LLM-facing reflection module would be the stranger
+ * dependency of the two. */
+export const MAX_BULLET_CHARS = 400;
+
 /** A bullet older than this, once the site has succeeded again since, is assumed
  * superseded and dropped by `pruneStale`. */
 export const STALE_AFTER_DAYS = 90;

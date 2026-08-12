@@ -6,6 +6,7 @@ import {
   fetchConfig,
   fetchSiteKnowledge,
   fetchSiteProfiles,
+  KNOWLEDGE_CHAR_CAP,
   resetSiteKnowledge,
   saveConfig,
   updateSiteKnowledge,
@@ -88,6 +89,7 @@ export default function Sites() {
   // states a hand-editor needs (loading the file in, saving an edit, resetting to seed).
   const [knowledgeSite, setKnowledgeSite] = useState<SubtitleSite | null>(null);
   const [knowledgeMarkdown, setKnowledgeMarkdown] = useState('');
+  const [knowledgeAgentChars, setKnowledgeAgentChars] = useState(0);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeSaving, setKnowledgeSaving] = useState(false);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
@@ -214,12 +216,27 @@ export default function Sites() {
   function openKnowledge(site: SubtitleSite): void {
     setKnowledgeSite(site);
     setKnowledgeMarkdown('');
+    setKnowledgeAgentChars(0);
     setKnowledgeError(null);
     setKnowledgeLoading(true);
+    // Same guard `refetch` uses: opening a different site (or reopening the same one)
+    // before a slow fetch resolves must not let that stale response land in whichever
+    // site's editor happens to be open by the time it does.
+    const isStale = beginFetch();
     fetchSiteKnowledge(site.baseUrl)
-      .then((k) => setKnowledgeMarkdown(k.markdown))
-      .catch((err: unknown) => setKnowledgeError(apiErrorMessage(err, 'Failed to load knowledge file')))
-      .finally(() => setKnowledgeLoading(false));
+      .then((k) => {
+        if (isStale()) return;
+        setKnowledgeMarkdown(k.markdown);
+        setKnowledgeAgentChars(k.agentChars);
+      })
+      .catch((err: unknown) => {
+        if (isStale()) return;
+        setKnowledgeError(apiErrorMessage(err, 'Failed to load knowledge file'));
+      })
+      .finally(() => {
+        if (isStale()) return;
+        setKnowledgeLoading(false);
+      });
   }
 
   async function saveKnowledge(): Promise<void> {
@@ -231,6 +248,7 @@ export default function Sites() {
       // what was typed, so a hand-edit round-trips visibly rather than silently.
       const saved = await updateSiteKnowledge({ baseUrl: knowledgeSite.baseUrl, markdown: knowledgeMarkdown });
       setKnowledgeMarkdown(saved.markdown);
+      setKnowledgeAgentChars(saved.agentChars);
       toast.success('Knowledge saved');
     } catch (err) {
       toast.error(apiErrorMessage(err, 'Failed to save knowledge'));
@@ -245,6 +263,7 @@ export default function Sites() {
     try {
       const seeded = await resetSiteKnowledge(knowledgeSite.baseUrl);
       setKnowledgeMarkdown(seeded.markdown);
+      setKnowledgeAgentChars(seeded.agentChars);
       toast.success('Reset to the shipped seed');
       setConfirmingReset(false);
     } catch (err) {
@@ -513,12 +532,21 @@ export default function Sites() {
             <Skeleton className="h-96 w-full" />
           ) : (
             !knowledgeError && (
-              <Textarea
-                rows={24}
-                className="font-mono text-xs"
-                value={knowledgeMarkdown}
-                onChange={(e) => setKnowledgeMarkdown(e.target.value)}
-              />
+              <div className="space-y-1">
+                <Textarea
+                  rows={24}
+                  className="font-mono text-xs"
+                  value={knowledgeMarkdown}
+                  onChange={(e) => setKnowledgeMarkdown(e.target.value)}
+                />
+                {/* What the agent itself is held to — operator notes below don't count
+                    against this, and saving over it is refused with the reason why. */}
+                <p
+                  className={`text-xs ${knowledgeAgentChars > KNOWLEDGE_CHAR_CAP ? 'text-destructive' : 'text-muted-foreground'}`}
+                >
+                  agent sections {knowledgeAgentChars.toLocaleString()} / {KNOWLEDGE_CHAR_CAP.toLocaleString()}
+                </p>
+              </div>
             )
           )}
           <DialogFooter className="sm:justify-between">

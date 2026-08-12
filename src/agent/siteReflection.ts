@@ -10,6 +10,7 @@ import { errorMessage } from '../util/errors.js';
 import {
   AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
+  MAX_BULLET_CHARS,
   agentCharCount,
   defaultSeedsDir,
   loadKnowledge,
@@ -40,10 +41,6 @@ const DETAIL_CAP = 300;
  * not learn twenty rules; the tail is dropped rather than applied, which also bounds what
  * one response can do to the file and to the event it is reported in. */
 const MAX_OPS = 20;
-
-/** Longest a single bullet (or a target) may be. A rule is one sentence; anything far
- * longer is prose, and unbounded model text is what fills the file's ceiling in one go. */
-const MAX_BULLET_CHARS = 400;
 
 /** Refused operations carried in an event's `data`. The rest are counted, not quoted. */
 const MAX_DROPPED_REPORTED = 10;
