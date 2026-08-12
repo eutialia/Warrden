@@ -48,8 +48,8 @@ const MAX_DROPPED_REPORTED = 10;
 
 /** Any `(confirmed YYYY-MM-DD)` stamp with the whitespace around it, anywhere in the text
  * — not just a trailing one. A stamp buried mid-bullet survives a trailing-only strip and
- * then wins, because `pruneStale` reads the FIRST match: `IF x (confirmed 2099-01-01)
- * THEN y.` would be immune to decay forever. */
+ * would otherwise leave a second, contradictory stamp in the stored text once the real one
+ * is appended, muddying the one freshness signal an operator reads off the file. */
 const STAMP_RE = /\s*\(confirmed \d{4}-\d{2}-\d{2}\)\s*/g;
 
 /** The code points a text format most commonly treats as ending a line: CR, LF, next line,
@@ -86,14 +86,16 @@ const FORGERY_CHECKS: readonly { test: RegExp; why: string }[] = [
  * Flat root object, every field REQUIRED — the same strict-mode constraint documented on
  * `AgentActionSchema` in `loop.ts`: `.optional()`/`.default()` drop a field from the JSON
  * schema's `required` array and OpenAI's strict mode rejects the schema outright. So the
- * absent value is a `''` sentinel instead: `text` is '' for `remove`, `target` is '' for
- * `add`, and `applyOps` reads '' as "not given".
+ * absent value is a `''` sentinel instead: `target` is '' for `add`, and `applyOps` reads
+ * '' as "not given". There is no `remove` op: the operator ruled that the reflection agent
+ * has no deletion authority at all — websites are stable skeletons, a correction is
+ * `update`'s job, and only the operator deletes a bullet, via the dashboard.
  */
 export const KnowledgeOpSchema = z.object({
-  op: z.enum(['add', 'update', 'remove']).describe('what to do with one bullet'),
+  op: z.enum(['add', 'update']).describe('what to do with one bullet'),
   section: z.enum(['Access', 'Search', 'Download', 'Pitfalls']).describe('which section the bullet belongs to'),
-  text: z.string().describe('the new bullet as an IF/THEN rule; empty string for remove'),
-  target: z.string().describe('the exact existing bullet to update or remove; empty string for add'),
+  text: z.string().describe('the new bullet as an IF/THEN rule'),
+  target: z.string().describe('the exact existing bullet to update; empty string for add'),
 });
 
 export type KnowledgeOp = z.infer<typeof KnowledgeOpSchema>;
@@ -159,14 +161,18 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  * Applies delta operations to one site's knowledge, one bullet at a time. Bullets no
  * operation names come out byte-exact, and there is no operation that rewrites the file:
  * wholesale rewriting is the mechanism measured collapsing a context file below its
- * no-memory baseline (see the design note), so it isn't offered.
+ * no-memory baseline (see the design note), so it isn't offered. There is also no operation
+ * that deletes: the operator ruled that the reflection agent has no deletion authority at
+ * all — websites are stable skeletons, a correction is `update`'s job (one bullet absorbs
+ * what mattered from another, or is shortened), and only the operator deletes a bullet, via
+ * the dashboard's Knowledge view.
  *
  * Every refusal is returned in `dropped` with a reason rather than silently discarded, and
  * one dropped operation never costs its siblings. The checks, per operation, in order:
  *
  * 0. Anything past `MAX_OPS` is dropped unread, and so is any bullet or target longer than
  *    `MAX_BULLET_CHARS`. Both bound what one response can do — to the file, and to the
- *    event that quotes the refusals back. The bullet cap is tested after check 4, so
+ *    event that quotes the refusals back. The bullet cap is tested after check 3, so
  *    padding a hostile bullet past it cannot downgrade the refusal to a length complaint.
  * 1. A section outside `AGENT_SECTIONS` — `## Operator notes` above all, but also any name
  *    a model invented — is refused. The schema's enum cannot even express the operator
@@ -176,11 +182,7 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  *    Agents that wrote protocol lessons after every run, successful or not, scored worse
  *    than agents with no memory at all, so those writes need a verified success behind
  *    them. `Pitfalls` stays open either way.
- * 3. `allowProtocolRemove` false refuses `remove` there too. Normally a `remove` survives a
- *    failed run — a run that failed *because* a rule is wrong is the evidence that retires
- *    it — but a run whose own verdict is `transient-failure` has asserted that nothing
- *    structural happened, so it has no evidence about the protocol to retire it with.
- * 4. The text may not forge file structure (`FORGERY_CHECKS`) and is scanned at `'strict'`
+ * 3. The text may not forge file structure (`FORGERY_CHECKS`) and is scanned at `'strict'`
  *    before it can land. Stored knowledge is replayed into a later system prompt, so a
  *    bullet is the one place an injection gets to persist past the page it came from.
  *    Every one of these checks — forgery, scan, length — runs against the STAMPED,
@@ -190,13 +192,13 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  *    op is free padding at validation time — enough of it pushes a match past a
  *    length-bounded scanner gap or hides a forged heading/bullet marker behind text that
  *    never survives to the file. Validating what actually gets written closes that gap.
- * 5. An `add` whose text already exists in the section is refused, and so is an `update`
- *    whose result would. Two identical bullets make every later `update`/`remove`
+ * 4. An `add` whose text already exists in the section is refused, and so is an `update`
+ *    whose result would. Two identical bullets make every later `update` on that text
  *    ambiguous, so a duplicate is not merely noise: it permanently locks both copies in
- *    place, with only decay able to retire them.
- * 6. `update`/`remove` match on exact bullet text ignoring stamps. Zero matches or more
- *    than one is a dropped operation — guessing which of two similar bullets the model
- *    meant is how the wrong rule gets deleted.
+ *    place until the operator prunes one from the dashboard.
+ * 5. `update` matches on exact bullet text ignoring stamps. Zero matches or more than one is
+ *    a dropped operation — guessing which of two similar bullets the model meant is how the
+ *    wrong rule gets overwritten.
  *
  * Operations apply in order against the running result, so a later one sees an earlier
  * one's effect (an `add` followed by an `update` of the same text works).
@@ -206,9 +208,6 @@ export function applyOps(
   ops: KnowledgeOp[],
   opts: {
     allowProtocol: boolean;
-    /** Whether protocol bullets may be retired. Separate from `allowProtocol` because the
-     * two answer to different evidence — see check 3. */
-    allowProtocolRemove: boolean;
     today: string;
   },
 ): { knowledge: SiteKnowledge; dropped: DroppedOp[] } {
@@ -231,7 +230,7 @@ export function applyOps(
     }
 
     const isProtocol = PROTOCOL_SECTIONS.includes(section);
-    if (isProtocol && (op.op === 'remove' ? !opts.allowProtocolRemove : !opts.allowProtocol)) {
+    if (isProtocol && !opts.allowProtocol) {
       drop(op, `this run may not ${op.op} protocol knowledge in ${section}`);
       continue;
     }
@@ -240,29 +239,26 @@ export function applyOps(
     // validation below runs against THESE bytes, not the raw `op.text`, so a fake
     // `(confirmed ...)` stamp buried in the op can't pad past a scanner gap or hide a
     // forged heading/marker behind text that `withoutStamp` deletes before storage (C-01).
-    let candidate: string | undefined;
-    if (op.op !== 'remove') {
-      if (withoutStamp(op.text) === '') {
-        drop(op, `${op.op} with no bullet text`);
-        continue;
-      }
-      candidate = stamped(op.text, opts.today);
-      // Hostile checks run before the length cap: both refuse the write, but only one of
-      // them raises the event to `attention`, and padding a forged heading past the cap
-      // must not be able to buy silence.
-      const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate!));
-      if (forgery) {
-        drop(op, forgery.why, true);
-        continue;
-      }
-      if (scanForThreats(candidate, 'strict').length > 0) {
-        drop(op, 'injection patterns in bullet', true);
-        continue;
-      }
-      if (candidate.length > MAX_BULLET_CHARS) {
-        drop(op, `bullet text over ${MAX_BULLET_CHARS} characters`);
-        continue;
-      }
+    if (withoutStamp(op.text) === '') {
+      drop(op, `${op.op} with no bullet text`);
+      continue;
+    }
+    const candidate = stamped(op.text, opts.today);
+    // Hostile checks run before the length cap: both refuse the write, but only one of
+    // them raises the event to `attention`, and padding a forged heading past the cap
+    // must not be able to buy silence.
+    const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate));
+    if (forgery) {
+      drop(op, forgery.why, true);
+      continue;
+    }
+    if (scanForThreats(candidate, 'strict').length > 0) {
+      drop(op, 'injection patterns in bullet', true);
+      continue;
+    }
+    if (candidate.length > MAX_BULLET_CHARS) {
+      drop(op, `bullet text over ${MAX_BULLET_CHARS} characters`);
+      continue;
     }
 
     /** Whether the section already holds this bullet, ignoring the bullet at `exclude` —
@@ -277,7 +273,7 @@ export function applyOps(
         drop(op, `${section} already has this bullet`);
         continue;
       }
-      knowledge.sections[section].push(candidate!);
+      knowledge.sections[section].push(candidate);
       continue;
     }
 
@@ -306,19 +302,15 @@ export function applyOps(
     }
 
     const { index } = matches[0]!;
-    if (op.op === 'remove') {
-      knowledge.sections[section].splice(index, 1);
-      continue;
-    }
     // Same reason an `add` is deduped, reached through the other door: an `update` that
     // rewrites one bullet into the text of another leaves two identical bullets, and from
-    // then on every `update`/`remove` naming that text is ambiguous, so neither copy can be
-    // edited or retired again except by decay.
+    // then on every `update` naming that text is ambiguous, so neither copy can be edited
+    // again except by the operator.
     if (duplicates(withoutStamp(op.text), index)) {
       drop(op, `${section} already has this bullet`);
       continue;
     }
-    knowledge.sections[section][index] = candidate!;
+    knowledge.sections[section][index] = candidate;
   }
 
   return { knowledge, dropped };
@@ -368,9 +360,10 @@ function buildSystemPrompt(input: {
     '',
     'Operations:',
     '- add: a new bullet in a section.',
-    '- update: replace one existing bullet. `target` must be an existing bullet copied exactly, its stamp optional. Use this to re-confirm a rule this run relied on, which refreshes its date.',
-    '- remove: drop one existing bullet, matched the same way. Use it when this run showed the rule to be wrong.',
+    '- update: replace one existing bullet. `target` must be an existing bullet copied exactly, its stamp optional. Use this to re-confirm a rule this run relied on (which refreshes its date), to correct a rule this run showed to be wrong, or to merge two overlapping bullets: fold one into the other with `update` and leave the now-redundant one for the operator to prune.',
     'A target that matches no bullet, or more than one, is discarded rather than guessed at.',
+    '',
+    'There is no delete operation. You cannot remove a bullet — only the operator can, from the dashboard. If a bullet is wrong, correct it with update; if two bullets overlap, update one to absorb the other and leave the redundant one alone.',
     '',
     verifiedSuccess
       ? 'This run verifiably succeeded: it produced a usable subtitle file. Access, Search and Download are open to you.'
@@ -463,10 +456,6 @@ export async function reflectOnRun(input: {
 
     const { knowledge: applied, dropped } = applyOps(knowledge, reflection.ops, {
       allowProtocol: verifiedSuccess,
-      // The verdict is the model's own, so this guards an honest contradiction — a run
-      // that reports nothing structural happened while deleting the site's protocol —
-      // rather than an adversary, who would simply not report `transient-failure`.
-      allowProtocolRemove: reflection.verdict !== 'transient-failure',
       today,
     });
     const appliedCount = reflection.ops.length - dropped.length;
