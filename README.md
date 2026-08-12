@@ -103,10 +103,13 @@ release group are soft ranking hints, never hard filters. Each run:
 2. Previously downloaded packs in the archive cache are matched against what's missing
    before anything new is fetched.
 3. Configured sites are searched in order until nothing is missing, each driven by a
-   browser agent with `curl` and `chromium` fetch tiers. A site with a multi-step
-   download protocol is described in its profile notes (Sites → Notes), which the
-   agent follows step by step; `docs/sites/subhd.tv.md` is a ready-made notes doc
-   for subhd.tv.
+   browser agent with `curl` and `chromium` fetch tiers. The agent keeps its own
+   knowledge file per site under the data directory (`sites/<host>.md`), seeded on
+   first use from `seeds/sites/` when a ready-made one exists (subhd.tv ships in the
+   image) and otherwise starting empty. The file is hand-editable at any time; a
+   `## Operator notes` section is reserved for the operator and the agent never
+   writes to it. After a successful run the agent updates the rest of the file with
+   what it learned, so a site's protocol gets cheaper to work with over time.
 4. Each archive's files are matched to episodes: filename parsing first, an LLM call
    for the cryptic rest.
 5. Every candidate is scored against the episode's embedded track. A drifted candidate
@@ -151,7 +154,7 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | `picking.minSizeMB` | `50` | Minimum release size in MB. |
 | `picking.maxSizeMB` | `60000` | Maximum release size in MB. |
 | `llm.activeProfile` | `prod` | Which of `llm.profiles` is in effect. |
-| `llm.profiles` | `{ dev: {}, prod: {} }` | Per-call-site model config. Call-sites: `release-pick`, `sidecar-match`, `bundle-map`, `archive-map`, `site-search`. |
+| `llm.profiles` | `{ dev: {}, prod: {} }` | Per-call-site model config. Call-sites: `release-pick`, `sidecar-match`, `bundle-map`, `archive-map`, `site-search`, `site-notes`. Leaving `site-notes` unconfigured turns self-learning off — the agent still reads whatever knowledge file exists but never writes one back. |
 | `llm.keys.openrouter` / `.openai` / `.anthropic` | unset | Provider API keys. The `claude-code` provider uses subscription auth and needs none. |
 | `eventRetentionDays` | `30` | Days of event history to keep; `0` keeps everything. Items waiting on review are never trimmed. |
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop diffs each arr's full list as a webhook backstop; doubles as the grace period before a new `warrden-` tag/profile can be garbage-collected. |

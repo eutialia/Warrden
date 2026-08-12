@@ -42,6 +42,7 @@ COPY --from=builder --chown=node:node /app/package.json ./package.json
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/web/dist ./web/dist
+COPY --from=builder --chown=node:node /app/seeds ./seeds
 
 # Media tools for the subtitle pipeline, which shells out to these at runtime
 # (src/media/tools.ts): ffmpeg/ffprobe (probing + embedded-track extraction) and the

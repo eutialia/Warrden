@@ -3,7 +3,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   agentCharCount,
+  defaultSeedsDir,
   emptyKnowledge,
+  KNOWLEDGE_CHAR_CAP,
   knowledgeForPrompt,
   knowledgePath,
   loadKnowledge,
@@ -13,6 +15,7 @@ import {
   saveKnowledge,
   type SiteKnowledge,
 } from '../src/agent/siteKnowledge.js';
+import { scanForThreats } from '../src/agent/threatPatterns.js';
 import { ensureDataSubdir } from '../src/fs/paths.js';
 import { SITE_KNOWLEDGE_SAMPLE as SAMPLE, tmpDir } from './helpers.js';
 
@@ -514,6 +517,32 @@ describe('load and save', () => {
     const path = knowledgePath(dataDir, 'https://subhd.tv');
     expect(readFileSync(`${path}.bak`, 'utf8')).toBe(SAMPLE);
     expect(readFileSync(path, 'utf8')).toContain('IF x THEN y.');
+  });
+});
+
+describe('the shipped subhd.tv seed', () => {
+  it('loads through loadKnowledge, stays under the char cap, and does not trip the scanner', () => {
+    const dataDir = tmpDir();
+    const k = loadKnowledge(dataDir, 'https://subhd.tv', defaultSeedsDir());
+
+    expect(k.sections.Access.length).toBeGreaterThan(0);
+    expect(k.sections.Search.length).toBeGreaterThan(0);
+    expect(k.sections.Download.length).toBeGreaterThan(0);
+
+    // The subhd protocol details must survive the reshape into IF/THEN bullets intact.
+    const allBullets = [...k.sections.Access, ...k.sections.Search, ...k.sections.Download, ...k.sections.Pitfalls].join('\n');
+    expect(allBullets).toContain('/a/{slug}');
+    expect(allBullets).toContain('/down/{slug}');
+    expect(allBullets).toContain('/api/sub/down');
+    expect(allBullets).toContain('{"sid": "{slug}", "cap": ""}');
+    expect(allBullets).toContain('captcha');
+    expect(allBullets).toContain('Referer');
+    for (const bullet of allBullets.split('\n')) {
+      expect(bullet).toMatch(/\(confirmed \d{4}-\d{2}-\d{2}\)$/);
+    }
+
+    expect(agentCharCount(k)).toBeLessThan(KNOWLEDGE_CHAR_CAP);
+    expect(scanForThreats(knowledgeForPrompt(k), 'strict')).toEqual([]);
   });
 });
 
