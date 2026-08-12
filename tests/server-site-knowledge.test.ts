@@ -181,10 +181,14 @@ describe('site knowledge routes', () => {
     it('400s a bullet over MAX_BULLET_CHARS — the agent could never write, update or remove one this long, so an operator PUT is the only way to freeze that site\'s learning', async () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
       const app = createApp(ctx);
-      // 12,000 chars — the reviewer's frozen-learning probe.
-      const hugeBullet = 'x'.repeat(12_000);
-      const markdown = `# x.test\n\n## Access\n- ${hugeBullet}\n\n## Operator notes\n`;
-      expect(markdown.length).toBeGreaterThan(MAX_BULLET_CHARS);
+      // I-01: over MAX_BULLET_CHARS (400) but well under KNOWLEDGE_CHAR_CAP (10,000), so
+      // this trips the per-bullet cap specifically — not the whole-document cap, which
+      // shares the same "…Operator notes…" sentence in `agentSectionInvariantError` and
+      // would let this test pass even with the per-bullet branch deleted entirely.
+      const overBullet = 'x'.repeat(500);
+      const markdown = `# x.test\n\n## Access\n- ${overBullet}\n\n## Operator notes\n`;
+      expect(overBullet.length).toBeGreaterThan(MAX_BULLET_CHARS);
+      expect(overBullet.length).toBeLessThan(KNOWLEDGE_CHAR_CAP);
 
       const res = await app.request('/api/site-knowledge', {
         method: 'PUT',
@@ -193,6 +197,7 @@ describe('site knowledge routes', () => {
       });
       expect(res.status).toBe(400);
       const body = await res.json();
+      expect(body.error).toContain(String(MAX_BULLET_CHARS));
       expect(body.error).toContain('Operator notes');
 
       // Nothing was written — the file this route refused to accept never lands on disk,
