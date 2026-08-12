@@ -11,6 +11,7 @@ import {
   knowledgePath,
   loadKnowledge,
   loadKnowledgeWithVersion,
+  MAX_BULLET_CHARS,
   parseKnowledge,
   pruneStale,
   renderKnowledge,
@@ -729,6 +730,12 @@ describe('the shipped subhd.tv seed', () => {
     }
 
     expect(agentCharCount(k)).toBeLessThan(KNOWLEDGE_CHAR_CAP);
+    // M-03/D-48: a bullet over MAX_BULLET_CHARS in a shipped seed is unrecoverable — the
+    // agent can never write, update or remove one this long (applyOps's own cap), so it
+    // would freeze that site's learning permanently from the moment the seed is copied in.
+    for (const bullet of allBullets.split('\n')) {
+      expect(bullet.length).toBeLessThanOrEqual(MAX_BULLET_CHARS);
+    }
     expect(scanForThreats(knowledgeForPrompt(k), 'strict')).toEqual([]);
   });
 });

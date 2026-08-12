@@ -826,34 +826,17 @@ describe('scanForThreats', () => {
     expect(performance.now() - start).toBeLessThan(250);
   });
 
-  /**
-   * The small measurement is averaged over eight scans rather than floored at 1ms. A floor
-   * silently understates the ratio on any machine fast enough to scan 128KB in under a
-   * millisecond, which is every machine this runs on — the bound then passes because the
-   * denominator was inflated, not because growth is linear.
-   */
-  it('scales linearly with input size rather than exploding', () => {
-    const measure = (kilobytes: number, repeats: number): number => {
-      const input = nearMissInput(kilobytes);
-      let best = Infinity;
-      for (let run = 0; run < 3; run += 1) {
-        const start = performance.now();
-        for (let repeat = 0; repeat < repeats; repeat += 1) {
-          scanForThreats(input, 'strict');
-        }
-        best = Math.min(best, (performance.now() - start) / repeats);
-      }
-      return best;
-    };
-    measure(64, 1);
-    const small = measure(128, 8);
-    const large = measure(1024, 1);
-    // A zero here would make the ratio meaningless rather than failing, so it is asserted.
-    expect(small).toBeGreaterThan(0);
-    // Eight times the input. Measured ratio is 8.0; the bound allows growth up to input^1.3,
-    // which is well under the input^2 a backtracking blow-up would show.
-    expect(large / small).toBeLessThan(14);
-  });
+  // M-07: this file used to also assert a wall-clock ratio (large/small input timing) to
+  // pin down linear-not-quadratic growth. Under load (parallel vitest workers, a loaded
+  // CI box) the two measurements are not comparably noisy — `small` is averaged over 8
+  // repeats and stall-resistant, `large` is a single ~20ms min-of-3 sample one scheduler
+  // stall can inflate outright — and the ratio failed outright in a loaded-CPU probe while
+  // passing cleanly unloaded. The absolute-budget test above (250ms for 400KB of
+  // adversarial near-misses, ~30x headroom measured) already pins the thing that actually
+  // matters — the scanner has no backtracking blow-up on hostile input — without the
+  // false-failure risk a comparative timing assertion carries in CI. Dropped per the
+  // review's recommendation rather than widened, since a wider bound only postpones the
+  // same flakiness.
 });
 
 describe('stripInvisible', () => {
