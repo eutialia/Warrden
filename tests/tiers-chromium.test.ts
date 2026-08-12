@@ -24,7 +24,7 @@ const state = vi.hoisted(() => ({
 }));
 
 interface FakeRoute {
-  request: () => { url: () => string };
+  request: () => { url: () => string; isNavigationRequest: () => boolean };
   continue: () => Promise<void>;
   abort: (reason: string) => Promise<void>;
 }
@@ -36,7 +36,7 @@ vi.mock('playwright', () => {
       if (state.redirectTo === null) return { status: () => 200 };
       let aborted = false;
       await state.routeHandler?.({
-        request: () => ({ url: () => state.redirectTo! }),
+        request: () => ({ url: () => state.redirectTo!, isNavigationRequest: () => true }),
         continue: async () => {},
         abort: async () => {
           aborted = true;

@@ -255,12 +255,19 @@ class ChromiumTier implements FetchTier {
     // here verifies it — checking it needs a real browser and a real redirect, which the
     // test suite does not have. CurlTier's per-hop check is the one that is proven.
     await this.context.route('**/*', async (route) => {
-      const target = route.request().url();
+      const request = route.request();
+      const target = request.url();
       if (refusedDestination(target) === null) {
         await route.continue().catch(() => {});
         return;
       }
-      this.refusedHop = target;
+      // Every refused request is aborted (defense in depth), but only a refused NAVIGATION
+      // — the main request or one of its redirect hops — is recorded as `refusedHop`. A
+      // page subresource (image, script, xhr) that happens to point at a guarded address
+      // must not drive the fetch's refusal reporting: `refusedHop` is what abandons a
+      // download wait and what the loop counts toward REFUSAL_LIMIT, and a blocked
+      // subresource is neither a refused download nor a navigation aimed at the LAN.
+      if (request.isNavigationRequest()) this.refusedHop = target;
       await route.abort('blockedbyclient').catch(() => {});
     });
     return this.context;
