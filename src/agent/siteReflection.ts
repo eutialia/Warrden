@@ -176,6 +176,13 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  * 4. The text may not forge file structure (`FORGERY_CHECKS`) and is scanned at `'strict'`
  *    before it can land. Stored knowledge is replayed into a later system prompt, so a
  *    bullet is the one place an injection gets to persist past the page it came from.
+ *    Every one of these checks — forgery, scan, length — runs against the STAMPED,
+ *    de-stuffed candidate (`stamped(op.text, today)`, the exact bytes that get stored), not
+ *    against the raw `op.text`. `withoutStamp` deletes every `(confirmed YYYY-MM-DD)` found
+ *    anywhere in the text before the real stamp is appended, so a fake stamp buried in the
+ *    op is free padding at validation time — enough of it pushes a match past a
+ *    length-bounded scanner gap or hides a forged heading/bullet marker behind text that
+ *    never survives to the file. Validating what actually gets written closes that gap.
  * 5. An `add` whose text already exists in the section is refused, and so is an `update`
  *    whose result would. Two identical bullets make every later `update`/`remove`
  *    ambiguous, so a duplicate is not merely noise: it permanently locks both copies in
@@ -222,24 +229,30 @@ export function applyOps(
       continue;
     }
 
+    // The candidate is what actually lands in the file if this op is accepted — every
+    // validation below runs against THESE bytes, not the raw `op.text`, so a fake
+    // `(confirmed ...)` stamp buried in the op can't pad past a scanner gap or hide a
+    // forged heading/marker behind text that `withoutStamp` deletes before storage (C-01).
+    let candidate: string | undefined;
     if (op.op !== 'remove') {
       if (withoutStamp(op.text) === '') {
         drop(op, `${op.op} with no bullet text`);
         continue;
       }
+      candidate = stamped(op.text, opts.today);
       // Hostile checks run before the length cap: both refuse the write, but only one of
       // them raises the event to `attention`, and padding a forged heading past the cap
       // must not be able to buy silence.
-      const forgery = FORGERY_CHECKS.find((check) => check.test.test(op.text));
+      const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate!));
       if (forgery) {
         drop(op, forgery.why, true);
         continue;
       }
-      if (scanForThreats(op.text, 'strict').length > 0) {
+      if (scanForThreats(candidate, 'strict').length > 0) {
         drop(op, 'injection patterns in bullet', true);
         continue;
       }
-      if (op.text.length > MAX_BULLET_CHARS) {
+      if (candidate.length > MAX_BULLET_CHARS) {
         drop(op, `bullet text over ${MAX_BULLET_CHARS} characters`);
         continue;
       }
@@ -257,7 +270,7 @@ export function applyOps(
         drop(op, `${section} already has this bullet`);
         continue;
       }
-      knowledge.sections[section].push(stamped(op.text, opts.today));
+      knowledge.sections[section].push(candidate!);
       continue;
     }
 
@@ -298,7 +311,7 @@ export function applyOps(
       drop(op, `${section} already has this bullet`);
       continue;
     }
-    knowledge.sections[section][index] = stamped(op.text, opts.today);
+    knowledge.sections[section][index] = candidate!;
   }
 
   return { knowledge, dropped };
