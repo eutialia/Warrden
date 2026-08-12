@@ -55,6 +55,16 @@ export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): Tier
   return { make: (t) => makeTier(t, { cookieJar, fetchImpl: opts.fetchImpl }) };
 }
 
+/** What one `searchSite` call produced, whether or not it ended in a download. `outcome`
+ * lets a caller decide whether the run is worth reflecting on: `'cooldown'` means nothing
+ * ran at all (the site was skipped before any tier was tried), so it is the one value a
+ * caller should treat as "skip reflection" rather than "reflect on a failure". */
+export interface SiteRunResult {
+  download: { filePath: string; url: string } | null;
+  transcript: TranscriptEntry[];
+  outcome: 'downloaded' | 'gave-up' | 'exhausted' | 'cooldown' | 'error';
+}
+
 export interface SearchSiteDeps {
   tiers?: TierFactory;
   /** Overrides `defaultSeedsDir()`. Tests always set it, pointing at a fixture directory
@@ -115,10 +125,11 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
 /**
  * Runs the site-search agent for one site with full access-ladder orchestration: cooldown
  * check, then generic browse loop with tier escalation. Site-specific protocols live in
- * the site's knowledge file (injected into the loop prompt), not in code adapters. Returns the
- * downloaded file + its source URL, or null when the site couldn't produce one this run —
+ * the site's knowledge file (injected into the loop prompt), not in code adapters. Returns
+ * a `SiteRunResult` carrying the download (if any), the full transcript, and an outcome —
  * never throws (a broken site is a health event, not a job failure). The transcript lands
- * in `subtitle_runs` and streams live as `subtitle.transcript` events.
+ * in `subtitle_runs` and streams live as `subtitle.transcript` events, and is also handed
+ * back to the caller so it can be replayed into reflection.
  */
 export async function searchSite(
   ctx: AppContext,
@@ -127,7 +138,7 @@ export async function searchSite(
   query: string | SearchHints,
   destDir: string,
   deps: SearchSiteDeps = {},
-): Promise<{ filePath: string; url: string } | null> {
+): Promise<SiteRunResult> {
   // Fresh jar per invocation when using the real factory (each call builds a new one;
   // deps.tiers from tests is left alone).
   const tiers = deps.tiers ?? createRunTiers();
@@ -161,7 +172,7 @@ export async function searchSite(
       message: `Skipping ${siteLabel(site.baseUrl)} — in failure cooldown (${Math.round(cooldownMs / 60_000)}m backoff)`,
       data: targetEventData(job, { site: siteLabel(site.baseUrl) }),
     });
-    return null;
+    return { download: null, transcript: [], outcome: 'cooldown' };
   }
 
   const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, deps.seedsDir ?? defaultSeedsDir());
@@ -171,10 +182,14 @@ export async function searchSite(
   // indexOf === -1 → max(0, -1) === 0 in tierStartIndex.
   const startIdx = tierStartIndex(profile.last_working_tier, profile.last_success_at);
   const activeTiers: FetchTier[] = [];
+  // Every transcript entry this run produces, in order — handed back to the caller so
+  // reflection (Task 6) sees the same steps that landed in subtitle_runs.
+  const transcript: TranscriptEntry[] = [];
 
   /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
    * steps or by the runner's escalation handling. */
   const onTranscriptEvent = (entry: TranscriptEntry): void => {
+    transcript.push(entry);
     runs.appendTranscript(runId, [entry]);
     ctx.events.append({
       kind: 'subtitle.transcript',
@@ -194,7 +209,11 @@ export async function searchSite(
   };
 
   /** Persist a site-level failure (genuine error or every rung empty) and emit the event. */
-  const failSite = (kind: 'subtitle.site-failed' | 'subtitle.site-exhausted', message: string): null => {
+  const failSite = (
+    kind: 'subtitle.site-failed' | 'subtitle.site-exhausted',
+    message: string,
+    outcome: 'error' | 'exhausted' | 'gave-up',
+  ): SiteRunResult => {
     runs.finish(runId, 'failed');
     profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
     ctx.events.append({
@@ -204,10 +223,15 @@ export async function searchSite(
       message,
       data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
     });
-    return null;
+    return { download: null, transcript, outcome };
   };
 
   try {
+    // What the last rung's loop reported when it fell through (rather than erroring or
+    // refusing) — carried into the final "every rung came up empty" outcome so a caller can
+    // tell a deliberate give-up from a ladder that genuinely ran dry.
+    let lastAttemptOutcome: 'exhausted' | 'gave-up' = 'exhausted';
+
     for (let i = startIdx; i < TIER_ORDER.length; i++) {
       const tierName = TIER_ORDER[i]!;
       // make() lives inside the try so a factory throw cannot escape searchSite's
@@ -245,7 +269,7 @@ export async function searchSite(
             lastFailureAt: null,
             searchUrlPatterns: learned,
           });
-          return { filePath: outcome.filePath, url: outcome.url };
+          return { download: { filePath: outcome.filePath, url: outcome.url }, transcript, outcome: 'downloaded' };
         }
         if (outcome.kind === 'refused-repeatedly') {
           // The knowledge file (or the model reading it) keeps aiming at addresses the
@@ -255,14 +279,16 @@ export async function searchSite(
           return failSite(
             'subtitle.site-failed',
             `Site ${siteLabel(site.baseUrl)} failed: ${outcome.refusals} steps targeted a refused address`,
+            'error',
           );
         }
         // exhausted/gave-up: fall through to the next rung.
+        lastAttemptOutcome = outcome.kind === 'gave-up' ? 'gave-up' : 'exhausted';
       } catch (err) {
         if (!(err instanceof TierBlockedError)) {
           // A genuine error (bad LLM output after retries, FS failure, factory throw, ...)
           // is a site-level failure, not an escalation signal.
-          return failSite('subtitle.site-failed', `Site ${siteLabel(site.baseUrl)} failed: ${errorMessage(err)}`);
+          return failSite('subtitle.site-failed', `Site ${siteLabel(site.baseUrl)} failed: ${errorMessage(err)}`, 'error');
         }
         // TierBlockedError: note the wall in the run's transcript and try the next rung.
         onTranscriptEvent({ ts: Date.now(), tier: tierName, action: 'escalate', detail: errorMessage(err) });
@@ -273,6 +299,7 @@ export async function searchSite(
     return failSite(
       'subtitle.site-exhausted',
       `Site ${siteLabel(site.baseUrl)} produced no download across ${TIER_ORDER.length - startIdx} tier(s)`,
+      lastAttemptOutcome,
     );
   } finally {
     await Promise.all(activeTiers.map((t) => t.close()));

@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { searchSite } from '../../agent/run.js';
+import { reflectOnRun } from '../../agent/siteReflection.js';
 import type { AppContext } from '../../context.js';
 import { siteKey, siteLabel } from '../../config/siteLabel.js';
+import type { SubtitleSiteConfig } from '../../config/schema.js';
 import { ArchiveCache, type ArchiveCacheRow } from '../../db/archiveCache.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
 import { targetEventData } from '../../events/target.js';
@@ -32,6 +34,7 @@ import { findMissingSubtitles, langCovers } from './reconcile.js';
  * archive instead of running a real browser + LLM loop. */
 interface RunSubtitleDeps {
   searchSite?: typeof searchSite;
+  reflectOnRun?: typeof reflectOnRun;
 }
 
 /** One episode the pipeline is trying to cover: its on-disk video plus what's still missing
@@ -643,6 +646,7 @@ async function siteSearchPass(
   deps: RunSubtitleDeps,
 ): Promise<void> {
   const search = deps.searchSite ?? searchSite;
+  const reflect = deps.reflectOnRun ?? reflectOnRun;
   const sites = ctx.config.subtitle.sites;
   if (sites.length === 0) return; // missing-resolution emissions happen back in runSubtitleJob
 
@@ -656,48 +660,86 @@ async function siteSearchPass(
   for (const site of sites) {
     if (missing.length === 0) break;
 
-    const download = await search(ctx, job, site, hints, rawDir);
-    if (!download) continue; // site produced nothing this run (cooldown or no match)
+    const result = await search(ctx, job, site, hints, rawDir);
+    const verifiedSuccess = result.download
+      ? await extractAndMatch(ctx, job, site, result.download, seriesTitle, missing, media, placedFiles, refCache, refDir, rawDir, cache)
+      : false;
 
-    // Archives (zip/tar/rar/7z) or a lone .srt/.ass/.ssa — subhd sometimes serves single files.
-    if (!isIngestibleSubtitlePayload(download.filePath)) continue;
-
-    // Extract/copy into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
-    // the pack without re-downloading. Keyed uniquely so ArchiveCache's (target, path) upsert
-    // refreshes the same row rather than piling up duplicates.
-    const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${basename(download.filePath)}`);
-    let files: string[];
-    try {
-      files = await extractArchive(download.filePath, cacheDir);
-    } catch (err) {
-      if (err instanceof UnsupportedArchiveError) continue; // try the next site
-      throw err;
+    // A cooldown means the site never ran at all this job — nothing happened worth writing
+    // to its notes file. Every other outcome (a download that placed nothing, an archive
+    // that failed to extract, a give-up, a hard failure) is a completed run and reflects,
+    // with verifiedSuccess carrying whether it actually placed something.
+    if (result.outcome !== 'cooldown') {
+      await reflect({
+        ctx,
+        job,
+        site,
+        transcript: result.transcript,
+        verifiedSuccess,
+        today: new Date(Date.now()).toISOString().slice(0, 10),
+      });
     }
-    if (files.length === 0) continue;
-
-    const entries = entriesForFiles(files);
-    cache.upsert({
-      arrInstance: job.arr_instance,
-      targetKind: job.target_kind,
-      targetId: job.target_id,
-      sourceUrl: download.url,
-      path: cacheDir,
-      files: entries,
-    });
-
-    const row: ArchiveCacheRow = {
-      id: -1,
-      arr_instance: job.arr_instance,
-      target_kind: job.target_kind,
-      target_id: job.target_id,
-      source_url: download.url,
-      path: cacheDir,
-      files: entries,
-      created_at: Date.now(),
-    };
-    // matchArchiveRow drops fully-resolved episodes from `missing` itself.
-    await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, siteLabel(site.baseUrl));
   }
+}
+
+/** Extracts one site's downloaded payload into the archive cache and matches it against the
+ * still-missing episodes. Returns whether anything actually got placed this call —
+ * `matchArchiveRow`'s resolved-episode-ids list is the placement oracle, not "a download
+ * happened" or "extraction succeeded". `false` covers every non-placing case alike: not an
+ * ingestible payload, an archive format extractArchive can't open, an archive with nothing
+ * in it, or one that extracted fine but matched no missing episode. */
+async function extractAndMatch(
+  ctx: AppContext,
+  job: JobRow,
+  site: SubtitleSiteConfig,
+  download: { filePath: string; url: string },
+  seriesTitle: string,
+  missing: EpisodeTarget[],
+  media: MediaTools,
+  placedFiles: PlacedFiles,
+  refCache: Map<string, string>,
+  refDir: string,
+  rawDir: string,
+  cache: ArchiveCache,
+): Promise<boolean> {
+  if (!isIngestibleSubtitlePayload(download.filePath)) return false;
+
+  // Extract/copy into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
+  // the pack without re-downloading. Keyed uniquely so ArchiveCache's (target, path) upsert
+  // refreshes the same row rather than piling up duplicates.
+  const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${basename(download.filePath)}`);
+  let files: string[];
+  try {
+    files = await extractArchive(download.filePath, cacheDir);
+  } catch (err) {
+    if (err instanceof UnsupportedArchiveError) return false;
+    throw err;
+  }
+  if (files.length === 0) return false;
+
+  const entries = entriesForFiles(files);
+  cache.upsert({
+    arrInstance: job.arr_instance,
+    targetKind: job.target_kind,
+    targetId: job.target_id,
+    sourceUrl: download.url,
+    path: cacheDir,
+    files: entries,
+  });
+
+  const row: ArchiveCacheRow = {
+    id: -1,
+    arr_instance: job.arr_instance,
+    target_kind: job.target_kind,
+    target_id: job.target_id,
+    source_url: download.url,
+    path: cacheDir,
+    files: entries,
+    created_at: Date.now(),
+  };
+  // matchArchiveRow drops fully-resolved episodes from `missing` itself.
+  const resolved = await matchArchiveRow(ctx, job, row, missing, seriesTitle, media, placedFiles, refCache, refDir, rawDir, siteLabel(site.baseUrl));
+  return resolved.length > 0;
 }
 
 /** Replaces path-breaking chars in a filename so it can't escape the ref/resync dirs. */

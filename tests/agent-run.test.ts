@@ -139,7 +139,8 @@ describe('searchSite', () => {
     ]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).toEqual({ filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip' });
+    expect(out.download).toEqual({ filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip' });
+    expect(out.outcome).toBe('downloaded');
     expect(tiers.made).toEqual(['curl', 'chromium']);
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.last_working_tier).toBe('chromium');
@@ -155,7 +156,7 @@ describe('searchSite', () => {
 
     await withFakeTime(async () => {
       const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-      expect(out).toBeNull();
+      expect(out).toEqual({ download: null, transcript: [], outcome: 'cooldown' });
     });
     expect(tiers.made).toHaveLength(0);
     expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeDefined();
@@ -167,7 +168,8 @@ describe('searchSite', () => {
     const tiers = stubTiers([OK_HTML]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).toBeNull();
+    expect(out.download).toBeNull();
+    expect(out.outcome).toBe('error');
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.fail_count).toBe(1);
     expect(profile.last_failure_at).not.toBeNull();
@@ -188,7 +190,8 @@ describe('searchSite', () => {
     };
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).toBeNull();
+    expect(out.download).toBeNull();
+    expect(out.outcome).toBe('error');
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')).toBeDefined();
   });
 
@@ -203,7 +206,7 @@ describe('searchSite', () => {
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).not.toBeNull();
+    expect(out.download).not.toBeNull();
     const profile = profiles.get('https://acg.rip')!;
     expect(profile.fail_count).toBe(0);
     expect(profile.last_failure_at).toBeNull();
@@ -225,7 +228,7 @@ describe('searchSite', () => {
     const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).not.toBeNull();
+    expect(out.download).not.toBeNull();
     expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeUndefined();
   });
 
@@ -238,7 +241,7 @@ describe('searchSite', () => {
     const tiers = stubTiers([OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).not.toBeNull();
+    expect(out.download).not.toBeNull();
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.search_url_patterns).toEqual(['https://acg.rip/find?q=frieren']);
   });
@@ -262,23 +265,26 @@ describe('searchSite', () => {
       name: 'download success',
       llm: [act({ action: 'download', url: 'https://acg.rip/dl/1.zip', note: 'dl' })],
       results: [{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }],
-      expected: { filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/1.zip' },
+      expectedDownload: { filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/1.zip' },
+      expectedOutcome: 'downloaded',
     },
     {
-      name: 'give_up returns null after exhausting rungs',
+      name: 'give_up returns no download after exhausting rungs',
       llm: [
         act({ action: 'give_up', url: '', note: 'nothing on curl' }),
         act({ action: 'give_up', url: '', note: 'nothing on chromium' }),
       ],
       results: [],
-      expected: null,
+      expectedDownload: null,
+      expectedOutcome: 'gave-up',
     },
-  ])('adapter-free path: $name', async ({ llm, results, expected }) => {
+  ])('adapter-free path: $name', async ({ llm, results, expectedDownload, expectedOutcome }) => {
     const { ctx, job } = setup();
     ctx.llm = new FakeGenerator(llm);
     const tiers = stubTiers(results as FetchResult[]);
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out).toEqual(expected);
+    expect(out.download).toEqual(expectedDownload);
+    expect(out.outcome).toBe(expectedOutcome);
   });
 
   it('createRunTiers produces independent jars across two factory instances', async () => {
@@ -360,7 +366,7 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
 
-    expect(out).toBeNull();
+    expect(out.download).toBeNull();
     expect(hasEvent(ctx.events.list(), 'subtitle.knowledge-unreadable')).toBe(true);
     // The site ran normally, just without knowledge — not a hard failure over one file.
     expect(hasEvent(ctx.events.list(), 'subtitle.site-failed')).toBe(false);
@@ -377,7 +383,8 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
 
-    expect(out).toBeNull();
+    expect(out.download).toBeNull();
+    expect(out.outcome).toBe('error');
     expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')?.message).toContain('refused address');
   });

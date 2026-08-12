@@ -92,16 +92,26 @@ function claimSubtitleJob(fx: SubtitleFixture, opts?: { source?: string }) {
   });
 }
 
-/** A `runSubtitleJob` `deps` stub: `searchSite` returns a zip pack built from `files`. */
+/** A `runSubtitleJob` `deps` stub: `searchSite` returns a downloaded zip pack built from
+ * `files`, as a completed (`'downloaded'`) `SiteRunResult` with an empty transcript. */
 function siteStub(files: Record<string, string>) {
   const zipPath = makeZip(files);
   return {
-    searchSite: async () => ({ filePath: zipPath, url: 'https://example.test/pack.zip' }),
+    searchSite: async () => ({ download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], outcome: 'downloaded' as const }),
   };
 }
 
 /** A deps stub that fails the test if the runner ever calls the real site search. */
 const NO_SITES = { searchSite: async () => { throw new Error('searchSite must not be called'); } };
+
+/** A `reflectOnRun` stub that records every call's `verifiedSuccess` and returns a fixed
+ * verdict — the reflection tests' spy. */
+function reflectSpy(calls: Array<{ verifiedSuccess: boolean }>) {
+  return async (input: { verifiedSuccess: boolean }) => {
+    calls.push({ verifiedSuccess: input.verifiedSuccess });
+    return { verdict: 'usable' as const, reason: 'ok' };
+  };
+}
 
 // The fixture's library holds one video (S01E05), so a candidate named `Show - S01E05.ass`
 // parses to { season: null, episode: 5 } and deterministically matches it via the
@@ -362,5 +372,48 @@ describe('runSubtitleJob', () => {
     expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(false);
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(2);
+  });
+
+  it('reflects with a verified success only when the archive placed something', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      ...siteStub(PACK), // deterministically matches the fixture's only missing episode
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: true }]);
+  });
+
+  it('reflects with an unverified outcome when the archive placed nothing', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    fx.ctx.llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: null }], reasoning: 'no episode matches' }]);
+    const job = claimSubtitleJob(fx);
+    // "Bonus.ass" carries no season/episode marker, so it never matches deterministically —
+    // it falls to the LLM remainder pass, which (per the fixture above) maps it to nothing.
+    // A real archive that extracts and reaches matching, not just a null download.
+    await runSubtitleJob(fx.ctx, job, {
+      ...siteStub({ 'Bonus.ass': SRT }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: false }]);
+  });
+
+  it('skips reflection entirely when the site was on cooldown', async () => {
+    let called = false;
+    const fx = subtitleFixture();
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], outcome: 'cooldown' as const }),
+      reflectOnRun: async () => {
+        called = true;
+        return null;
+      },
+    });
+
+    expect(called).toBe(false);
   });
 });
