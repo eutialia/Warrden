@@ -468,6 +468,17 @@ describe('prompt rendering', () => {
     expect(prompt).not.toContain('Operator notes');
   });
 
+  // M-04: a notes section holding nothing but whitespace counts as empty, not as a stub
+  // worth injecting under the "authoritative" header — the exact thing the design says
+  // never to show the model.
+  it('treats whitespace-only operator notes as empty, not as a stub worth injecting', () => {
+    const k = emptyKnowledge('https://x.test');
+    k.operatorNotes = '   \n\n  ';
+    const prompt = knowledgeForPrompt(k);
+    expect(prompt).not.toContain('Operator notes');
+    expect(prompt).toBe('');
+  });
+
   it('marks operator notes authoritative when present', () => {
     const k = parseKnowledge('https://subhd.tv', SAMPLE);
     const prompt = knowledgeForPrompt(k);
