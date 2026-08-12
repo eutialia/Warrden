@@ -195,6 +195,12 @@ export function attentionKindLabel(kind: string): string {
       return 'Bad subtitle file';
     case 'job.attention':
       return 'Job failed';
+    case 'subtitle.site-unusable':
+      return 'Site unusable';
+    case 'subtitle.knowledge-refused':
+      return 'Knowledge refused';
+    case 'subtitle.knowledge-dropped':
+      return 'Knowledge edits refused';
     default:
       // Fall back to a cleaned kind rather than raw dotted agent speech.
       return kind.replace(/[._]/g, ' ');
