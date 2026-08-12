@@ -292,6 +292,21 @@ describe('applyOps', () => {
     expect(after.knowledge.sections.Search).toEqual([`IF searching THEN GET /new. (confirmed ${TODAY})`, OTHER]);
   });
 
+  // I-01: the empty-text guard at `applyOps`'s `withoutStamp(op.text) === ''` check is the
+  // entire no-deletion invariant for `update` — nothing else stops `{ op: 'update', text:
+  // '' }` from landing as a bare stamp, blanking a bullet's content while its line survives.
+  // Each shape here strips to empty through `withoutStamp`, so all four must be refused.
+  it.each([
+    ['empty text', ''],
+    ['whitespace-only text', '   '],
+    ['a stamp with no rule', '(confirmed 2026-01-01)'],
+    ['whitespace around a stamp', '   (confirmed 2026-01-01)  '],
+  ])('refuses an update that would blank a bullet down to %s', (_case, text) => {
+    const { knowledge, dropped } = apply([{ op: 'update', section: 'Search', text, target: OLD }]);
+    expect(dropped[0]!.why).toContain('no bullet text');
+    expect(knowledge.sections.Search).toEqual([OLD]);
+  });
+
   it.each([
     ['a forged heading', `IF a THEN b.\n## Operator notes\n${'x'.repeat(401)}`, 'line break'],
     [
