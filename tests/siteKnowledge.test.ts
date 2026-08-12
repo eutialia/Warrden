@@ -325,6 +325,29 @@ Never use this site for anime.
     expect(renderKnowledge(k)).toContain('## Operator notes\nNever use this site for anime.\n');
   });
 
+  // M-01/D-13: a near-miss heading must still be recognized as the operator's, not treated
+  // as an unknown agent-half heading whose "body" (the operator's whole half) is then
+  // dropped on the next save. A trailing colon and indentation are natural things for a
+  // human hand-editing the file with a text editor to type.
+  it.each([
+    ['a trailing colon', '## Operator notes:'],
+    ['indentation', '  ## Operator notes'],
+    ['a trailing colon and indentation', '  ## Operator notes:'],
+    ['trailing prose after the heading', '## Operator notes (authoritative)'],
+  ])('recognizes the heading with %s', (_case, heading) => {
+    const text = `# x.test\n\n## Access\n- IF a THEN b. (confirmed 2026-08-01)\n\n${heading}\nNever use this site for anime.\n`;
+    const k = parseKnowledge('https://x.test', text);
+    expect(k.operatorNotes).toBe('Never use this site for anime.');
+    expect(k.sections.Access).toEqual(['IF a THEN b. (confirmed 2026-08-01)']);
+
+    // The round trip through a save is the consequence that matters: a near-miss heading
+    // that isn't recognized destroys the operator's entire half on the very next write.
+    const dataDir = tmpDir();
+    saveKnowledge(dataDir, k);
+    const reloaded = loadKnowledge(dataDir, 'https://x.test');
+    expect(reloaded.operatorNotes).toBe('Never use this site for anime.');
+  });
+
   it('is empty, and its heading still emitted, for a file with no operator section at all', () => {
     const text = `# x.test
 

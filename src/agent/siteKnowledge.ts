@@ -70,10 +70,14 @@ const CONFIRMED_RE = /\(confirmed (\d{4}-\d{2}-\d{2})\)/;
 const FENCE_RE = /^```/;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-/** The line that hands the rest of the file to the human. Matched case-insensitively so a
- * file written `## Operator Notes` is still recognized as the operator's — the alternative
- * is parsing their notes as an unknown section and dropping them on the next save. */
-const OPERATOR_HEADING_RE = /^##\s+operator notes\s*$/i;
+/** The line that hands the rest of the file to the human. Matched case-insensitively, with
+ * a variable-width `#{2,6}` run, optional leading indentation, and anything at all after
+ * the words (a colon, "(authoritative)", whatever a human typed) so a file written
+ * `## Operator Notes`, `## Operator notes:`, `  ## Operator notes`, or `### Operator notes`
+ * is still recognized as the operator's. Getting this wrong is not cosmetic: an
+ * unrecognized heading is parsed as an unknown agent-half heading, which silently drops the
+ * operator's ENTIRE half — the one part of the file a human owns — on the very next save. */
+const OPERATOR_HEADING_RE = /^\s*#{2,6}\s+operator\s+notes\b.*$/i;
 
 /** How `renderKnowledge` always spells that heading, whatever case the file used. */
 const OPERATOR_HEADING = '## Operator notes';
