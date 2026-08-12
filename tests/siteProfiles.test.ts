@@ -11,8 +11,9 @@ describe('SiteProfiles', () => {
       base_url: 'https://acg.rip',
       last_working_tier: null,
       search_url_patterns: [],
-      notes: '',
       fail_count: 0,
+      disabled_at: null,
+      disabled_reason: '',
     });
   });
 
@@ -27,8 +28,21 @@ describe('SiteProfiles', () => {
   it('update patches only the given fields', () => {
     const profiles = new SiteProfiles(freshDb());
     profiles.upsert({ baseUrl: 'https://acg.rip' });
-    profiles.update('https://acg.rip', { failCount: 3, notes: 'cloudflare on curl' });
-    expect(profiles.get('https://acg.rip')).toMatchObject({ fail_count: 3, notes: 'cloudflare on curl', last_working_tier: null });
+    profiles.update('https://acg.rip', { failCount: 3, searchUrlPatterns: ['https://acg.rip/?q={query}'] });
+    expect(profiles.get('https://acg.rip')).toMatchObject({
+      fail_count: 3,
+      search_url_patterns: ['https://acg.rip/?q={query}'],
+      last_working_tier: null,
+    });
+  });
+
+  it('update sets and clears the disabled flag', () => {
+    const profiles = new SiteProfiles(freshDb());
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { disabledAt: 1000, disabledReason: 'bot wall' });
+    expect(profiles.get('https://acg.rip')).toMatchObject({ disabled_at: 1000, disabled_reason: 'bot wall' });
+    profiles.update('https://acg.rip', { disabledAt: null, disabledReason: '' });
+    expect(profiles.get('https://acg.rip')).toMatchObject({ disabled_at: null, disabled_reason: '' });
   });
 
   it('lists all profiles ordered by url', () => {

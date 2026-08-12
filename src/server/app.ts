@@ -148,17 +148,14 @@ const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).option
 
 // Dashboard edits to a site profile — every field optional so a partial PUT only touches
 // what the client sent. `lastWorkingTier` is the full AccessTier union or explicit null
-// (clears the "known-good" tier), `searchUrlPatterns` capped at 5 non-empty entries,
-// `notes` at 8000 chars so an operator can paste a full site-protocol walkthrough without
-// hitting a too-tight ceiling (still bounded so a runaway paste can't inflate the row).
-// The browse agent no longer reads this column — it reads the operator section of the
-// site's knowledge file — so what lands here is stored and shown, nothing more, until the
-// dashboard is moved over to that file. `failCount` is the accessible reset seam: PUT
-// `{ failCount: 0 }` clears the escalation/backoff bookkeeping.
+// (clears the "known-good" tier), `searchUrlPatterns` capped at 5 non-empty entries.
+// `failCount` is the accessible reset seam: PUT `{ failCount: 0 }` clears the
+// escalation/backoff bookkeeping. `disabledAt`/`disabledReason` are not writable here —
+// those flow only through the attention accept/dismiss routes below, which are the
+// evidence-gated path onto and off of "this site cannot be automated".
 const SiteProfileUpdateSchema = z.object({
   /** Which site to write to — its base URL, the only identity a site has. */
   baseUrl: z.url(),
-  notes: z.string().max(8000).optional(),
   lastWorkingTier: z.enum(['curl', 'chromium', 'camoufox', 'remote']).nullable().optional(),
   searchUrlPatterns: z.array(z.string().min(1)).max(5).optional(),
   failCount: z.number().int().min(0).optional(),
@@ -190,6 +187,12 @@ export const AcceptDataSchema = z.object({
   instance: z.string(),
   files: z.array(AcceptFileSchema).min(1),
 });
+
+// What `raiseUnusable` (`src/pipelines/subtitle/run.ts`) puts in a `subtitle.site-unusable`
+// attention item's `data` — the accept endpoint below only ever re-executes exactly this
+// shape. Server-side input validation, not an LLM-facing schema, so `.min()`/optionality
+// conventions elsewhere in the codebase don't apply here.
+const DisableSiteSchema = z.object({ action: z.literal('disable-site'), baseUrl: z.url(), reason: z.string() });
 
 /**
  * Reads the *current* config directly off `ctx` rather than a value captured once at
@@ -449,6 +452,18 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!item) return c.json({ error: 'attention item not found' }, 404);
       if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
       attentionItems.setStatus(id, 'dismissed');
+      // Dismissing a site-unusable verdict is "keep trying this site" — clear the disabled
+      // flag (never set in the first place unless a PRIOR accept was itself later undone)
+      // and failCount, so the site gets a clean retry rather than sitting in cooldown from
+      // whatever run raised the verdict.
+      if (item.kind === 'subtitle.site-unusable') {
+        const disableSite = DisableSiteSchema.safeParse(item.data);
+        if (disableSite.success) {
+          const profiles = new SiteProfiles(db);
+          profiles.upsert({ baseUrl: disableSite.data.baseUrl });
+          profiles.update(disableSite.data.baseUrl, { disabledAt: null, disabledReason: '', failCount: 0 });
+        }
+      }
       events.append({ kind: 'attention.dismissed', message: `Dismissed attention item #${id} (${item.kind})`, data: { id, kind: item.kind } });
       return c.json({ ok: true });
     });
@@ -530,6 +545,24 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       inFlightAccepts.add(id);
 
       try {
+        // A site-unusable item's accept is a second shape this same route honours, rather
+        // than a second route: "resolve this attention item by doing what it proposes" is
+        // one action regardless of which proposal it is.
+        const disableSite = DisableSiteSchema.safeParse(item.data);
+        if (disableSite.success) {
+          const { baseUrl, reason } = disableSite.data;
+          const profiles = new SiteProfiles(db);
+          profiles.upsert({ baseUrl });
+          profiles.update(baseUrl, { disabledAt: Date.now(), disabledReason: reason });
+          attentionItems.setStatus(id, 'resolved');
+          events.append({
+            kind: 'attention.accepted',
+            message: `Accepted disable-site for attention item #${id} (${item.kind}) — ${baseUrl}`,
+            data: { id, kind: item.kind, baseUrl },
+          });
+          return c.json({ ok: true });
+        }
+
         // Only ever re-executes exactly the `bundle-import` shape `runIngestJob`'s rescue
         // stage itself proposed — validated before the client is even looked up, so a
         // malformed payload never gets as far as touching the arr.
@@ -595,10 +628,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         base_url: baseUrl,
         last_working_tier: null,
         search_url_patterns: [],
-        notes: '',
         last_success_at: null,
         last_failure_at: null,
         fail_count: 0,
+        disabled_at: null,
+        disabled_reason: '',
         created_at: now,
       };
     }

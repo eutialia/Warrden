@@ -86,10 +86,13 @@ export interface SiteProfileRow {
   base_url: string;
   last_working_tier: AccessTier | null;
   search_url_patterns: string[];
-  notes: string;
   last_success_at: number | null;
   last_failure_at: number | null;
   fail_count: number;
+  /** Set once a human accepted the agent's "this site cannot be automated" verdict — the
+   * site-search pass skips it entirely. Cleared by dismissing that attention item. */
+  disabled_at: number | null;
+  disabled_reason: string;
   created_at: number;
 }
 
@@ -122,7 +125,6 @@ export interface SiteProfileUpdate {
   /** Which site to write to. A URL cannot survive a path segment, so it travels in
    * the body. */
   baseUrl: string;
-  notes?: string;
   lastWorkingTier?: AccessTier | null;
   searchUrlPatterns?: string[];
   failCount?: number;

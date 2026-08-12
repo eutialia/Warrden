@@ -43,7 +43,6 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Textarea } from '@/components/ui/textarea';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { siteLabel, tierLabel } from '@/lib/labels';
@@ -80,8 +79,6 @@ export default function Sites() {
 
   const [draft, setDraft] = useState<SiteDraft | null>(null);
   const [removing, setRemoving] = useState<SubtitleSite | null>(null);
-  const [notesFor, setNotesFor] = useState<SiteProfileRow | null>(null);
-  const [notesDraft, setNotesDraft] = useState('');
 
   // Whether the two tag fields hold edits nobody has saved yet. Held in a ref because
   // `refetch` runs on a 45-second heartbeat and on every server event: re-seeding the
@@ -176,18 +173,6 @@ export default function Sites() {
       `Removed ${siteLabel(removing.baseUrl)}`,
     );
     if (ok) setRemoving(null);
-  }
-
-  async function saveNotes(): Promise<void> {
-    if (!notesFor) return;
-    try {
-      const updated = await updateSiteProfile({ baseUrl: notesFor.base_url, notes: notesDraft });
-      setProfiles((prev) => prev.map((p) => (p.base_url === updated.base_url ? updated : p)));
-      setNotesFor(null);
-      toast.success('Notes saved');
-    } catch (err) {
-      toast.error(apiErrorMessage(err, 'Failed to save notes'));
-    }
   }
 
   async function clearFailures(row: SiteProfileRow): Promise<void> {
@@ -350,23 +335,6 @@ export default function Sites() {
                       <span>Last success: {formatRelativeTime(profile?.last_success_at ?? null)}</span>
                       <span>Last failure: {formatRelativeTime(profile?.last_failure_at ?? null)}</span>
                     </div>
-
-                    <div className="mt-3 flex items-start gap-2 border-t pt-3">
-                      <p className="min-w-0 flex-1 text-xs whitespace-pre-wrap text-muted-foreground">
-                        {profile?.notes || 'No notes. Notes are stored with the site; the browse agent does not read them yet.'}
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!profile}
-                        onClick={() => {
-                          setNotesFor(profile!);
-                          setNotesDraft(profile!.notes);
-                        }}
-                      >
-                        Edit notes
-                      </Button>
-                    </div>
                   </div>
                 );
               })}
@@ -416,23 +384,6 @@ export default function Sites() {
             <Button disabled={saving} onClick={() => void saveSite()}>
               {saving ? 'Saving…' : draft?.original ? 'Save changes' : 'Add site'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Notes */}
-      <Dialog open={notesFor !== null} onOpenChange={(open) => !open && setNotesFor(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Notes for {notesFor && siteLabel(notesFor.base_url)}</DialogTitle>
-            <DialogDescription>
-              Injected into the browse agent's prompt for this site — quirks, working search patterns, things to avoid.
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea rows={6} autoFocus value={notesDraft} onChange={(e) => setNotesDraft(e.target.value)} />
-          <DialogFooter>
-            <DialogClose render={<Button variant="ghost">Cancel</Button>} />
-            <Button onClick={() => void saveNotes()}>Save notes</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

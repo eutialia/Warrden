@@ -3,7 +3,9 @@ import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { describe, expect, it } from 'vitest';
 import { ArchiveCache } from '../src/db/archiveCache.js';
+import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
+import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { REFLECT_CALLSITE } from '../src/agent/siteReflection.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
@@ -488,5 +490,49 @@ describe('runSubtitleJob', () => {
     ).rejects.toThrow();
 
     expect(calls).toEqual([{ verifiedSuccess: false }]);
+  });
+
+  it('raises one deduped attention item carrying the reason and evidence', async () => {
+    const fx = subtitleFixture();
+    const job = claimSubtitleJob(fx);
+    const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
+    const deps = {
+      searchSite: async () => ({ download: null, transcript, outcome: 'exhausted' as const }),
+      reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
+    };
+    await runSubtitleJob(fx.ctx, job, deps);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    const items = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.site-unusable');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.data.reason).toContain('Cloudflare');
+    expect(JSON.stringify(items[0]!.data)).toContain('403');
+  });
+
+  it('skips a disabled site without spending a run', async () => {
+    const fx = subtitleFixture();
+    new SiteProfiles(fx.ctx.db).upsert({ baseUrl: 'https://acg.rip' });
+    new SiteProfiles(fx.ctx.db).update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'bot wall' });
+    const job = claimSubtitleJob(fx);
+    let ran = false;
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => {
+        ran = true;
+        return { download: null, transcript: [], outcome: 'gave-up' as const };
+      },
+    });
+    expect(ran).toBe(false);
+  });
+
+  it('falls through to the normal unresolved resolution, with no extra event spam, when every configured site is disabled', async () => {
+    const fx = subtitleFixture();
+    new SiteProfiles(fx.ctx.db).upsert({ baseUrl: 'https://acg.rip' });
+    new SiteProfiles(fx.ctx.db).update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'bot wall' });
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    const attentionEvents = fx.ctx.events.list({ level: 'attention' });
+    expect(hasEvent(attentionEvents, 'subtitle.unresolved')).toBe(true);
+    expect(hasEvent(attentionEvents, 'subtitle.site-unusable')).toBe(false);
   });
 });

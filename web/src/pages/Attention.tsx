@@ -73,6 +73,25 @@ function bundleImportData(item: AttentionItem): BundleImportData | null {
   };
 }
 
+interface DisableSiteData {
+  baseUrl: string;
+  reason: string;
+  tiersAttempted: string[];
+  evidence: string[];
+}
+
+function disableSiteData(item: AttentionItem): DisableSiteData | null {
+  const data = item.data;
+  if (data.action !== 'disable-site' || typeof data.baseUrl !== 'string' || typeof data.reason !== 'string') return null;
+  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  return {
+    baseUrl: data.baseUrl,
+    reason: data.reason,
+    tiersAttempted: strings(data.tiersAttempted),
+    evidence: strings(data.evidence),
+  };
+}
+
 function basename(path: string): string {
   return path.split('/').pop() || path;
 }
@@ -222,6 +241,7 @@ export default function Attention() {
           const canRetry = item.job_id !== null;
           const canRepick = item.job_id !== null && item.kind.startsWith('acquire.');
           const bundleImport = bundleImportData(item);
+          const disableSite = disableSiteData(item);
           const tone = attentionKindTone(item.kind);
           const title = attentionTitle(item);
           const fileCount = bundleImport?.fileCount ?? bundleImport?.files.length ?? 0;
@@ -297,6 +317,26 @@ export default function Attention() {
                   </Collapsible>
                 )}
 
+                {disableSite && (
+                  <div className="space-y-2 border-t pt-3 text-xs">
+                    <p>
+                      <span className="font-medium text-foreground">{disableSite.baseUrl}</span> — {disableSite.reason}
+                    </p>
+                    {disableSite.tiersAttempted.length > 0 && (
+                      <p className="text-muted-foreground">Tiers attempted: {disableSite.tiersAttempted.join(', ')}</p>
+                    )}
+                    {disableSite.evidence.length > 0 && (
+                      <ul className="ml-3 list-disc space-y-0.5 text-muted-foreground">
+                        {disableSite.evidence.map((line, i) => (
+                          <li key={i} className="break-all">
+                            {line}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
                 {item.resolved_at !== null && (
                   <p className="text-xs text-muted-foreground">Closed {formatRelativeTime(item.resolved_at)}</p>
                 )}
@@ -313,6 +353,17 @@ export default function Attention() {
                         }
                       >
                         Approve import
+                      </Button>
+                    )}
+                    {disableSite && (
+                      <Button
+                        size="sm"
+                        disabled={pending}
+                        onClick={() =>
+                          void runAction(item.id, () => acceptAttention(item.id), 'Site disabled', 'Failed to disable site')
+                        }
+                      >
+                        Disable site
                       </Button>
                     )}
                     {canRepick && (

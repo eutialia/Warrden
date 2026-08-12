@@ -482,6 +482,63 @@ describe('app', () => {
       expect(res.status).toBe(500);
       expect(attentionItems.get(item.id)!.status).toBe('open');
     });
+
+    it.each([
+      ['accept', 'accept', true],
+      ['dismiss', 'dismiss', false],
+    ])('%s on a site-unusable item sets the disabled flag accordingly', async (_l, route, expectDisabled) => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      ctx.events.append({
+        kind: 'subtitle.site-unusable',
+        level: 'attention',
+        message: 'x.test cannot be automated',
+        data: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' },
+      });
+      const id = new AttentionItems(ctx.db).list({ status: 'open' })[0]!.id;
+
+      const res = await app.request(`/api/attention/${id}/${route}`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(new SiteProfiles(ctx.db).get('https://x.test')!.disabled_at === null).toBe(!expectDisabled);
+    });
+
+    it('accept on a site-unusable item marks it resolved and appends attention.accepted', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      ctx.events.append({
+        kind: 'subtitle.site-unusable',
+        level: 'attention',
+        message: 'x.test cannot be automated',
+        data: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' },
+      });
+      const attentionItems = new AttentionItems(ctx.db);
+      const item = attentionItems.list({ status: 'open' })[0]!;
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+      expect(findEvent(ctx.events.list(), 'attention.accepted')).toMatchObject({
+        data: { id: item.id, kind: 'subtitle.site-unusable', baseUrl: 'https://x.test' },
+      });
+    });
+
+    it('dismiss on a site-unusable item also clears failCount for a clean retry', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      new SiteProfiles(ctx.db).upsert({ baseUrl: 'https://x.test' });
+      new SiteProfiles(ctx.db).update('https://x.test', { failCount: 4 });
+      ctx.events.append({
+        kind: 'subtitle.site-unusable',
+        level: 'attention',
+        message: 'x.test cannot be automated',
+        data: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' },
+      });
+      const item = new AttentionItems(ctx.db).list({ status: 'open' })[0]!;
+
+      const res = await app.request(`/api/attention/${item.id}/dismiss`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(new SiteProfiles(ctx.db).get('https://x.test')).toMatchObject({ disabled_at: null, disabled_reason: '', fail_count: 0 });
+    });
   });
 
   describe('managed objects routes', () => {
@@ -643,14 +700,13 @@ describe('app', () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
       const profiles = new SiteProfiles(ctx.db);
       profiles.upsert({ baseUrl: 'https://acg.rip' });
-      profiles.update('https://acg.rip', { notes: 'cf on curl', lastWorkingTier: 'curl', failCount: 3 });
+      profiles.update('https://acg.rip', { lastWorkingTier: 'curl', failCount: 3 });
       const app = createApp(ctx);
 
       const res: any = await (await app.request('/api/site-profiles')).json();
       expect(res.profiles).toHaveLength(1);
       expect(res.profiles[0]).toMatchObject({
         base_url: 'https://acg.rip',
-        notes: 'cf on curl',
         last_working_tier: 'curl',
         fail_count: 3,
       });
@@ -665,31 +721,36 @@ describe('app', () => {
       expect(res.profiles).toHaveLength(1);
       expect(res.profiles[0]).toMatchObject({
         base_url: 'https://acg.rip',
-        notes: '',
         fail_count: 0,
         last_working_tier: null,
         search_url_patterns: [],
+        disabled_at: null,
+        disabled_reason: '',
       });
     });
 
-    it('PUT /api/site-profiles updates notes and tier (partial body)', async () => {
+    it('PUT /api/site-profiles updates tier and search patterns (partial body)', async () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
       const app = createApp(ctx);
 
       const res = await app.request('/api/site-profiles', {
         method: 'PUT',
         headers: jsonHeaders,
-        body: JSON.stringify({ baseUrl: 'https://acg.rip', notes: 'cf on curl', lastWorkingTier: 'chromium' }),
+        body: JSON.stringify({
+          baseUrl: 'https://acg.rip',
+          lastWorkingTier: 'chromium',
+          searchUrlPatterns: ['https://acg.rip/?q={query}'],
+        }),
       });
       expect(res.status).toBe(200);
 
       // The response body is the post-update row — the dashboard swaps its table row with it.
       const body = await res.json();
-      expect(body).toMatchObject({ notes: 'cf on curl', last_working_tier: 'chromium' });
+      expect(body).toMatchObject({ last_working_tier: 'chromium', search_url_patterns: ['https://acg.rip/?q={query}'] });
 
       const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
-      expect(profile.notes).toBe('cf on curl');
       expect(profile.last_working_tier).toBe('chromium');
+      expect(profile.search_url_patterns).toEqual(['https://acg.rip/?q={query}']);
       expect(profile.fail_count).toBe(0); // untouched by the partial body
     });
 
@@ -700,7 +761,7 @@ describe('app', () => {
       const res = await app.request('/api/site-profiles/nope', {
         method: 'PUT',
         headers: jsonHeaders,
-        body: JSON.stringify({ notes: 'x' }),
+        body: JSON.stringify({ failCount: 0 }),
       });
       expect(res.status).toBe(404);
     });

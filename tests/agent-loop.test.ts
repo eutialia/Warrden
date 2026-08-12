@@ -365,14 +365,13 @@ describe('runAgentLoop', () => {
     expect(tier.calls[0]!.opts).toMatchObject({ destPath: expect.any(String), referer: 'https://acg.rip/t/123' });
   });
 
-  it('injects rendered knowledge and no longer reads profile notes', async () => {
+  it('injects rendered knowledge into the prompt', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'done' })]);
-    const profile = { ...PROFILE, notes: 'SHOULD NOT APPEAR' };
     await runAgentLoop({
       llm,
       tier: fakeTier([]),
       site: SITE,
-      profile,
+      profile: PROFILE,
       knowledge: 'Site knowledge:\n- IF searching THEN GET /s. (confirmed 2026-08-10)',
       query: 'F',
       destDir: tmpDir(),
@@ -381,7 +380,6 @@ describe('runAgentLoop', () => {
     });
     const { system } = llm.calls[0]!;
     expect(system).toContain('IF searching THEN GET /s.');
-    expect(system).not.toContain('SHOULD NOT APPEAR');
   });
 
   it('injects nothing when knowledge is empty (no stray heading)', async () => {

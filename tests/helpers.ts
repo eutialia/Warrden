@@ -151,10 +151,11 @@ export function defaultProfileRow(baseUrl: string, overrides?: Partial<SiteProfi
     base_url: baseUrl,
     last_working_tier: null,
     search_url_patterns: [],
-    notes: '',
     last_success_at: null,
     last_failure_at: null,
     fail_count: 0,
+    disabled_at: null,
+    disabled_reason: '',
     created_at: 0,
     ...overrides,
   };

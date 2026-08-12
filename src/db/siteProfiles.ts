@@ -10,10 +10,14 @@ export interface SiteProfileRow {
   base_url: string;
   last_working_tier: AccessTier | null;
   search_url_patterns: string[];
-  notes: string;
   last_success_at: number | null;
   last_failure_at: number | null;
   fail_count: number;
+  /** When set, a human accepted the agent's verdict that this site cannot be automated —
+   * the site-search pass skips it entirely, before spending a run on it. `null` while the
+   * site is in play, whether or not it has ever failed. */
+  disabled_at: number | null;
+  disabled_reason: string;
   created_at: number;
 }
 
@@ -29,18 +33,21 @@ export interface UpdateSiteProfileInput {
   /** `null` clears the stored known-good tier (dashboard "forget this floor"). */
   lastWorkingTier?: AccessTier | null;
   searchUrlPatterns?: string[];
-  notes?: string;
   lastSuccessAt?: number | null;
   lastFailureAt?: number | null;
   failCount?: number;
+  /** `null` clears the disabled flag (a dismissed site-unusable item, or a re-enable). */
+  disabledAt?: number | null;
+  disabledReason?: string;
 }
 
 /**
  * Typed wrapper over the `site_profiles` table — the browser agent's memory: one row per
  * configured subtitle site, carrying the cheapest tier known to work, any search-URL
- * patterns it discovered, freeform quirk notes, and success/failure bookkeeping that drives
- * both the escalation floor and the cooldown between runs. Dashboard-editable (the Sites
- * view), so nothing here assumes the writer is the agent.
+ * patterns it discovered, and success/failure bookkeeping that drives both the escalation
+ * floor and the cooldown between runs. Prose knowledge lives in a per-site markdown file
+ * instead (`src/agent/siteKnowledge.ts`), not here. Dashboard-editable (the Sites view), so
+ * nothing here assumes the writer is the agent.
  */
 export class SiteProfiles {
   constructor(private readonly db: Database.Database) {}
@@ -69,10 +76,11 @@ export class SiteProfiles {
     const params: unknown[] = [];
     if (patch.lastWorkingTier !== undefined) { sets.push('last_working_tier = ?'); params.push(patch.lastWorkingTier); }
     if (patch.searchUrlPatterns !== undefined) { sets.push('search_url_patterns = ?'); params.push(JSON.stringify(patch.searchUrlPatterns)); }
-    if (patch.notes !== undefined) { sets.push('notes = ?'); params.push(patch.notes); }
     if (patch.lastSuccessAt !== undefined) { sets.push('last_success_at = ?'); params.push(patch.lastSuccessAt); }
     if (patch.lastFailureAt !== undefined) { sets.push('last_failure_at = ?'); params.push(patch.lastFailureAt); }
     if (patch.failCount !== undefined) { sets.push('fail_count = ?'); params.push(patch.failCount); }
+    if (patch.disabledAt !== undefined) { sets.push('disabled_at = ?'); params.push(patch.disabledAt); }
+    if (patch.disabledReason !== undefined) { sets.push('disabled_reason = ?'); params.push(patch.disabledReason); }
     if (sets.length === 0) return;
     params.push(baseUrl);
     this.db.prepare(`UPDATE site_profiles SET ${sets.join(', ')} WHERE base_url = ?`).run(...params);

@@ -7,6 +7,8 @@ import { siteKey, siteLabel } from '../../config/siteLabel.js';
 import type { SubtitleSiteConfig } from '../../config/schema.js';
 import { ArchiveCache, type ArchiveCacheRow } from '../../db/archiveCache.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
+import { SiteProfiles } from '../../db/siteProfiles.js';
+import type { TranscriptEntry } from '../../db/subtitleRuns.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
 import { mapArrPath } from '../../fs/paths.js';
@@ -672,8 +674,18 @@ async function siteSearchPass(
     alternates,
   });
 
+  const profiles = new SiteProfiles(ctx.db);
+
   for (const site of sites) {
     if (missing.length === 0) break;
+
+    // A disabled site simply doesn't exist for this pass: no run, no reflection, no
+    // cooldown touch, and no event of its own — the human already saw the evidence when
+    // they accepted the disable. If every configured site is disabled, this loop ends
+    // having done nothing, and the caller's own "no subtitle found" resolution covers it —
+    // no event spam of ours to add.
+    const profile = profiles.get(site.baseUrl);
+    if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
 
     const result = await search(ctx, job, site, hints, rawDir);
     // A cooldown means the site never ran at all this job — nothing happened worth writing
@@ -691,13 +703,69 @@ async function siteSearchPass(
       // A hard extraction failure (not UnsupportedArchiveError, which extractAndMatch
       // already turns into `false`) is still a completed, non-cooldown run — it reflects
       // with verifiedSuccess: false before the error propagates. The propagation itself is
-      // unchanged: the job fails and the runner retries.
+      // unchanged: the job fails and the runner retries. It does NOT raise unusable: the
+      // job is about to fail, and this is not the moment to also ask a human to weigh in on
+      // the site's fate.
       await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess: false, today });
       throw err;
     }
 
-    await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today });
+    // Reflection's verdict is honoured only on this path, not the rethrow above — same
+    // reasoning: a run whose job is already failing isn't the moment to raise a second,
+    // unrelated decision. `verdict === 'unusable'` is raised even when `verifiedSuccess` is
+    // true — a contradiction (the model says the site can't be automated, on a run that
+    // just proved it could), but the model's own verdict is the thing being reported to a
+    // human, not second-guessed here.
+    const reflection = await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today });
+    if (reflection?.verdict === 'unusable') {
+      raiseUnusable(ctx, job, site, reflection.reason, result.transcript);
+    }
   }
+}
+
+/** Longest a transcript detail line carries into the attention item's `data` — same cap
+ * `siteReflection`'s own prompt uses for the same reason: transcript detail is page-derived
+ * text, and this lands in the dashboard verbatim. */
+const EVIDENCE_DETAIL_CAP = 300;
+
+/** How many of the most recent transcript entries ride along as evidence. */
+const EVIDENCE_LINES = 5;
+
+/**
+ * Raises (or refreshes) the attention item proposing that `site` be disabled, after
+ * reflection judged it unusable. Deduped per SITE, not per media target: two jobs against
+ * different series that both hit the same wall are the same fact ("this site cannot be
+ * automated"), not two separate ones — unlike `subtitle.site-failed`/`site-exhausted`,
+ * which stay scoped to `targetEventData(job, ...)`'s (instance, targetKind, targetId)
+ * because those are about one run's outcome on one target. This item's `data` is built by
+ * hand instead of through `targetEventData` so the dedupe key carries only the site's own
+ * identity — the same site reached through a different job's target still collapses into
+ * the one open item.
+ */
+function raiseUnusable(ctx: AppContext, job: JobRow, site: SubtitleSiteConfig, reason: string, transcript: TranscriptEntry[]): void {
+  const label = siteLabel(site.baseUrl);
+  const tiersAttempted = [...new Set(transcript.map((e) => e.tier))];
+  const evidence = transcript
+    .slice(-EVIDENCE_LINES)
+    .map((e) => `[${e.tier}] ${e.action}: ${e.detail.slice(0, EVIDENCE_DETAIL_CAP)}`);
+
+  ctx.events.append({
+    kind: 'subtitle.site-unusable',
+    level: 'attention',
+    jobId: job.id,
+    message: `${label} looks unusable: ${reason}`,
+    data: {
+      instance: 'subtitle-site',
+      targetKind: 'site',
+      targetId: label,
+      dedupeKey: label,
+      action: 'disable-site',
+      baseUrl: site.baseUrl,
+      reason,
+      tiersAttempted,
+      evidence,
+    },
+  });
 }
 
 /** Extracts one site's downloaded payload into the archive cache and matches it against the
