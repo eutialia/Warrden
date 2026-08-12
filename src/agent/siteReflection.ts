@@ -357,9 +357,11 @@ function buildSystemPrompt(input: {
       today +
       ')` for you.',
     '',
+    'The file is a set of distinct facts, one bullet per fact — not a log of edits. Before writing anything, check what this run observed against the facts already on file: same endpoint, same failure mode, same page behavior as an existing bullet means that fact is already covered, even if the condition or the conclusion has changed since. Covered is an update, always — correcting a bullet this run showed wrong, refreshing the date on a bullet this run relied on and found still true, or folding one bullet into another that overlaps it (leave the now-redundant one for the operator to prune). `add` is only for a subject the file has never described. When in doubt, update: a lazy add next to a near-duplicate just sits there, since nothing here can delete it.',
+    '',
     'Operations:',
-    '- add: a new bullet in a section.',
-    '- update: replace one existing bullet. `target` must be an existing bullet copied exactly, its stamp optional. Use this to re-confirm a rule this run relied on (which refreshes its date), to correct a rule this run showed to be wrong, or to merge two overlapping bullets: fold one into the other with `update` and leave the now-redundant one for the operator to prune.',
+    '- add: a new bullet in a section, for a fact not already covered.',
+    '- update: replace one existing bullet. `target` must be an existing bullet copied exactly, its stamp optional.',
     'A target that matches no bullet, or more than one, is discarded rather than guessed at.',
     '',
     'There is no delete operation. You cannot remove a bullet — only the operator can, from the dashboard. If a bullet is wrong, correct it with update; if two bullets overlap, update one to absorb the other and leave the redundant one alone.',
