@@ -748,12 +748,16 @@ function raiseUnusable(ctx: AppContext, job: JobRow, site: SubtitleSiteConfig, r
   const evidence = transcript
     .slice(-EVIDENCE_LINES)
     .map((e) => `[${e.tier}] ${e.action}: ${e.detail.slice(0, EVIDENCE_DETAIL_CAP)}`);
+  // The model's own sentence, capped the same way transcript detail is above (G4): it flows
+  // into the event message, the attention item's data, and — if the operator accepts the
+  // proposal — `site_profiles.disabled_reason`, all three unbounded until this cap.
+  const cappedReason = reason.slice(0, EVIDENCE_DETAIL_CAP);
 
   ctx.events.append({
     kind: 'subtitle.site-unusable',
     level: 'attention',
     jobId: job.id,
-    message: `${label} looks unusable: ${reason}`,
+    message: `${label} looks unusable: ${cappedReason}`,
     data: {
       instance: 'subtitle-site',
       targetKind: 'site',
@@ -761,7 +765,7 @@ function raiseUnusable(ctx: AppContext, job: JobRow, site: SubtitleSiteConfig, r
       dedupeKey: label,
       action: 'disable-site',
       baseUrl: site.baseUrl,
-      reason,
+      reason: cappedReason,
       tiersAttempted,
       evidence,
     },

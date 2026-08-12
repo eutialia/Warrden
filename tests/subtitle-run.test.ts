@@ -509,6 +509,30 @@ describe('runSubtitleJob', () => {
     expect(JSON.stringify(items[0]!.data)).toContain('403');
   });
 
+  // G4: the model's own reason sentence is unbounded input (its own prompt only asks for
+  // "one sentence", not a length), and used to flow uncapped into the event message, the
+  // attention item's data, and disabled_reason on accept — while the evidence lines beside
+  // it were already capped at 300. Same cap, same style, checked at the boundary.
+  it('caps the unusable reason at EVIDENCE_DETAIL_CAP (300 chars), same as evidence detail', async () => {
+    const fx = subtitleFixture();
+    const job = claimSubtitleJob(fx);
+    const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
+    const longReason = `Cloudflare wall survives every tier. ${'x'.repeat(400)}`;
+    const deps = {
+      searchSite: async () => ({ download: null, transcript, outcome: 'exhausted' as const }),
+      reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: longReason }),
+    };
+    await runSubtitleJob(fx.ctx, job, deps);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    const items = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.site-unusable');
+    expect(items).toHaveLength(1);
+    const reason = items[0]!.data.reason as string;
+    expect(reason.length).toBe(300);
+    expect(reason).toBe(longReason.slice(0, 300));
+    expect((items[0]!.message as string).length).toBeLessThan(longReason.length);
+  });
+
   it('dedupes the unusable-site item per SITE, not per target: two different jobs against two different series that hit the same site still collapse into one open item', async () => {
     // Regression guard for the deliberate deviation from targetEventData's per-target
     // dedupe grain (see raiseUnusable's doc comment in src/pipelines/subtitle/run.ts):
