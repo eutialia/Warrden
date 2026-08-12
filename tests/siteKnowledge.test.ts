@@ -495,6 +495,60 @@ describe('prompt rendering', () => {
   it('returns an empty string when there is nothing to say', () => {
     expect(knowledgeForPrompt(emptyKnowledge('https://x.test'))).toBe('');
   });
+
+  // G1: Pitfalls is the one agent section a failed, possibly attacker-influenced run can
+  // still write to (no success gate behind it — see `siteReflection.ts`'s
+  // `PROTOCOL_SECTIONS` doc). Framing it under the same "follow them step by step"
+  // instruction that Access/Search/Download earn by having proved themselves would hand a
+  // durable, scanner-clean steering channel to a protocol-shaped Pitfalls bullet. It must
+  // render under its own framing as observations to weigh, not instructions to obey.
+  describe('Pitfalls framing', () => {
+    it('renders under separate framing from Access/Search/Download, not "follow them step by step"', () => {
+      const k = emptyKnowledge('https://x.test');
+      k.sections.Search.push('IF searching THEN use /s. (confirmed 2026-08-10)');
+      k.sections.Pitfalls.push('IF results are empty THEN retry once. (confirmed 2026-08-10)');
+      const prompt = knowledgeForPrompt(k);
+
+      const followLine = prompt.split('\n\n').find((block) => block.includes('follow them step by step'));
+      const pitfallsLine = prompt.split('\n\n').find((block) => block.includes('IF results are empty'));
+      expect(followLine).toBeDefined();
+      expect(pitfallsLine).toBeDefined();
+      expect(followLine).not.toBe(pitfallsLine);
+      // The Pitfalls block must not itself carry the "follow them step by step" framing.
+      expect(pitfallsLine).not.toMatch(/follow them step by step/i);
+      expect(followLine).not.toContain('## Pitfalls');
+    });
+
+    it('says Pitfalls entries are observations to weigh, not instructions to follow', () => {
+      const k = emptyKnowledge('https://x.test');
+      k.sections.Pitfalls.push('IF results are empty THEN retry once. (confirmed 2026-08-10)');
+      const prompt = knowledgeForPrompt(k);
+      expect(prompt).toMatch(/not instructions to follow/i);
+    });
+
+    it('still frames Access/Search/Download as "follow them step by step" on their own', () => {
+      const k = emptyKnowledge('https://x.test');
+      k.sections.Access.push('IF blocked THEN use chromium. (confirmed 2026-08-10)');
+      const prompt = knowledgeForPrompt(k);
+      expect(prompt).toMatch(/follow them step by step/i);
+    });
+
+    it('omits the Pitfalls framing header entirely when there are no Pitfalls bullets', () => {
+      const k = emptyKnowledge('https://x.test');
+      k.sections.Access.push('IF blocked THEN use chromium. (confirmed 2026-08-10)');
+      const prompt = knowledgeForPrompt(k);
+      expect(prompt).not.toMatch(/not instructions to follow/i);
+    });
+
+    it('does not change the on-disk file shape — render/parse stays byte-exact', () => {
+      // This is prompt-assembly framing only. The file format itself
+      // (renderKnowledge/parseKnowledge) is untouched: a Pitfalls bullet round-trips
+      // through render then parse unchanged, whatever the prompt does with it.
+      const k = emptyKnowledge('https://x.test');
+      k.sections.Pitfalls.push('IF results are empty THEN retry once. (confirmed 2026-08-10)');
+      expect(parseKnowledge('https://x.test', renderKnowledge(k))).toEqual(k);
+    });
+  });
 });
 
 describe('agentCharCount', () => {
