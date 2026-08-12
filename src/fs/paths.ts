@@ -33,8 +33,11 @@ export function mapArrPath(mappings: PathMapping[], p: string): string {
   return best.to + p.slice(best.from.length);
 }
 
-/** Make (and return) a directory under the data dir. Every runtime-owned path goes
- * through here so the "where does Warrden keep this" answer lives in one place. */
+/** Make (and return) a directory under the data dir — used by `agent/siteKnowledge.ts`
+ * (the site knowledge and seed directories). Not the single point every runtime-owned path
+ * goes through: roughly ten direct `mkdirSync(join(dataDir, …))` calls remain across
+ * `config/store.ts`, `db/db.ts`, the subtitle pipeline and `agent/tiers.ts`, none required
+ * to route through here. */
 export function ensureDataSubdir(dataDir: string, ...segments: string[]): string {
   const dir = join(dataDir, ...segments);
   mkdirSync(dir, { recursive: true });

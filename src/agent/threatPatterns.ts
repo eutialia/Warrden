@@ -161,7 +161,16 @@ const AUDIENCE = String.raw`(?:operator|user|human|admin|owner|logs?|audit|dashb
  * never by another content word. Rejecting on a list of modifier nouns instead was measured
  * and does not reach the subject case ("the owner rotates…") or any modifier nobody listed,
  * which is the same inverted failure direction this file avoids everywhere else. The cost
- * here runs toward a miss: "do not tell the operator anything at all" is not caught. */
+ * here runs toward a miss: "do not tell the operator anything at all" is not caught.
+ *
+ * This separates addressee from modifier by WORD ORDER, not grammatical role, and the two
+ * only coincide when the noun is the phrase's true final word. A post-nominal modifier —
+ * a noun phrase ending in "of <person>" — still ends the clause and still flags: "do not
+ * disclose the contact email of the owner" reads as ordinary prose (the owner is not being
+ * told to keep a secret; their email is one) but trips this rule anyway. Measured at 11/15
+ * on a probe set built around that shape. Pre-existing, and the cost still runs toward the
+ * false-positive side this file accepts everywhere, so the rule stands; this note exists so
+ * the claim above isn't read as stronger than it is. */
 const HUMAN_AUDIENCE =
   String.raw`(?:operators?|humans?|admins?|administrators?|owners?|maintainers?)` +
   String.raw`(?=[^\S\n]{0,4}(?:[.,;:!?)\]]|\n|$)|[^\S\n]+(?:about|regarding|concerning|that|when|unless|why)\b)`;

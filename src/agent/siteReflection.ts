@@ -52,14 +52,20 @@ const MAX_DROPPED_REPORTED = 10;
  * THEN y.` would be immune to decay forever. */
 const STAMP_RE = /\s*\(confirmed \d{4}-\d{2}-\d{2}\)\s*/g;
 
-/** Every code point a text format may treat as ending a line: CR, LF, next line, vertical
- * tab, form feed, and the Unicode line/paragraph separators. `parseKnowledge` splits on LF
- * alone, but the file is also read by a language model whose tokenizer's idea of a line
- * break is its own — a bullet carrying U+0085 renders as a forged `## Operator notes`
- * heading in the prompt whether or not our parser agrees. U+2028 and U+2029 are worse than
- * cosmetic: `.` in `BULLET_RE` does not match them, so a bullet containing one stops
- * parsing as a bullet at all and disappears on the next save, after the operator was told
- * the write applied. One rule: a bullet is one line by every definition of a line. */
+/** The code points a text format most commonly treats as ending a line: CR, LF, next line,
+ * vertical tab, form feed, and the Unicode line/paragraph separators. `parseKnowledge`
+ * splits on LF alone, but the file is also read by a language model whose tokenizer's idea
+ * of a line break is its own — a bullet carrying U+0085 renders as a forged
+ * `## Operator notes` heading in the prompt whether or not our parser agrees. U+2028 and
+ * U+2029 are worse than cosmetic: `.` in `BULLET_RE` does not match them, so a bullet
+ * containing one stops parsing as a bullet at all and disappears on the next save, after
+ * the operator was told the write applied.
+ *
+ * Not exhaustive, despite the ambition: the C1 control block's U+001C-U+001E (file/group/
+ * record separator) and the visible line-break SYMBOLS U+2424/U+240A are accepted and
+ * stored (D-28). They forge nothing today — `parseKnowledge` splits on `\n` only, `.` in
+ * `BULLET_RE` matches them, and `renderKnowledge` re-emits one line — so this is not a
+ * security hole, only a doc comment that used to claim more totality than this set has. */
 const LINE_BREAK_RE = /[\r\n\v\f\u0085\u2028\u2029]/;
 
 /** Bullet text that would forge file structure once rendered, mapped to why it's refused.
