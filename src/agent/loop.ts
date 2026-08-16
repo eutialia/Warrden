@@ -115,7 +115,15 @@ function isSameSite(url: string, baseUrl: string): boolean {
 const REFUSAL_REASON: Record<RefusedDestination, string> = {
   private: 'targets a private/loopback address',
   unparseable: 'is not a usable URL',
+  scheme: 'is not an http(s) URL',
 };
+
+/** The refusals a human must see (and that count toward `REFUSAL_LIMIT`): a private/loopback
+ * address, or a non-http(s) scheme steering the agent off the web — both the SSRF/local-read
+ * shape. A merely malformed URL is a model slip and stays a plain transcript note. */
+function isSecuritySignal(reason: RefusedDestination): boolean {
+  return reason === 'private' || reason === 'scheme';
+}
 
 /** The loop hit the current tier's wall — the runner escalates one rung and retries. */
 export class TierBlockedError extends Error {
@@ -225,9 +233,9 @@ export async function runAgentLoop(input: {
     const refusal = refusedDestination(action.url);
     if (refusal !== null) {
       const line = `${action.action} refused: ${capUrl(action.url)} ${REFUSAL_REASON[refusal]}`;
-      // A malformed URL is a model slip; a private/loopback one is the SSRF shape and has
-      // to reach a human even when the run recovers on the next step.
-      if (refuse(line, refusal === 'private' ? 'attention' : undefined)) {
+      // A malformed URL is a model slip; a private/loopback address or an off-web scheme is
+      // the SSRF/local-read shape and has to reach a human even when the run recovers next step.
+      if (refuse(line, isSecuritySignal(refusal) ? 'attention' : undefined)) {
         return { kind: 'refused-repeatedly', refusals };
       }
       continue;
@@ -243,7 +251,7 @@ export async function runAgentLoop(input: {
       if (res.refusedUrl === undefined) return null;
       const reason = res.refusedReason ?? 'private';
       const line = `${action.action} refused: ${capUrl(action.url)} redirected to ${capUrl(res.refusedUrl)}, which ${REFUSAL_REASON[reason]}`;
-      return refuse(line, reason === 'private' ? 'attention' : undefined) ? 'stop' : 'continue';
+      return refuse(line, isSecuritySignal(reason) ? 'attention' : undefined) ? 'stop' : 'continue';
     };
 
     if (action.action === 'download') {

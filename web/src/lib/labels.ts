@@ -201,6 +201,11 @@ export function attentionKindLabel(kind: string): string {
       return 'Knowledge refused';
     case 'subtitle.knowledge-dropped':
       return 'Knowledge edits refused';
+    case 'subtitle.transcript':
+      // A run step raised to attention level: the browse agent was steered at a
+      // private/loopback address (or off-web scheme) and refused it. Without this case the
+      // SSRF signal renders as the untitled "subtitle transcript" fallback.
+      return 'Refused destination';
     default:
       // Fall back to a cleaned kind rather than raw dotted agent speech.
       return kind.replace(/[._]/g, ' ');

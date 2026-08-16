@@ -137,8 +137,11 @@ export function isPrivateOrLoopbackHost(hostname: string): boolean {
 
 /** Why a destination must not be fetched. `unparseable` is its own kind because it is a
  * different story for a human: a model that wrote a malformed URL, not one that aimed at
- * the LAN. */
-export type RefusedDestination = 'private' | 'unparseable';
+ * the LAN. `scheme` is a URL that parses but is not `http(s)` — `file:`, `data:`, `blob:`,
+ * a browser-internal scheme — which reaches nothing on the curl tier (undici rejects it)
+ * but which `page.goto` on the chromium tier would happily load, so it is a story of its
+ * own: text steering the agent at the local disk, not at the LAN. */
+export type RefusedDestination = 'private' | 'unparseable' | 'scheme';
 
 /**
  * Whether `url` is a destination Warrden refuses to fetch, and why — `null` when it may be
@@ -151,13 +154,18 @@ export type RefusedDestination = 'private' | 'unparseable';
  * did not understand is the wrong shape to leave lying around.
  */
 export function refusedDestination(url: string): RefusedDestination | null {
-  let hostname: string;
+  let parsed: URL;
   try {
-    hostname = new URL(url).hostname;
+    parsed = new URL(url);
   } catch {
     return 'unparseable';
   }
-  return isPrivateOrLoopbackHost(hostname) ? 'private' : null;
+  // Only http(s) is a destination this agent fetches. A `file:` URL has an empty hostname,
+  // so the private/loopback test below would pass it as "public" and the chromium tier's
+  // `page.goto` would read the file straight into the step's observation and from there
+  // into the next prompt. Refuse every non-http(s) scheme here, before any tier sees it.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'scheme';
+  return isPrivateOrLoopbackHost(parsed.hostname) ? 'private' : null;
 }
 
 /** Where a redirect hop points, and whether it may be followed. */

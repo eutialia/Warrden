@@ -261,13 +261,15 @@ class ChromiumTier implements FetchTier {
         await route.continue().catch(() => {});
         return;
       }
-      // Every refused request is aborted (defense in depth), but only a refused NAVIGATION
-      // — the main request or one of its redirect hops — is recorded as `refusedHop`. A
-      // page subresource (image, script, xhr) that happens to point at a guarded address
-      // must not drive the fetch's refusal reporting: `refusedHop` is what abandons a
-      // download wait and what the loop counts toward REFUSAL_LIMIT, and a blocked
-      // subresource is neither a refused download nor a navigation aimed at the LAN.
-      if (request.isNavigationRequest()) this.refusedHop = target;
+      // Every refused request is aborted (defense in depth), but only a refused MAIN-FRAME
+      // NAVIGATION — the main request or one of its redirect hops — is recorded as
+      // `refusedHop`. `isNavigationRequest()` alone is not enough: it is also true for a
+      // sub-frame document load, so an `<iframe src="http://127.0.0.1/">` on an otherwise
+      // fine page would set `refusedHop`, abandon the real download, and count toward
+      // REFUSAL_LIMIT. `refusedHop` is what abandons a download wait and what the loop
+      // counts, and a blocked subframe is neither a refused download nor the navigation the
+      // agent aimed — so the main frame (`parentFrame() === null`) is the only one that drives it.
+      if (request.isNavigationRequest() && request.frame().parentFrame() === null) this.refusedHop = target;
       await route.abort('blockedbyclient').catch(() => {});
     });
     return this.context;
@@ -363,7 +365,11 @@ class ChromiumTier implements FetchTier {
             return { ok: false, status, blocked: false, refusedUrl: next.url, refusedReason: next.refused };
           }
           currentUrl = next.url;
-          currentMethod = 'GET';
+          // Same POST-downgrade rule as CurlTier: 301/302/303 continue with GET, 307/308
+          // preserve the method. The body is never re-sent on any hop either way.
+          if (currentMethod === 'POST' && (status === 301 || status === 302 || status === 303)) {
+            currentMethod = 'GET';
+          }
           sendBody = undefined;
         }
       }
