@@ -448,6 +448,11 @@ export interface TraceSummary {
   pipeline: string;
   targetTitle: string;
   jobStatus: string;
+  // The target triple: identical across the acquire/ingest/subtitle traces of one target,
+  // which is how the debug page links a trace to the other phases of the same target.
+  arrInstance: string;
+  targetKind: string;
+  targetId: number;
   entryCount: number;
   firstTs: number;
   lastTs: number;
@@ -473,7 +478,11 @@ export function fetchTraces(): Promise<{ traces: TraceSummary[] }> {
   return fetchJson('/api/traces');
 }
 
-export function fetchTrace(jobId: number | string): Promise<{ jobId: number; entries: TraceEntry[] }> {
+/** `jobTerminal` is what turns a still-`running` entry on a finished job into "interrupted"
+ * rather than live work — the job crashed before that step could be closed. */
+export function fetchTrace(
+  jobId: number | string,
+): Promise<{ jobId: number; jobStatus: string | null; jobTerminal: boolean; entries: TraceEntry[] }> {
   return fetchJson(`/api/traces/${jobId}`);
 }
 

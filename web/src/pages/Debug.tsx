@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { formatRelativeTime } from '@/lib/utils';
 
 const PIPELINES = ['acquire', 'ingest', 'subtitle'] as const;
+const STATUSES = ['pending', 'running', 'done', 'failed'] as const;
 
 export default function DebugPage() {
   const { jobId } = useParams();
@@ -21,7 +22,16 @@ export default function DebugPage() {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [payloads, setPayloads] = useState<Record<number, unknown>>({});
   const [pipelineFilter, setPipelineFilter] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [jobTerminal, setJobTerminal] = useState(false);
+  // Only entries explicitly opened are expanded: depth-0 rows start open (they're the
+  // spine of the run), everything below starts collapsed so an LLM ladder or a 40-call
+  // arr burst doesn't bury the shape of the job.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // Per top-level seq, so a timeline click can scroll its block into view. Timeline
+  // segments are top-level only, so nothing deeper needs a ref.
+  const blockRefs = useRef(new Map<number, HTMLDivElement | null>());
 
   // Separate generations for the list and the per-job trace: they're independent data
   // streams, so a list tick must not invalidate an in-flight trace fetch and vice versa.
@@ -54,10 +64,12 @@ export default function DebugPage() {
         .then((r) => {
           if (opts?.isStale()) return;
           setEntries(r.entries);
+          setJobTerminal(r.jobTerminal);
         })
         .catch(() => {
           if (opts?.isStale()) return;
           setEntries([]);
+          setJobTerminal(false);
         });
     },
     [selectedJob],
@@ -79,6 +91,9 @@ export default function DebugPage() {
     setSelectedSeq(null);
     setPayloads({});
     setEntries([]);
+    setExpanded(new Set());
+    setJobTerminal(false);
+    blockRefs.current.clear();
     if (selectedJob !== null) loadTrace({ isStale });
     return () => {
       traceGen();
@@ -106,10 +121,55 @@ export default function DebugPage() {
       traces.filter(
         (t) =>
           (pipelineFilter === null || t.pipeline === pipelineFilter) &&
+          (statusFilter === null || t.jobStatus === statusFilter) &&
           (search === '' || t.targetTitle.toLowerCase().includes(search.toLowerCase())),
       ),
-    [traces, pipelineFilter, search],
+    [traces, pipelineFilter, statusFilter, search],
   );
+
+  // parent_seq -> children, built once per trace instead of a filter pass per row: an
+  // arr-heavy job has hundreds of entries and the tree walks every one of them.
+  const childrenBySeq = useMemo(() => {
+    const map = new Map<number, TraceEntry[]>();
+    for (const e of entries) {
+      if (e.parent_seq === null) continue;
+      const bucket = map.get(e.parent_seq);
+      if (bucket) bucket.push(e);
+      else map.set(e.parent_seq, [e]);
+    }
+    return map;
+  }, [entries]);
+
+  const roots = useMemo(() => entries.filter((e) => e.parent_seq === null), [entries]);
+
+  // The other phases' traces for this exact target — the acquire that fed the ingest that
+  // kicked off the subtitle run. Derived from the already-fetched list, so a target whose
+  // sibling trace fell off the 100-row window simply doesn't show up.
+  const sameTarget = useMemo(() => {
+    const current = traces.find((t) => t.jobId === selectedJob);
+    if (!current) return [];
+    return traces.filter(
+      (t) =>
+        t.jobId !== current.jobId &&
+        t.arrInstance === current.arrInstance &&
+        t.targetKind === current.targetKind &&
+        t.targetId === current.targetId,
+    );
+  }, [traces, selectedJob]);
+
+  const toggleExpanded = (seq: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(seq)) next.delete(seq);
+      else next.add(seq);
+      return next;
+    });
+  };
+
+  const focusSeq = (seq: number) => {
+    setSelectedSeq(seq);
+    blockRefs.current.get(seq)?.scrollIntoView({ block: 'nearest' });
+  };
 
   const togglePayload = (entry: TraceEntry) => {
     if (!entry.hasPayload || selectedJob === null) return;
@@ -131,7 +191,6 @@ export default function DebugPage() {
     });
   };
 
-  const childrenOf = (seq: number) => entries.filter((e) => e.parent_seq === seq);
   const highlighted = (e: TraceEntry) => selectedSeq !== null && (e.seq === selectedSeq || e.parent_seq === selectedSeq);
 
   return (
@@ -148,6 +207,17 @@ export default function DebugPage() {
             onClick={() => setPipelineFilter(pipelineFilter === p ? null : p)}
           >
             {p}
+          </Badge>
+        ))}
+        <span className="mx-1 h-4 w-px bg-border" />
+        {STATUSES.map((s) => (
+          <Badge
+            key={s}
+            variant={statusFilter === s ? 'default' : 'outline'}
+            className="cursor-pointer"
+            onClick={() => setStatusFilter(statusFilter === s ? null : s)}
+          >
+            {s}
           </Badge>
         ))}
       </div>
@@ -168,27 +238,42 @@ export default function DebugPage() {
         {shown.length === 0 && <p className="text-sm text-muted-foreground">No traces yet.</p>}
       </div>
 
+      {selectedJob !== null && sameTarget.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>Same target:</span>
+          {sameTarget.map((t) => (
+            <button key={t.jobId} onClick={() => navigate(`/debug/${t.jobId}`)} className="rounded border px-2 py-0.5 hover:bg-accent">
+              {t.pipeline} #{t.jobId} · {t.jobStatus}
+            </button>
+          ))}
+        </div>
+      )}
+
       {selectedJob !== null && entries.length > 0 && (
         <>
-          <TraceTimeline entries={entries} selectedSeq={selectedSeq} onSelect={setSelectedSeq} />
+          <TraceTimeline entries={entries} selectedSeq={selectedSeq} onSelect={focusSeq} />
           <div className="divide-y rounded-md border">
-            {entries
-              .filter((e) => e.parent_seq === null)
-              .map((e) => (
-                <div key={e.seq} className={highlighted(e) ? 'bg-accent/50' : ''}>
-                  <EntryRow entry={e} payload={payloads[e.seq]} onToggle={() => togglePayload(e)} onFocus={() => setSelectedSeq(e.seq)} />
-                  {childrenOf(e.seq).map((child) => (
-                    <div key={child.seq} className="pl-6">
-                      <EntryRow
-                        entry={child}
-                        payload={payloads[child.seq]}
-                        onToggle={() => togglePayload(child)}
-                        onFocus={() => setSelectedSeq(e.seq)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              ))}
+            {roots.map((e) => (
+              <div
+                key={e.seq}
+                ref={(el) => {
+                  blockRefs.current.set(e.seq, el);
+                }}
+              >
+                <EntryNode
+                  entry={e}
+                  depth={0}
+                  childrenBySeq={childrenBySeq}
+                  expanded={expanded}
+                  payloads={payloads}
+                  jobTerminal={jobTerminal}
+                  highlighted={highlighted}
+                  onToggleExpanded={toggleExpanded}
+                  onTogglePayload={togglePayload}
+                  onFocus={setSelectedSeq}
+                />
+              </div>
+            ))}
           </div>
         </>
       )}
@@ -196,18 +281,71 @@ export default function DebugPage() {
   );
 }
 
+interface NodeProps {
+  entry: TraceEntry;
+  depth: number;
+  childrenBySeq: Map<number, TraceEntry[]>;
+  expanded: Set<number>;
+  payloads: Record<number, unknown>;
+  jobTerminal: boolean;
+  highlighted: (e: TraceEntry) => boolean;
+  onToggleExpanded: (seq: number) => void;
+  onTogglePayload: (e: TraceEntry) => void;
+  onFocus: (seq: number) => void;
+}
+
+/** One entry plus its subtree. Recursive rather than the old fixed parent+one-child pass:
+ * `llm.attempt` sits three levels deep under a subtitle job (site -> llm.call -> attempt),
+ * and any depth cap simply loses rows. */
+function EntryNode(props: NodeProps) {
+  const { entry, depth, childrenBySeq, expanded, payloads, jobTerminal, highlighted, onToggleExpanded, onTogglePayload, onFocus } = props;
+  const kids = childrenBySeq.get(entry.seq) ?? [];
+  // Depth 0 is the run's spine and stays open unless collapsed by hand; deeper levels start
+  // closed, so `expanded` reads as "opened" up top and "still closed" below.
+  const isOpen = depth === 0 ? !expanded.has(entry.seq) : expanded.has(entry.seq);
+
+  return (
+    <div className={highlighted(entry) ? 'bg-accent/50' : ''}>
+      <div style={{ paddingLeft: depth * 20 }}>
+        <EntryRow
+          entry={entry}
+          payload={payloads[entry.seq]}
+          jobTerminal={jobTerminal}
+          expandable={kids.length > 0}
+          isOpen={isOpen}
+          onExpand={() => onToggleExpanded(entry.seq)}
+          onToggle={() => onTogglePayload(entry)}
+          onFocus={() => onFocus(entry.seq)}
+        />
+      </div>
+      {isOpen && kids.map((child) => <EntryNode key={child.seq} {...props} entry={child} depth={depth + 1} />)}
+    </div>
+  );
+}
+
 function EntryRow({
   entry,
   payload,
+  jobTerminal,
+  expandable,
+  isOpen,
+  onExpand,
   onToggle,
   onFocus,
 }: {
   entry: TraceEntry;
   payload: unknown;
+  jobTerminal: boolean;
+  expandable: boolean;
+  isOpen: boolean;
+  onExpand: () => void;
   onToggle: () => void;
   onFocus: () => void;
 }) {
-  const duration = entry.ts_end !== null ? `${entry.ts_end - entry.ts_start}ms` : 'running';
+  // A running entry on a job that has already finished is a step the job died inside of —
+  // it will never close, so it must not read (or pulse) as live work.
+  const interrupted = entry.status === 'running' && jobTerminal;
+  const duration = entry.ts_end !== null ? `${entry.ts_end - entry.ts_start}ms` : interrupted ? 'interrupted' : 'running';
   return (
     <div className="px-3 py-2 text-xs">
       <div
@@ -217,7 +355,23 @@ function EntryRow({
           onToggle();
         }}
       >
-        <Badge variant={entry.status === 'error' ? 'destructive' : 'outline'}>{entry.status}</Badge>
+        <button
+          onClick={(ev) => {
+            ev.stopPropagation();
+            onExpand();
+          }}
+          className={`w-3 shrink-0 text-muted-foreground ${expandable ? '' : 'invisible'}`}
+          aria-label={isOpen ? 'Collapse' : 'Expand'}
+        >
+          {isOpen ? '▾' : '▸'}
+        </button>
+        {interrupted ? (
+          <Badge variant="outline" className="border-amber-500 text-amber-600">
+            interrupted
+          </Badge>
+        ) : (
+          <Badge variant={entry.status === 'error' ? 'destructive' : 'outline'}>{entry.status}</Badge>
+        )}
         <span className="font-mono text-muted-foreground">{entry.kind}</span>
         <span className="truncate">{entry.summary}</span>
         <span className="ml-auto shrink-0 text-muted-foreground">{duration}</span>
