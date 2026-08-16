@@ -442,23 +442,25 @@ export function fetchOverview(): Promise<Overview> {
   return fetchJson<Overview>('/api/overview');
 }
 
-/** `GET /api/traces` — one row per job that has produced trace entries, newest first. */
+/** `GET /api/traces`: one row per job that has produced trace entries, newest first. */
 export interface TraceSummary {
   jobId: number;
   pipeline: string;
   targetTitle: string;
   jobStatus: string;
   // The target triple: identical across the acquire/ingest/subtitle traces of one target,
-  // which is how the debug page links a trace to the other phases of the same target.
-  arrInstance: string;
-  targetKind: string;
-  targetId: number;
+  // which is how the debug page links a trace to the other phases of the same target. All
+  // three are null when the job row is gone and the header had to be synthesized, so such
+  // a trace links to nothing rather than matching every other headless trace.
+  arrInstance: string | null;
+  targetKind: string | null;
+  targetId: number | null;
   entryCount: number;
   firstTs: number;
   lastTs: number;
 }
 
-/** One `job_trace` row without its (often large) payload — `GET /api/traces/:jobId` returns
+/** One `job_trace` row without its (often large) payload. `GET /api/traces/:jobId` returns
  * these; fetch the full row with `fetchTraceEntry` when the payload is actually needed. */
 export interface TraceEntry {
   id: number;
@@ -479,7 +481,7 @@ export function fetchTraces(): Promise<{ traces: TraceSummary[] }> {
 }
 
 /** `jobTerminal` is what turns a still-`running` entry on a finished job into "interrupted"
- * rather than live work — the job crashed before that step could be closed. */
+ * rather than live work: the job crashed before that step could be closed. */
 export function fetchTrace(
   jobId: number | string,
 ): Promise<{ jobId: number; jobStatus: string | null; jobTerminal: boolean; entries: TraceEntry[] }> {

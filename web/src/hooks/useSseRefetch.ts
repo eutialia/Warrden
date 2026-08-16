@@ -31,7 +31,7 @@ const RECONNECT_AFTER_MS = 15_000;
  * behind them with nothing to free them.
  */
 /** One SSE frame off `/api/events/stream`, mirroring `EventRow` (server) minus its `ts`/`id`
- * bookkeeping — all `useSseRefetch` filters need to decide whether to fire. */
+ * bookkeeping, which is all `useSseRefetch` filters need to decide whether to fire. */
 export interface SseEvent {
   kind: string;
   job_id: number | null;
@@ -58,7 +58,7 @@ function notifyAll(event: SseEvent | null): void {
 }
 
 // Trace entries are the noisiest event on the bus (one per pipeline step) and only the
-// debug trace view cares about them live — every other page opts out by default so a
+// debug trace view cares about them live, so every other page opts out by default and a
 // running job doesn't debounce-thrash unrelated screens.
 const defaultFilter = (e: SseEvent | null): boolean => e === null || e.kind !== 'trace.appended';
 
@@ -131,8 +131,8 @@ function closeStreamIfIdle(): void {
  *
  * `filter` decides which SSE frames count as "something changed" for this caller;
  * `null` means a connection-level nudge (reconnect, heartbeat, malformed frame) that
- * every caller should treat as a refetch. Omit it for the default — everything except
- * `trace.appended` — or pass one to opt into trace noise (the debug page) or narrow to
+ * every caller should treat as a refetch. Omit it for the default (everything except
+ * `trace.appended`), or pass one to opt into trace noise (the debug page) or narrow to
  * a specific `job_id`/`kind`. Kept in a ref like `onEventRef` so an inline closure
  * doesn't resubscribe the stream on every render.
  */

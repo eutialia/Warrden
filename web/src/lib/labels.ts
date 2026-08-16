@@ -6,6 +6,7 @@ import type {
   ManagedObjectKind,
   StorageCheckStatus,
   TargetKind,
+  TraceEntry,
 } from '@/api';
 import type { Tone } from '@/lib/tone';
 
@@ -65,6 +66,25 @@ export function jobStatusTone(status: JobStatus): Tone {
       return 'danger';
     default:
       return 'neutral';
+  }
+}
+
+/** A trace entry's own status. `interrupted` isn't a stored status: it's a `running` entry
+ * on a job that has already finished, so it wants a human's eye rather than a spinner. */
+export function traceStatusLabel(status: TraceEntry['status'], interrupted: boolean): string {
+  if (interrupted) return 'interrupted';
+  return status;
+}
+
+export function traceStatusTone(status: TraceEntry['status'], interrupted: boolean): Tone {
+  if (interrupted) return 'warning';
+  switch (status) {
+    case 'ok':
+      return 'success';
+    case 'error':
+      return 'danger';
+    default:
+      return 'info';
   }
 }
 

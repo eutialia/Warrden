@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { fetchTraces, fetchTrace, fetchTraceEntry, type TraceSummary, type TraceEntry } from '@/api';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch, type SseEvent } from '@/hooks/useSseRefetch';
 import { TraceTimeline } from '@/components/TraceTimeline';
 import { PageHeader } from '@/components/PageHeader';
+import { ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { traceStatusLabel, traceStatusTone } from '@/lib/labels';
 import { formatRelativeTime } from '@/lib/utils';
 
 const PIPELINES = ['acquire', 'ingest', 'subtitle'] as const;
@@ -37,56 +40,54 @@ export default function DebugPage() {
   // streams, so a list tick must not invalidate an in-flight trace fetch and vice versa.
   const listGen = useFetchGeneration();
   const traceGen = useFetchGeneration();
-  // Holds the current job's isStale() check so every payload fetch for that job (however
-  // many entries get toggled open) shares it without bumping the generation on each other —
-  // only a job switch (or unmount) should invalidate a pending payload fetch.
-  const traceStaleRef = useRef<() => boolean>(() => false);
+  // A third generation, bumped only on a job switch (or unmount), so every payload fetch
+  // for the current job shares one staleness check. It deliberately does NOT ride on
+  // traceGen: the trace itself is refetched on every trace.appended, which would otherwise
+  // invalidate payload fetches for the job still on screen.
+  const payloadGen = useFetchGeneration();
+  const payloadStaleRef = useRef<() => boolean>(() => false);
 
-  const loadList = useCallback(
-    (opts?: { isStale: () => boolean }) => {
-      fetchTraces()
-        .then((r) => {
-          if (opts?.isStale()) return;
-          setTraces(r.traces);
-        })
-        .catch(() => {
-          if (opts?.isStale()) return;
-          setTraces([]);
-        });
-    },
-    [],
-  );
+  // Both loaders take their own staleness token rather than accepting one, so a caller
+  // can't forget to pass it (the SSE subscriptions below call them bare).
+  const loadList = useCallback(() => {
+    const isStale = listGen();
+    fetchTraces()
+      .then((r) => {
+        if (isStale()) return;
+        setTraces(r.traces);
+      })
+      .catch(() => {
+        if (isStale()) return;
+        setTraces([]);
+      });
+  }, [listGen]);
 
-  const loadTrace = useCallback(
-    (opts?: { isStale: () => boolean }) => {
-      if (selectedJob === null) return;
-      fetchTrace(selectedJob)
-        .then((r) => {
-          if (opts?.isStale()) return;
-          setEntries(r.entries);
-          setJobTerminal(r.jobTerminal);
-        })
-        .catch(() => {
-          if (opts?.isStale()) return;
-          setEntries([]);
-          setJobTerminal(false);
-        });
-    },
-    [selectedJob],
-  );
+  const loadTrace = useCallback(() => {
+    if (selectedJob === null) return;
+    const isStale = traceGen();
+    fetchTrace(selectedJob)
+      .then((r) => {
+        if (isStale()) return;
+        setEntries(r.entries);
+        setJobTerminal(r.jobTerminal);
+      })
+      .catch(() => {
+        if (isStale()) return;
+        setEntries([]);
+        setJobTerminal(false);
+      });
+  }, [selectedJob, traceGen]);
 
   useEffect(() => {
-    const isStale = listGen();
-    loadList({ isStale });
+    loadList();
     return () => {
       listGen();
     };
   }, [loadList, listGen]);
 
   useEffect(() => {
-    const isStale = traceGen();
-    traceStaleRef.current = isStale;
-    // Clear immediately, not just selection/payload state — otherwise the previous job's
+    payloadStaleRef.current = payloadGen();
+    // Clear immediately, not just selection/payload state: otherwise the previous job's
     // rows (and a stale timeline) linger on screen while the new job's fetch is in flight.
     setSelectedSeq(null);
     setPayloads({});
@@ -94,21 +95,21 @@ export default function DebugPage() {
     setExpanded(new Set());
     setJobTerminal(false);
     blockRefs.current.clear();
-    if (selectedJob !== null) loadTrace({ isStale });
+    loadTrace();
     return () => {
       traceGen();
+      payloadGen();
     };
-  }, [selectedJob, loadTrace, traceGen]);
+  }, [selectedJob, loadTrace, traceGen, payloadGen]);
 
   // trace.appended is the whole point of this page's SSE traffic, so the default filter
   // (which excludes it to spare other pages the noise) has to be overridden here.
   useSseRefetch(loadList, 1000, true, useCallback(() => true, []));
-  // Same-job SSE traffic deliberately isn't staleness-guarded (harmless: it's the current
-  // job racing itself), matching JobDetail's rationale — the per-job effect above is what
-  // actually protects against a stale *job switch* clobbering the current one.
+  // Debounced rather than immediate: SqlTracer broadcasts twice per step (begin and end),
+  // so a busy job would otherwise fire hundreds of uncoalesced full-trace GETs.
   useSseRefetch(
-    () => loadTrace(),
-    0,
+    loadTrace,
+    250,
     selectedJob !== null,
     useCallback(
       (e: SseEvent | null) => e === null || (e.kind === 'trace.appended' && e.job_id === selectedJob),
@@ -142,12 +143,14 @@ export default function DebugPage() {
 
   const roots = useMemo(() => entries.filter((e) => e.parent_seq === null), [entries]);
 
-  // The other phases' traces for this exact target — the acquire that fed the ingest that
+  // The other phases' traces for this exact target: the acquire that fed the ingest that
   // kicked off the subtitle run. Derived from the already-fetched list, so a target whose
   // sibling trace fell off the 100-row window simply doesn't show up.
   const sameTarget = useMemo(() => {
     const current = traces.find((t) => t.jobId === selectedJob);
-    if (!current) return [];
+    // A headless trace (job row gone) has no target triple, and matching null against
+    // null would make every other headless trace look like the same target.
+    if (!current || current.arrInstance === null) return [];
     return traces.filter(
       (t) =>
         t.jobId !== current.jobId &&
@@ -184,11 +187,16 @@ export default function DebugPage() {
     // Captured now, not read at resolution time: seqs restart per job, so without this a
     // late-resolving fetch from a job you've since navigated away from would write into
     // the new job's payloads map under a colliding seq, with no visual sign it's wrong.
-    const isStale = traceStaleRef.current;
-    fetchTraceEntry(selectedJob, entry.seq).then((full) => {
-      if (isStale()) return;
-      setPayloads((prev) => ({ ...prev, [entry.seq]: full.payload }));
-    });
+    const isStale = payloadStaleRef.current;
+    fetchTraceEntry(selectedJob, entry.seq)
+      .then((full) => {
+        if (isStale()) return;
+        setPayloads((prev) => ({ ...prev, [entry.seq]: full.payload }));
+      })
+      .catch(() => {
+        if (isStale()) return;
+        toast.error('Could not load payload');
+      });
   };
 
   const highlighted = (e: TraceEntry) => selectedSeq !== null && (e.seq === selectedSeq || e.parent_seq === selectedSeq);
@@ -251,7 +259,7 @@ export default function DebugPage() {
 
       {selectedJob !== null && entries.length > 0 && (
         <>
-          <TraceTimeline entries={entries} selectedSeq={selectedSeq} onSelect={focusSeq} />
+          <TraceTimeline entries={entries} jobTerminal={jobTerminal} selectedSeq={selectedSeq} onSelect={focusSeq} />
           <div className="divide-y rounded-md border">
             {roots.map((e) => (
               <div
@@ -342,7 +350,7 @@ function EntryRow({
   onToggle: () => void;
   onFocus: () => void;
 }) {
-  // A running entry on a job that has already finished is a step the job died inside of —
+  // A running entry on a job that has already finished is a step the job died inside of:
   // it will never close, so it must not read (or pulse) as live work.
   const interrupted = entry.status === 'running' && jobTerminal;
   const duration = entry.ts_end !== null ? `${entry.ts_end - entry.ts_start}ms` : interrupted ? 'interrupted' : 'running';
@@ -365,12 +373,15 @@ function EntryRow({
         >
           {isOpen ? '▾' : '▸'}
         </button>
-        {interrupted ? (
-          <Badge variant="outline" className="border-amber-500 text-amber-600">
-            interrupted
+        <ToneBadge tone={traceStatusTone(entry.status, interrupted)} dot pulse={entry.status === 'running' && !interrupted}>
+          {traceStatusLabel(entry.status, interrupted)}
+        </ToneBadge>
+        {entry.side_effect === 1 && (
+          // The one flag worth surfacing on every row: this step changed something outside
+          // Warrden (an arr grab, an import, a placed file), so it can't simply be re-run.
+          <Badge variant="outline" className="border-warning-border px-1 py-0 text-[10px] text-warning-foreground" title="Changed state outside Warrden">
+            write
           </Badge>
-        ) : (
-          <Badge variant={entry.status === 'error' ? 'destructive' : 'outline'}>{entry.status}</Badge>
         )}
         <span className="font-mono text-muted-foreground">{entry.kind}</span>
         <span className="truncate">{entry.summary}</span>
