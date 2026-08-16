@@ -39,7 +39,7 @@ interface HandleWebhookResult {
 
 /** Only the parts of AppContext handleWebhook actually reads — lets the route pass a
  * partial ctx without an `as AppContext` cast. */
-type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config' | 'clients'>;
+type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config' | 'clients' | 'trace'>;
 
 /**
  * Validates an inbound Sonarr/Radarr webhook body and, for a series/movie "added"
@@ -111,6 +111,17 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
     arrInstance: instanceName,
     payload: jobPayload,
   });
+  if (result.id !== null) {
+    ctx.trace.event({
+      jobId: result.id,
+      kind: 'trigger.webhook',
+      summary:
+        result.outcome === 'enqueued'
+          ? `${event.eventType} webhook (${instanceName})`
+          : `${event.eventType} webhook (${instanceName}, ${result.outcome})`,
+      payload: () => payload,
+    });
+  }
   ctx.events.append({
     kind: 'webhook.received',
     jobId: result.id ?? undefined,

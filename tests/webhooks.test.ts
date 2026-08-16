@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { handleWebhook } from '../src/arr/webhooks.js';
 import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
 import type { ArrApi } from '../src/arr/types.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 
 const seriesAdd = { eventType: 'SeriesAdd', series: { id: 42, title: 'Frieren', year: 2023, tvdbId: 424536 } };
 const movieAdded = { eventType: 'MovieAdded', movie: { id: 7, title: 'Perfect Blue', year: 1997, tmdbId: 573 } };
@@ -97,5 +98,25 @@ describe('handleWebhook', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: 'webhook.received', job_id: job.id });
     expect(events[0]!.data).toMatchObject({ outcome: 'enqueued' });
+  });
+
+  it('captures the webhook body as a trigger.webhook trace entry', () => {
+    const ctx = knownArrsCtx();
+    handleWebhook(ctx, 'sonarr', seriesAdd);
+    const job = ctx.queue.claim()!;
+    const rows = new TraceEntries(ctx.db).listByJob(job.id);
+    expect(rows[0]).toMatchObject({ kind: 'trigger.webhook' });
+    expect(JSON.parse(rows[0]!.payload ?? '')).toEqual(seriesAdd);
+  });
+
+  it('appends a second trigger entry to the coalesced job trace', () => {
+    const ctx = knownArrsCtx();
+    handleWebhook(ctx, 'sonarr', seriesAdd);
+    handleWebhook(ctx, 'sonarr', seriesAdd);
+    const job = ctx.queue.claim()!;
+    const rows = new TraceEntries(ctx.db).listByJob(job.id);
+    const triggerRows = rows.filter((r) => r.kind === 'trigger.webhook');
+    expect(triggerRows).toHaveLength(2);
+    expect(triggerRows[1]!.summary).toContain('coalesced');
   });
 });

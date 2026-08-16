@@ -137,13 +137,21 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
     if (ctx.queue.hasJobFor('acquire', name, r.kind, r.id)) {
       alreadyHandled++;
     } else {
-      ctx.queue.enqueue({
+      const result = ctx.queue.enqueue({
         pipeline: 'acquire',
         targetKind: r.kind,
         targetId: r.id,
         arrInstance: name,
         payload: { title: r.title, source: RECONCILE_SOURCE },
       });
+      if (result.id !== null) {
+        ctx.trace.event({
+          jobId: result.id,
+          kind: 'trigger.reconcile',
+          summary: `reconcile scan (missed webhook add on "${name}")`,
+          payload: () => ({ instance: name, kind: r.kind, targetId: r.id, title: r.title }),
+        });
+      }
       enqueuedIds.push(r.id);
     }
     seenIds.add(r.id);
@@ -235,7 +243,7 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
     const key = `${target.kind}:${target.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    ctx.queue.enqueue({
+    const result = ctx.queue.enqueue({
       pipeline: 'ingest',
       targetKind: target.kind,
       targetId: target.id,
@@ -244,6 +252,14 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
       // straight from the arr's live queue (`assessQueue`), not from the payload.
       payload: { source: RECONCILE_SOURCE },
     });
+    if (result.id !== null) {
+      ctx.trace.event({
+        jobId: result.id,
+        kind: 'trigger.reconcile',
+        summary: `reconcile scan (missed import history on "${name}")`,
+        payload: () => ({ instance: name, kind: target.kind, targetId: target.id, historyRecordId: r.id }),
+      });
+    }
     enqueuedTargets.push(key);
   }
 

@@ -32,6 +32,7 @@ import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '
 import { SubtitleRuns } from '../db/subtitleRuns.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
+import { NOOP_TRACER } from '../trace/tracer.js';
 import { cachedStorage, probeStorage } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
@@ -283,7 +284,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const payload: unknown = await c.req.json().catch(() => undefined);
       // `requireConfig(ctx)` (not a value snapshotted here at mount time) so a config
       // reloaded via `PUT /api/config` is picked up starting with the very next webhook.
-      const webhookCtx = { queue, events, config: requireConfig(ctx), clients };
+      const webhookCtx = { queue, events, config: requireConfig(ctx), clients, trace: ctx.trace ?? NOOP_TRACER };
       // Always 200: the arrs retry non-2xx webhook deliveries, which we don't want.
       return c.json(handleWebhook(webhookCtx, instance, payload));
     });
@@ -403,6 +404,14 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         targetId,
         payload: { title, source: 'manual', hint },
       });
+      if (result.id !== null) {
+        ctx.trace?.event({
+          jobId: result.id,
+          kind: 'trigger.manual',
+          summary: `manual acquire (${arrInstance})`,
+          payload: () => parsed.data,
+        });
+      }
       return c.json({ outcome: result.outcome });
     });
 
