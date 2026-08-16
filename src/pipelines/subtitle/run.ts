@@ -78,7 +78,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
   // Wrapped once so every arr call this job makes (resolveTargetMeta, listVideoTargets, ...)
-  // traces without each site opting in — same as acquire and ingest.
+  // traces without each site opting in, same as acquire and ingest.
   const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   assertMounted(ctx, job, 'subtitle');

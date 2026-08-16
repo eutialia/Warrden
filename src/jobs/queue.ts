@@ -277,6 +277,17 @@ export class JobQueue {
     return row ? parseRow(row) : null;
   }
 
+  /** Rows for the given ids, in no particular order, silently skipping ids with no row.
+   * For callers holding a batch of job ids (the trace list route) that would otherwise
+   * fire one `get()` per id. */
+  getMany(ids: number[]): JobRow[] {
+    if (ids.length === 0) return [];
+    const rows = this.db
+      .prepare(`SELECT * FROM jobs WHERE id IN (${ids.map(() => '?').join(', ')})`)
+      .all(...ids) as JobRowRaw[];
+    return rows.map(parseRow);
+  }
+
   list(opts?: { limit?: number }): JobRow[] {
     const rows = (
       opts?.limit === undefined

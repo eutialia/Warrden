@@ -4,6 +4,7 @@ import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { SyncState } from '../db/syncState.js';
 import type { TargetKind } from '../jobs/queue.js';
+import { traceTrigger } from '../trace/tracer.js';
 import { foreignProfilesCarryingTag, isWarrdenProfile, isWarrdenTag } from '../managed/ownership.js';
 import { errorMessage } from '../util/errors.js';
 
@@ -144,14 +145,11 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
         arrInstance: name,
         payload: { title: r.title, source: RECONCILE_SOURCE },
       });
-      if (result.id !== null) {
-        ctx.trace.event({
-          jobId: result.id,
-          kind: 'trigger.reconcile',
-          summary: `reconcile scan (missed webhook add on "${name}")`,
-          payload: () => ({ instance: name, kind: r.kind, targetId: r.id, title: r.title }),
-        });
-      }
+      traceTrigger(ctx.trace, result, {
+        kind: 'trigger.reconcile',
+        summary: `reconcile scan (missed webhook add on "${name}")`,
+        payload: () => ({ instance: name, kind: r.kind, targetId: r.id, title: r.title }),
+      });
       enqueuedIds.push(r.id);
     }
     seenIds.add(r.id);
@@ -252,14 +250,11 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
       // straight from the arr's live queue (`assessQueue`), not from the payload.
       payload: { source: RECONCILE_SOURCE },
     });
-    if (result.id !== null) {
-      ctx.trace.event({
-        jobId: result.id,
-        kind: 'trigger.reconcile',
-        summary: `reconcile scan (missed import history on "${name}")`,
-        payload: () => ({ instance: name, kind: target.kind, targetId: target.id, historyRecordId: r.id }),
-      });
-    }
+    traceTrigger(ctx.trace, result, {
+      kind: 'trigger.reconcile',
+      summary: `reconcile scan (missed import history on "${name}")`,
+      payload: () => ({ instance: name, kind: target.kind, targetId: target.id, historyRecordId: r.id }),
+    });
     enqueuedTargets.push(key);
   }
 

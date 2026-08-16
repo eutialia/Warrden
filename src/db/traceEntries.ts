@@ -112,6 +112,9 @@ export class TraceEntries {
   // Whole jobs at a time: a partially pruned trace is worse than none.
   // Returns the count of pruned jobs, not rows.
   prune(retentionDays: number, now = Date.now()): number {
+    // Same clamp EventLog.prune keeps: a zero or negative retention would put the cutoff
+    // at (or past) now and delete traces that are still live.
+    if (retentionDays <= 0) return 0;
     const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
     const stale = this.db
       .prepare(

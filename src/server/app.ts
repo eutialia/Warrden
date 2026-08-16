@@ -33,7 +33,7 @@ import { SubtitleRuns } from '../db/subtitleRuns.js';
 import { TraceEntries } from '../db/traceEntries.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
-import { NOOP_TRACER } from '../trace/tracer.js';
+import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { cachedStorage, probeStorage } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
@@ -381,24 +381,29 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
     app.get('/api/traces', (c) => {
       const summaries = traces.summaries(100);
-      const out = summaries.flatMap((s) => {
-        const job = queue.get(s.job_id);
-        if (!job) return [];
-        const title = typeof job.payload.title === 'string' ? job.payload.title : `${job.target_kind} #${job.target_id}`;
-        return [{
+      // One lookup for the whole window instead of a `queue.get` per summary: the list is
+      // refetched on every trace.appended, so 100 point queries per tick add up.
+      const jobs = new Map(queue.getMany(summaries.map((s) => s.job_id)).map((j) => [j.id, j]));
+      const out = summaries.map((s) => {
+        const job = jobs.get(s.job_id);
+        // A trace whose job row is gone is still viewable, so it stays in the list with a
+        // synthesized header rather than silently shrinking the window below its size.
+        const title = typeof job?.payload.title === 'string' ? job.payload.title : job ? `${job.target_kind} #${job.target_id}` : `job #${s.job_id}`;
+        return {
           jobId: s.job_id,
-          pipeline: job.pipeline,
+          pipeline: job?.pipeline ?? 'unknown',
           targetTitle: title,
-          jobStatus: job.status,
+          jobStatus: job?.status ?? 'unknown',
           // The target triple, so the debug view can link a trace to the other phases'
-          // traces for the SAME target (acquire -> ingest -> subtitle) client-side.
-          arrInstance: job.arr_instance,
-          targetKind: job.target_kind,
-          targetId: job.target_id,
+          // traces for the SAME target (acquire -> ingest -> subtitle) client-side. Null
+          // for a vanished job: it can be linked to nothing.
+          arrInstance: job?.arr_instance ?? null,
+          targetKind: job?.target_kind ?? null,
+          targetId: job?.target_id ?? null,
           entryCount: s.entry_count,
           firstTs: s.first_ts,
           lastTs: s.last_ts,
-        }];
+        };
       });
       return c.json({ traces: out });
     });
@@ -408,7 +413,10 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const seq = Number(c.req.param('seq'));
       const row = Number.isInteger(jobId) && Number.isInteger(seq) ? traces.get(jobId, seq) : null;
       if (!row) return c.json({ error: 'entry not found' }, 404);
-      return c.json({ ...row, payload: row.payload === null ? null : (JSON.parse(row.payload) as unknown) });
+      // Same entry shape the list route returns (raw payload column dropped, hasPayload
+      // added), plus the parsed payload this route exists to deliver.
+      const { payload, ...rest } = row;
+      return c.json({ ...rest, hasPayload: payload !== null, payload: payload === null ? null : (JSON.parse(payload) as unknown) });
     });
 
     app.get('/api/traces/:jobId', (c) => {
@@ -417,7 +425,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (rows.length === 0) return c.json({ error: 'trace not found' }, 404);
       // A still-`running` entry on a job that has already finished means the job crashed
       // mid-step; the UI needs `jobTerminal` to render those as interrupted rather than
-      // as live work. A vanished job (pruned) counts as terminal — nothing can advance it.
+      // as live work. A vanished job (pruned) counts as terminal: nothing can advance it.
       const job = queue.get(jobId);
       return c.json({
         jobId,
@@ -455,14 +463,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         targetId,
         payload: { title, source: 'manual', hint },
       });
-      if (result.id !== null) {
-        ctx.trace?.event({
-          jobId: result.id,
-          kind: 'trigger.manual',
-          summary: `manual acquire (${arrInstance})`,
-          payload: () => parsed.data,
-        });
-      }
+      traceTrigger(ctx.trace, result, {
+        kind: 'trigger.manual',
+        summary: `manual acquire (${arrInstance})`,
+        payload: () => parsed.data,
+      });
       return c.json({ outcome: result.outcome });
     });
 
@@ -495,14 +500,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         targetId,
         payload: { source: 'manual' },
       });
-      if (result.id !== null) {
-        ctx.trace?.event({
-          jobId: result.id,
-          kind: 'trigger.manual',
-          summary: `manual subtitle (${arrInstance})`,
-          payload: () => parsed.data,
-        });
-      }
+      traceTrigger(ctx.trace, result, {
+        kind: 'trigger.manual',
+        summary: `manual subtitle (${arrInstance})`,
+        payload: () => parsed.data,
+      });
       return c.json({ outcome: result.outcome });
     });
   }
@@ -577,14 +579,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         arrInstance: job.arr_instance,
         payload: { ...job.payload, source: 'retry' },
       });
-      if (retried.id !== null) {
-        ctx.trace?.event({
-          jobId: retried.id,
-          kind: 'trigger.manual',
-          summary: 'attention retry',
-          payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, pipeline: job.pipeline }),
-        });
-      }
+      traceTrigger(ctx.trace, retried, {
+        kind: 'trigger.manual',
+        summary: 'attention retry',
+        payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, pipeline: job.pipeline }),
+      });
       // Marked resolved only once the re-enqueue above actually happened.
       attentionItems.setStatus(id, 'resolved');
       events.append({
@@ -619,14 +618,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         arrInstance: job.arr_instance,
         payload: { ...job.payload, source: 'repick', hint: parsed.data.hint },
       });
-      if (repicked.id !== null) {
-        ctx.trace?.event({
-          jobId: repicked.id,
-          kind: 'trigger.manual',
-          summary: 'attention repick',
-          payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, hint: parsed.data.hint }),
-        });
-      }
+      traceTrigger(ctx.trace, repicked, {
+        kind: 'trigger.manual',
+        summary: 'attention repick',
+        payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, hint: parsed.data.hint }),
+      });
       attentionItems.setStatus(id, 'resolved');
       events.append({
         kind: 'attention.repicked',

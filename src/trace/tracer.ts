@@ -23,12 +23,45 @@ export interface Tracer {
   event(o: TraceStepInput): number | null;
 }
 
-const NOOP_HANDLE: StepHandle = { seq: null, end: () => undefined };
+export const NOOP_HANDLE: StepHandle = { seq: null, end: () => undefined };
 
 export const NOOP_TRACER: Tracer = {
   begin: () => NOOP_HANDLE,
   event: () => null,
 };
+
+/** Structural mirror of `JobQueue.enqueue`'s result, kept local so the tracer owes the
+ * job queue no import. */
+export interface TriggerResult {
+  id: number | null;
+  outcome: 'enqueued' | 'coalesced' | 'marked-dirty';
+}
+
+/**
+ * Writes the "why does this job exist" entry on the job the trigger will actually be
+ * served by, which is not always the id the enqueue handed back:
+ *
+ * - `enqueued`: a fresh row, the trigger's own job.
+ * - `coalesced`: the pending twin that will run this trigger too, so the entry belongs on
+ *   its trace, marked as coalesced.
+ * - `marked-dirty`: the id is a RUNNING twin whose trace is mid-flight and whose run
+ *   predates this trigger. The job that will serve it is the requeue `complete()`/`fail()`
+ *   inserts later, which has no id yet, so nothing is written rather than mis-attributing
+ *   the trigger to a run it had no part in.
+ */
+export function traceTrigger(
+  trace: Tracer | undefined,
+  result: TriggerResult,
+  e: { kind: string; summary: string; payload?: PayloadThunk },
+): void {
+  if (trace === undefined || result.outcome === 'marked-dirty' || result.id === null) return;
+  trace.event({
+    jobId: result.id,
+    kind: e.kind,
+    summary: result.outcome === 'coalesced' ? `${e.summary} (coalesced)` : e.summary,
+    payload: e.payload,
+  });
+}
 
 // Reads the enabled switch live on every call rather than caching it at construction,
 // so flipping `debug.enabled` in config takes effect immediately without recreating

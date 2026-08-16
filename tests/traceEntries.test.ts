@@ -60,6 +60,14 @@ describe('TraceEntries', () => {
     expect(t.listByJob(2)).toHaveLength(1);
   });
 
+  it('prune deletes nothing for a zero or negative retention', () => {
+    const now = Date.now();
+    t.append({ jobId: 1, kind: 'a', summary: 'old', tsStart: now - 8 * 24 * 3600 * 1000 });
+    expect(t.prune(0, now)).toBe(0);
+    expect(t.prune(-1, now)).toBe(0);
+    expect(t.listByJob(1)).toHaveLength(1);
+  });
+
   it('serializePayload passes small values through unchanged', () => {
     expect(JSON.parse(serializePayload({ a: 1 }))).toEqual({ a: 1 });
     expect(serializePayload(undefined)).toBe('null');

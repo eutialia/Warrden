@@ -2,7 +2,21 @@ import type { ArrApi } from './types.js';
 import type { Tracer } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
 
-const SIDE_EFFECT_METHODS = new Set(['grabRelease']);
+// Every ArrApi method that changes arr state. Read-only calls are noise in the debug
+// view; these are the rows an operator scans for when asking "what did Warrden actually
+// do to my library?", so a new mutator added to ArrApi belongs here too.
+const SIDE_EFFECT_METHODS = new Set([
+  'grabRelease',
+  'executeManualImport',
+  'updateSeries',
+  'createTag',
+  'deleteTag',
+  'createReleaseProfile',
+  'updateReleaseProfile',
+  'deleteReleaseProfile',
+  'createNotification',
+  'deleteNotification',
+]);
 
 // Proxy over explicit method wrappers: ArrApi grows methods over time and every one
 // of them is an HTTP call worth the same treatment.

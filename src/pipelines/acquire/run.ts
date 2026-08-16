@@ -77,8 +77,8 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
   if (!rawClient) {
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
-  // Wrapped once here so every downstream arr call — including the ones inside
-  // resolveTargetTitle and pinReleaseGroup — traces without each site opting in.
+  // Wrapped once here so every downstream arr call (including the ones inside
+  // resolveTargetTitle and pinReleaseGroup) traces without each site opting in.
   const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   if (job.target_kind === 'movie') {

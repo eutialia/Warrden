@@ -6,11 +6,9 @@ import { generateObject } from 'ai';
 import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import type { z } from 'zod';
 import type { Config, Provider } from '../config/schema.js';
-import { NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
+import { NOOP_HANDLE, NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
 import { planPromptCache } from './promptCache.js';
-
-const NOOP_HANDLE_LOCAL: StepHandle = { seq: null, end: () => undefined };
 
 export interface GenerateOpts<T> {
   callsite: string; // e.g. 'release-pick'
@@ -149,7 +147,7 @@ export class AiSdkGenerator implements StructuredGenerator {
           summary: `${opts.callsite} via ${primary.provider}/${primary.model}`,
           payload: () => ({ system: opts.system, prompt: opts.prompt }),
         })
-      : NOOP_HANDLE_LOCAL;
+      : NOOP_HANDLE;
     try {
       const result = await withFallback<T>(
         async (ref) => this.attemptOnce(opts, ref, call),
@@ -178,7 +176,7 @@ export class AiSdkGenerator implements StructuredGenerator {
           kind: 'llm.attempt',
           summary: `${ref.provider}/${ref.model}`,
         })
-      : NOOP_HANDLE_LOCAL;
+      : NOOP_HANDLE;
     try {
       const model = createModel(this.cfg, ref, opts.callsite);
       const cache = planPromptCache(opts.promptCache === true, ref.provider, `warrden:${opts.callsite}`);

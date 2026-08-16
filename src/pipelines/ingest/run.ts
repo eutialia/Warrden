@@ -17,6 +17,7 @@ import { mapArrPath, type PathMapping } from '../../fs/paths.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import { traceArrClient } from '../../arr/traced.js';
 import type { JobRow } from '../../jobs/queue.js';
+import { traceTrigger } from '../../trace/tracer.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { assertMounted } from '../mounts.js';
@@ -201,22 +202,18 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
     arrInstance: job.arr_instance,
     payload: { source: 'ingest' },
   });
-  // The trigger entry belongs to the NEW subtitle job's trace, not this one — it's the
-  // "why does this job exist" row the debug view reads. A coalesced enqueue returns a
-  // null id (it folded into an existing pending/running job) and gets no entry.
-  if (followUp.id !== null) {
-    ctx.trace.event({
-      jobId: followUp.id,
-      kind: 'trigger.pipeline',
-      summary: 'subtitle follow-up from ingest',
-      payload: () => ({
-        fromJobId: job.id,
-        arrInstance: job.arr_instance,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
-      }),
-    });
-  }
+  // The trigger entry belongs to the NEW subtitle job's trace, not this one: it's the
+  // "why does this job exist" row the debug view reads.
+  traceTrigger(ctx.trace, followUp, {
+    kind: 'trigger.pipeline',
+    summary: 'subtitle follow-up from ingest',
+    payload: () => ({
+      fromJobId: job.id,
+      arrInstance: job.arr_instance,
+      targetKind: job.target_kind,
+      targetId: job.target_id,
+    }),
+  });
 }
 
 /** Whether the file at `path` is exactly `size` bytes — `false` on ANY stat failure

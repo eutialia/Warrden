@@ -117,6 +117,19 @@ describe('handleWebhook', () => {
     const rows = new TraceEntries(ctx.db).listByJob(job.id);
     const triggerRows = rows.filter((r) => r.kind === 'trigger.webhook');
     expect(triggerRows).toHaveLength(2);
-    expect(triggerRows[1]!.summary).toContain('coalesced');
+    expect(triggerRows[1]!.summary).toBe('SeriesAdd webhook (sonarr) (coalesced)');
+  });
+
+  it('writes no trigger entry when the enqueue only dirties a running twin', () => {
+    const ctx = knownArrsCtx();
+    handleWebhook(ctx, 'sonarr', seriesAdd);
+    const job = ctx.queue.claim()!; // now running, so the second webhook can only mark it dirty
+    const before = new TraceEntries(ctx.db).listByJob(job.id).length;
+
+    handleWebhook(ctx, 'sonarr', seriesAdd);
+
+    // The trigger will be served by the job `complete()` requeues later, which has no id
+    // yet, so the running job's trace must not claim it.
+    expect(new TraceEntries(ctx.db).listByJob(job.id)).toHaveLength(before);
   });
 });

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import type { PipelineName, TargetKind } from '../jobs/queue.js';
+import { traceTrigger } from '../trace/tracer.js';
 
 // Zod object schemas strip unknown keys by default rather than rejecting them, so real
 // Sonarr/Radarr payloads — which carry many more fields than we care about — parse
@@ -111,17 +112,11 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
     arrInstance: instanceName,
     payload: jobPayload,
   });
-  if (result.id !== null) {
-    ctx.trace.event({
-      jobId: result.id,
-      kind: 'trigger.webhook',
-      summary:
-        result.outcome === 'enqueued'
-          ? `${event.eventType} webhook (${instanceName})`
-          : `${event.eventType} webhook (${instanceName}, ${result.outcome})`,
-      payload: () => payload,
-    });
-  }
+  traceTrigger(ctx.trace, result, {
+    kind: 'trigger.webhook',
+    summary: `${event.eventType} webhook (${instanceName})`,
+    payload: () => payload,
+  });
   ctx.events.append({
     kind: 'webhook.received',
     jobId: result.id ?? undefined,

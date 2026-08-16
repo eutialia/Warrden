@@ -896,6 +896,28 @@ describe('app', () => {
       });
     });
 
+    it('keeps a trace whose job row is gone, with a synthesized header', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      const { id } = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'movie', targetId: 1, arrInstance: 'radarr', payload: { title: 'Dune' } });
+      ctx.trace.event({ jobId: id!, kind: 'trigger.manual', summary: 't' });
+      ctx.db.prepare('DELETE FROM jobs WHERE id = ?').run(id);
+
+      const body = (await (await app.request('/api/traces')).json()) as { traces: Record<string, unknown>[] };
+      // The trace is still readable, so dropping its row would shrink the window below
+      // its own size for no gain.
+      expect(body.traces).toHaveLength(1);
+      expect(body.traces[0]).toMatchObject({
+        jobId: id,
+        targetTitle: `job #${id}`,
+        pipeline: 'unknown',
+        jobStatus: 'unknown',
+        arrInstance: null,
+        targetKind: null,
+        targetId: null,
+      });
+    });
+
     it('reports the job status and whether it is terminal so a crashed mid-step entry reads as interrupted', async () => {
       const ctx = makeCtx();
       const app = createApp(ctx);
@@ -919,8 +941,11 @@ describe('app', () => {
       const list = (await (await app.request(`/api/traces/${id}`)).json()) as { entries: Record<string, unknown>[] };
       expect(list.entries[0].payload).toBeUndefined();
       expect(list.entries[0].hasPayload).toBe(true);
-      const one = (await (await app.request(`/api/traces/${id}/entries/0`)).json()) as { payload: unknown };
+      // Same row shape as the list route (raw payload column dropped, hasPayload kept),
+      // plus the parsed payload: the web type promises both.
+      const one = (await (await app.request(`/api/traces/${id}/entries/0`)).json()) as Record<string, unknown>;
       expect(one.payload).toEqual({ secret: 'body' });
+      expect(one).toMatchObject({ seq: 0, kind: 'trigger.manual', hasPayload: true });
     });
 
     it('404s on unknown trace and unknown entry', async () => {
