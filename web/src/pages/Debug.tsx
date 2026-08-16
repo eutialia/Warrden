@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { fetchTraces, fetchTrace, fetchTraceEntry, type TraceSummary, type TraceEntry } from '@/api';
+import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch, type SseEvent } from '@/hooks/useSseRefetch';
 import { TraceTimeline } from '@/components/TraceTimeline';
 import { PageHeader } from '@/components/PageHeader';
@@ -22,29 +23,76 @@ export default function DebugPage() {
   const [pipelineFilter, setPipelineFilter] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
-  const loadList = useCallback(() => {
-    fetchTraces()
-      .then((r) => setTraces(r.traces))
-      .catch(() => setTraces([]));
-  }, []);
+  // Separate generations for the list and the per-job trace: they're independent data
+  // streams, so a list tick must not invalidate an in-flight trace fetch and vice versa.
+  const listGen = useFetchGeneration();
+  const traceGen = useFetchGeneration();
+  // Holds the current job's isStale() check so every payload fetch for that job (however
+  // many entries get toggled open) shares it without bumping the generation on each other —
+  // only a job switch (or unmount) should invalidate a pending payload fetch.
+  const traceStaleRef = useRef<() => boolean>(() => false);
 
-  const loadTrace = useCallback(() => {
-    if (selectedJob === null) return;
-    fetchTrace(selectedJob)
-      .then((r) => setEntries(r.entries))
-      .catch(() => setEntries([]));
-  }, [selectedJob]);
+  const loadList = useCallback(
+    (opts?: { isStale: () => boolean }) => {
+      fetchTraces()
+        .then((r) => {
+          if (opts?.isStale()) return;
+          setTraces(r.traces);
+        })
+        .catch(() => {
+          if (opts?.isStale()) return;
+          setTraces([]);
+        });
+    },
+    [],
+  );
 
-  useEffect(loadList, [loadList]);
+  const loadTrace = useCallback(
+    (opts?: { isStale: () => boolean }) => {
+      if (selectedJob === null) return;
+      fetchTrace(selectedJob)
+        .then((r) => {
+          if (opts?.isStale()) return;
+          setEntries(r.entries);
+        })
+        .catch(() => {
+          if (opts?.isStale()) return;
+          setEntries([]);
+        });
+    },
+    [selectedJob],
+  );
+
   useEffect(() => {
+    const isStale = listGen();
+    loadList({ isStale });
+    return () => {
+      listGen();
+    };
+  }, [loadList, listGen]);
+
+  useEffect(() => {
+    const isStale = traceGen();
+    traceStaleRef.current = isStale;
+    // Clear immediately, not just selection/payload state — otherwise the previous job's
+    // rows (and a stale timeline) linger on screen while the new job's fetch is in flight.
     setSelectedSeq(null);
     setPayloads({});
-    loadTrace();
-  }, [loadTrace]);
+    setEntries([]);
+    if (selectedJob !== null) loadTrace({ isStale });
+    return () => {
+      traceGen();
+    };
+  }, [selectedJob, loadTrace, traceGen]);
 
-  useSseRefetch(loadList, 1000, true);
+  // trace.appended is the whole point of this page's SSE traffic, so the default filter
+  // (which excludes it to spare other pages the noise) has to be overridden here.
+  useSseRefetch(loadList, 1000, true, useCallback(() => true, []));
+  // Same-job SSE traffic deliberately isn't staleness-guarded (harmless: it's the current
+  // job racing itself), matching JobDetail's rationale — the per-job effect above is what
+  // actually protects against a stale *job switch* clobbering the current one.
   useSseRefetch(
-    loadTrace,
+    () => loadTrace(),
     0,
     selectedJob !== null,
     useCallback(
@@ -73,9 +121,14 @@ export default function DebugPage() {
       });
       return;
     }
-    fetchTraceEntry(selectedJob, entry.seq).then((full) =>
-      setPayloads((prev) => ({ ...prev, [entry.seq]: full.payload })),
-    );
+    // Captured now, not read at resolution time: seqs restart per job, so without this a
+    // late-resolving fetch from a job you've since navigated away from would write into
+    // the new job's payloads map under a colliding seq, with no visual sign it's wrong.
+    const isStale = traceStaleRef.current;
+    fetchTraceEntry(selectedJob, entry.seq).then((full) => {
+      if (isStale()) return;
+      setPayloads((prev) => ({ ...prev, [entry.seq]: full.payload }));
+    });
   };
 
   const childrenOf = (seq: number) => entries.filter((e) => e.parent_seq === seq);

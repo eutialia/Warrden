@@ -51,7 +51,7 @@ export function TraceTimeline({
           return (
             <div
               key={s.key}
-              style={{ flexGrow: pct }}
+              style={{ flexGrow: pct, flexBasis: 0 }}
               className="rounded-sm bg-muted-foreground/10"
               title={`${s.label} ${Math.round(s.weight / 1000)}s`}
             />
@@ -61,7 +61,7 @@ export function TraceTimeline({
         return (
           <button
             key={s.key}
-            style={{ flexGrow: pct }}
+            style={{ flexGrow: pct, flexBasis: 0 }}
             onClick={() => onSelect(e.seq)}
             title={`${e.summary} (${Math.round(s.weight / 1000)}s)`}
             className={`min-w-0 truncate rounded-sm px-1 text-[10px] text-white ${STATUS_CLASS[e.status]} ${
