@@ -40,7 +40,7 @@ function buildContext(dataDir: string): AppContext {
     queue: new JobQueue(db),
     events,
     clients,
-    llm: new AiSdkGenerator(config),
+    llm: new AiSdkGenerator(config, trace),
     trace,
     media: new CliMediaTools(),
   };

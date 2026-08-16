@@ -6,8 +6,11 @@ import { generateObject } from 'ai';
 import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import type { z } from 'zod';
 import type { Config, Provider } from '../config/schema.js';
+import { NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
 import { planPromptCache } from './promptCache.js';
+
+const NOOP_HANDLE_LOCAL: StepHandle = { seq: null, end: () => undefined };
 
 export interface GenerateOpts<T> {
   callsite: string; // e.g. 'release-pick'
@@ -20,6 +23,8 @@ export interface GenerateOpts<T> {
    * `planPromptCache`) — not "Anthropic-only, ignore elsewhere".
    */
   promptCache?: boolean;
+  /** Opt into tracing this call: written under `jobId`, nested under `parentSeq` if given. */
+  trace?: { jobId: number; parentSeq?: number };
 }
 
 export interface StructuredGenerator {
@@ -129,49 +134,91 @@ function requireKey(cfg: Config, provider: 'openrouter' | 'openai' | 'anthropic'
 
 /** `StructuredGenerator` backed by the Vercel AI SDK, with per-callsite model + fallback resolution. */
 export class AiSdkGenerator implements StructuredGenerator {
-  constructor(private readonly cfg: Config) {}
+  constructor(
+    private readonly cfg: Config,
+    private readonly trace: Tracer = NOOP_TRACER,
+  ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
     const { fallback, ...primary } = resolveModel(this.cfg, opts.callsite);
+    const call: StepHandle = opts.trace
+      ? this.trace.begin({
+          jobId: opts.trace.jobId,
+          parentSeq: opts.trace.parentSeq,
+          kind: 'llm.call',
+          summary: `${opts.callsite} via ${primary.provider}/${primary.model}`,
+          payload: () => ({ system: opts.system, prompt: opts.prompt }),
+        })
+      : NOOP_HANDLE_LOCAL;
     try {
-      return await withFallback<T>(
-        async (ref) => {
-          const model = createModel(this.cfg, ref, opts.callsite);
-          const cache = planPromptCache(opts.promptCache === true, ref.provider, `warrden:${opts.callsite}`);
-          // System-as-message: stable prefix for automatic caches (OpenAI/etc.) and a place
-          // to hang explicit breakpoints (Anthropic / OpenRouter→Claude). User half varies.
-          const { object } = await generateObject({
-            model,
-            schema: opts.schema,
-            messages: [
-              {
-                role: 'system',
-                content: opts.system,
-                ...(cache.systemProviderOptions
-                  ? { providerOptions: cache.systemProviderOptions }
-                  : {}),
-              },
-              { role: 'user', content: opts.prompt },
-            ],
-            ...(cache.callProviderOptions
-              ? { providerOptions: cache.callProviderOptions }
-              : {}),
-            // Our own primary/primary/fallback/fallback ladder owns the retry count;
-            // the AI SDK's default internal retries would otherwise multiply each
-            // ladder slot into up to 3 provider calls of its own.
-            maxRetries: 0,
-          });
-          return object;
-        },
+      const result = await withFallback<T>(
+        async (ref) => this.attemptOnce(opts, ref, call),
         primary,
         fallback,
       );
+      call.end('ok');
+      return result;
     } catch (err) {
+      call.end('error', () => ({ error: errorMessage(err) }));
       if (err instanceof LlmError) throw err;
       const message = errorMessage(err);
       throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite, {
         cause: err,
       });
+    }
+  }
+
+  private async attemptOnce<T>(opts: GenerateOpts<T>, ref: ModelRef, call: StepHandle): Promise<T> {
+    const attempt: StepHandle = opts.trace
+      ? this.trace.begin({
+          jobId: opts.trace.jobId,
+          parentSeq: call.seq ?? opts.trace.parentSeq,
+          kind: 'llm.attempt',
+          summary: `${ref.provider}/${ref.model}`,
+        })
+      : NOOP_HANDLE_LOCAL;
+    try {
+      const model = createModel(this.cfg, ref, opts.callsite);
+      const cache = planPromptCache(opts.promptCache === true, ref.provider, `warrden:${opts.callsite}`);
+      // System-as-message: stable prefix for automatic caches (OpenAI/etc.) and a place
+      // to hang explicit breakpoints (Anthropic / OpenRouter→Claude). User half varies.
+      const result = await generateObject({
+        model,
+        schema: opts.schema,
+        messages: [
+          {
+            role: 'system',
+            content: opts.system,
+            ...(cache.systemProviderOptions
+              ? { providerOptions: cache.systemProviderOptions }
+              : {}),
+          },
+          { role: 'user', content: opts.prompt },
+        ],
+        ...(cache.callProviderOptions
+          ? { providerOptions: cache.callProviderOptions }
+          : {}),
+        // Our own primary/primary/fallback/fallback ladder owns the retry count;
+        // the AI SDK's default internal retries would otherwise multiply each
+        // ladder slot into up to 3 provider calls of its own.
+        maxRetries: 0,
+      });
+      attempt.end('ok', () => ({
+        provider: ref.provider,
+        model: ref.model,
+        request: result.request?.body,
+        output: result.object,
+        usage: result.usage,
+        providerMetadata: result.providerMetadata,
+        responseId: result.response?.id,
+        responseModelId: result.response?.modelId,
+        finishReason: result.finishReason,
+        warnings: result.warnings,
+      }));
+      return result.object;
+    } catch (err) {
+      attempt.end('error', () => ({ provider: ref.provider, model: ref.model, error: errorMessage(err) }));
+      throw err;
     }
   }
 }

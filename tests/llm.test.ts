@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { TraceEntries } from '../src/db/traceEntries.js';
+import { EventLog } from '../src/events/log.js';
 import { AiSdkGenerator, LlmError, resolveModel, withFallback } from '../src/llm/generator.js';
-import { baseConfig } from './helpers.js';
+import { SqlTracer } from '../src/trace/tracer.js';
+import { baseConfig, freshDb } from './helpers.js';
 
 // AiSdkGenerator.generate composes resolveModel + withFallback around `ai`'s generateObject.
 // Mocking just that call keeps these tests network-free while still exercising the real
@@ -151,5 +154,56 @@ describe('AiSdkGenerator', () => {
       expect((err as InstanceType<typeof LlmError>).callsite).toBe('release-pick');
       expect((err as Error).cause).toBe(original);
     }
+  });
+});
+
+describe('AiSdkGenerator tracing', () => {
+  it('records a parent llm.call and one llm.attempt per ladder attempt', async () => {
+    generateObjectMock.mockReset();
+    const db = freshDb();
+    const cfg = baseConfig();
+    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
+    generateObjectMock
+      .mockRejectedValueOnce(new Error('rate limited'))
+      .mockResolvedValueOnce({
+        object: { pick: 'a' },
+        usage: { inputTokens: 10, outputTokens: 2 },
+        request: { body: '{"messages":[]}' },
+        response: { id: 'resp_1', modelId: 'claude-x' },
+        finishReason: 'stop',
+        warnings: [],
+        providerMetadata: {},
+      });
+    const result = await gen.generate({
+      callsite: 'release-pick',
+      schema: z.object({ pick: z.string() }),
+      system: 'sys',
+      prompt: 'user',
+      trace: { jobId: 42 },
+    });
+    expect(result).toEqual({ pick: 'a' });
+    const rows = new TraceEntries(db).listByJob(42);
+    const call = rows.find((r) => r.kind === 'llm.call');
+    const attempts = rows.filter((r) => r.kind === 'llm.attempt');
+    expect(call?.status).toBe('ok');
+    expect(attempts).toHaveLength(2);
+    expect(attempts.every((a) => a.parent_seq === call?.seq)).toBe(true);
+    expect(attempts[0].status).toBe('error');
+    const okPayload = JSON.parse(attempts[1].payload ?? '') as Record<string, unknown>;
+    expect(okPayload.responseId).toBe('resp_1');
+    expect(okPayload.finishReason).toBe('stop');
+    expect(okPayload.usage).toEqual({ inputTokens: 10, outputTokens: 2 });
+  });
+
+  it('writes nothing without a trace option', async () => {
+    generateObjectMock.mockReset();
+    const db = freshDb();
+    const cfg = baseConfig();
+    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
+    generateObjectMock.mockResolvedValueOnce({ object: { pick: 'a' } });
+    await gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p' });
+    expect(new TraceEntries(db).summaries()).toHaveLength(0);
   });
 });
