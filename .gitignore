@@ -4,6 +4,7 @@ data/
 web/node_modules/
 web/dist/
 .env
+compose.override.yaml
 
 # local design tooling workspace and outputs; not needed to build or run Warrden.
 .design-sync/

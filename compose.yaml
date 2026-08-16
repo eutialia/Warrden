@@ -1,0 +1,15 @@
+# Machine-independent compose definition. Per-machine media mounts live in
+# compose.override.yaml (git-ignored); copy compose.override.example.yaml to create it.
+# Docker compose merges the override automatically.
+services:
+  warrden:
+    build: .
+    image: warrden:dev
+    container_name: warrden
+    ports:
+      - "9797:9797"
+    volumes:
+      - warrden-data:/data
+
+volumes:
+  warrden-data:

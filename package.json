@@ -11,7 +11,10 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p . && node scripts/copy-migrations.mjs",
-    "build:web": "cd web && npm run build"
+    "build:web": "cd web && npm run build",
+    "docker": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "docker:reset": "docker compose down -v"
   },
   "keywords": [],
   "author": "",

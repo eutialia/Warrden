@@ -1,0 +1,18 @@
+# Per-machine mounts. Copy to compose.override.yaml (git-ignored) and point the host
+# paths at this machine's NAS mounts. The container paths are fixed: Warrden always
+# expects exactly these four (see README, "Quickstart").
+#
+#   /tv        Sonarr Series root folder
+#   /anime     Sonarr Anime root folder
+#   /movies    Radarr library root
+#   /downloads Torrent client download / completed root
+#
+# Leave a line out if this machine genuinely lacks that mount; the Storage health
+# panel will report it as missing.
+services:
+  warrden:
+    volumes:
+      - /mnt/nas/Series:/tv
+      - /mnt/nas/Anime:/anime
+      - /mnt/nas/Movies:/movies
+      - /mnt/nas/Downloads:/downloads

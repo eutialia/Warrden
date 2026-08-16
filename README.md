@@ -11,7 +11,18 @@ Sonarr/Radarr and the torrent client; Warrden does the decisions and cleanup the
 
 Warrden is a single container. It needs a data directory for its SQLite database and
 config, and network access to your arr instances. There's no published image yet, so
-build it from a checkout:
+build it from a checkout. The repo ships a compose file; put this machine's media
+mounts in a one-time override copy, then one command builds and runs the whole thing:
+
+```sh
+cp compose.override.example.yaml compose.override.yaml   # then edit the host paths
+npm run docker          # build + run attached; Ctrl-C stops it
+npm run docker:down     # remove container, keep the data volume
+npm run docker:reset    # remove container AND data volume (fresh instance)
+```
+
+The override file is git-ignored, so each machine keeps its own mount paths. Plain
+docker works too, if you prefer it:
 
 ```sh
 docker build -t warrden .
