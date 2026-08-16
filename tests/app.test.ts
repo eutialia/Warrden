@@ -8,6 +8,7 @@ import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -290,6 +291,29 @@ describe('app', () => {
 
       const retriedEvent = findEvent(ctx.events.list(), 'attention.retried');
       expect(retriedEvent).toMatchObject({ data: { id: item.id, jobId: enqueueResult.id, pipeline: 'ingest' } });
+    });
+
+    it('POST /api/attention/:id/retry and /repick trace a trigger.manual on the enqueued job', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const { app, item } = openAttentionForJob(ctx, { pipeline: 'ingest', payload: { downloadId: 'dl-1' }, kind: 'ingest.unmatched' });
+      expect((await app.request(`/api/attention/${item.id}/retry`, { method: 'POST', headers: jsonHeaders })).status).toBe(200);
+
+      // Its own context: `openAttentionForJob` claims+completes, which would otherwise pick
+      // up the pending job the retry above just re-enqueued.
+      const ctx2 = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const { app: app2, item: item2 } = openAttentionForJob(ctx2, { pipeline: 'acquire', targetId: 77, kind: 'acquire.failed' });
+      expect(
+        (await app2.request(`/api/attention/${item2.id}/repick`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ hint: 'prefer 1080p' }) })).status,
+      ).toBe(200);
+
+      const collect = (c: typeof ctx) => new TraceEntries(c.db).summaries().flatMap((s) => new TraceEntries(c.db).listByJob(s.job_id));
+      const entries = [...collect(ctx), ...collect(ctx2)];
+      const retry = entries.find((e) => e.summary === 'attention retry');
+      const repick = entries.find((e) => e.summary === 'attention repick');
+      expect(retry).toMatchObject({ kind: 'trigger.manual' });
+      expect(JSON.parse(retry!.payload ?? '')).toMatchObject({ attentionId: item.id, pipeline: 'ingest' });
+      expect(repick).toMatchObject({ kind: 'trigger.manual' });
+      expect(JSON.parse(repick!.payload ?? '')).toMatchObject({ attentionId: item2.id, hint: 'prefer 1080p' });
     });
 
     it('POST /api/attention/:id/retry: 400 when the linked job\'s arr instance has no registered client (parity with /api/acquire)', async () => {
@@ -859,9 +883,32 @@ describe('app', () => {
       const { id } = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'movie', targetId: 1, arrInstance: 'radarr', payload: { title: 'Dune' } });
       ctx.trace.event({ jobId: id!, kind: 'trigger.manual', summary: 't' });
       const res = await app.request('/api/traces');
-      const body = (await res.json()) as { traces: { jobId: number; targetTitle: string; entryCount: number }[] };
+      const body = (await res.json()) as { traces: Record<string, unknown>[] };
       expect(res.status).toBe(200);
-      expect(body.traces[0]).toMatchObject({ jobId: id, targetTitle: 'Dune', entryCount: 1 });
+      expect(body.traces[0]).toMatchObject({
+        jobId: id,
+        targetTitle: 'Dune',
+        entryCount: 1,
+        // The target triple the debug view links same-target traces across phases with.
+        arrInstance: 'radarr',
+        targetKind: 'movie',
+        targetId: 1,
+      });
+    });
+
+    it('reports the job status and whether it is terminal so a crashed mid-step entry reads as interrupted', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      const { id } = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'movie', targetId: 1, arrInstance: 'radarr' });
+      ctx.trace.begin({ jobId: id!, kind: 'pipeline.step', summary: 'never finished' });
+
+      const live = (await (await app.request(`/api/traces/${id}`)).json()) as Record<string, unknown>;
+      expect(live).toMatchObject({ jobStatus: 'pending', jobTerminal: false });
+
+      ctx.queue.claim();
+      ctx.queue.fail(id!, 'boom', { maxAttempts: 1 });
+      const dead = (await (await app.request(`/api/traces/${id}`)).json()) as Record<string, unknown>;
+      expect(dead).toMatchObject({ jobStatus: 'failed', jobTerminal: true });
     });
 
     it('returns entries without payloads, then one payload on demand', async () => {

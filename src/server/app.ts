@@ -390,6 +390,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
           pipeline: job.pipeline,
           targetTitle: title,
           jobStatus: job.status,
+          // The target triple, so the debug view can link a trace to the other phases'
+          // traces for the SAME target (acquire -> ingest -> subtitle) client-side.
+          arrInstance: job.arr_instance,
+          targetKind: job.target_kind,
+          targetId: job.target_id,
           entryCount: s.entry_count,
           firstTs: s.first_ts,
           lastTs: s.last_ts,
@@ -410,8 +415,14 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const jobId = Number(c.req.param('jobId'));
       const rows = Number.isInteger(jobId) ? traces.listByJob(jobId) : [];
       if (rows.length === 0) return c.json({ error: 'trace not found' }, 404);
+      // A still-`running` entry on a job that has already finished means the job crashed
+      // mid-step; the UI needs `jobTerminal` to render those as interrupted rather than
+      // as live work. A vanished job (pruned) counts as terminal — nothing can advance it.
+      const job = queue.get(jobId);
       return c.json({
         jobId,
+        jobStatus: job?.status ?? null,
+        jobTerminal: job ? isTerminal(job) : true,
         entries: rows.map(({ payload, ...rest }) => ({ ...rest, hasPayload: payload !== null })),
       });
     });
@@ -559,13 +570,21 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // Re-enqueues the JOB'S OWN pipeline (ingest or acquire, whichever it actually
       // was) — unlike repick below, a retry isn't necessarily an acquire re-pick, so it
       // must not hardcode one.
-      queue.enqueue({
+      const retried = queue.enqueue({
         pipeline: job.pipeline,
         targetKind: job.target_kind,
         targetId: job.target_id,
         arrInstance: job.arr_instance,
         payload: { ...job.payload, source: 'retry' },
       });
+      if (retried.id !== null) {
+        ctx.trace?.event({
+          jobId: retried.id,
+          kind: 'trigger.manual',
+          summary: 'attention retry',
+          payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, pipeline: job.pipeline }),
+        });
+      }
       // Marked resolved only once the re-enqueue above actually happened.
       attentionItems.setStatus(id, 'resolved');
       events.append({
@@ -593,13 +612,21 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // Always pipeline 'acquire' (unlike retry above) — a repick is specifically "try the
       // pick again, with a human's hint this time," regardless of which pipeline the
       // linked job itself ran.
-      queue.enqueue({
+      const repicked = queue.enqueue({
         pipeline: 'acquire',
         targetKind: job.target_kind,
         targetId: job.target_id,
         arrInstance: job.arr_instance,
         payload: { ...job.payload, source: 'repick', hint: parsed.data.hint },
       });
+      if (repicked.id !== null) {
+        ctx.trace?.event({
+          jobId: repicked.id,
+          kind: 'trigger.manual',
+          summary: 'attention repick',
+          payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, hint: parsed.data.hint }),
+        });
+      }
       attentionItems.setStatus(id, 'resolved');
       events.append({
         kind: 'attention.repicked',
