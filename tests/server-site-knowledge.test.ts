@@ -5,7 +5,6 @@ import {
   defaultSeedsDir,
   KNOWLEDGE_CHAR_CAP,
   loadKnowledge,
-  MAX_BULLET_CHARS,
   parseKnowledge,
 } from '../src/agent/siteKnowledge.js';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -178,41 +177,11 @@ describe('site knowledge routes', () => {
       expect(loadKnowledge(ctx.dataDir, 'https://x.test').sections.Access).toContain(hostile);
     });
 
-    it('400s a bullet over MAX_BULLET_CHARS — the agent could never write or update one this long, so an operator PUT is the only way to freeze that site\'s learning', async () => {
+    it('400s when the agent sections total more than KNOWLEDGE_CHAR_CAP', async () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
       const app = createApp(ctx);
-      // I-01: over MAX_BULLET_CHARS (400) but well under KNOWLEDGE_CHAR_CAP (10,000), so
-      // this trips the per-bullet cap specifically — not the whole-document cap, which
-      // shares the same "…Operator notes…" sentence in `agentSectionInvariantError` and
-      // would let this test pass even with the per-bullet branch deleted entirely.
-      const overBullet = 'x'.repeat(500);
-      const markdown = `# x.test\n\n## Access\n- ${overBullet}\n\n## Operator notes\n`;
-      expect(overBullet.length).toBeGreaterThan(MAX_BULLET_CHARS);
-      expect(overBullet.length).toBeLessThan(KNOWLEDGE_CHAR_CAP);
-
-      const res = await app.request('/api/site-knowledge', {
-        method: 'PUT',
-        headers: jsonHeaders,
-        body: JSON.stringify({ baseUrl: 'https://x.test', markdown }),
-      });
-      expect(res.status).toBe(400);
-      const body = await res.json();
-      expect(body.error).toContain(String(MAX_BULLET_CHARS));
-      expect(body.error).toContain('Operator notes');
-
-      // Nothing was written — the file this route refused to accept never lands on disk,
-      // so there is no way through the API to create the frozen-learning scenario at all.
-      const saved = loadKnowledge(ctx.dataDir, 'https://x.test');
-      expect(saved.sections.Access).toHaveLength(0);
-    });
-
-    it('400s when the agent sections total more than KNOWLEDGE_CHAR_CAP, even with no single bullet over MAX_BULLET_CHARS', async () => {
-      const ctx = ctxWithSites([{ baseUrl: 'https://x.test' }]);
-      const app = createApp(ctx);
-      // 30 bullets just under the per-bullet cap: none individually rejected, but together
-      // comfortably over KNOWLEDGE_CHAR_CAP (10,000).
-      const bullet = `- ${'x'.repeat(MAX_BULLET_CHARS - 2)}`;
-      expect(bullet.length).toBeLessThanOrEqual(MAX_BULLET_CHARS);
+      // 30 bullets of 400 characters each: ~12,000, comfortably over the 10,000 cap.
+      const bullet = `- ${'x'.repeat(398)}`;
       const bullets = Array.from({ length: 30 }, () => bullet);
       const markdown = `# x.test\n\n## Access\n${bullets.join('\n')}\n\n## Operator notes\n`;
 

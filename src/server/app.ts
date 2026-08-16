@@ -7,10 +7,8 @@ import { csrf } from 'hono/csrf';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import {
-  AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
   KnowledgeConflictError,
-  MAX_BULLET_CHARS,
   agentCharCount,
   defaultSeedsDir,
   loadKnowledgeWithVersion,
@@ -739,21 +737,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge), version });
     });
 
-    // Longest a single agent-section bullet in a PUT may be, and why an operator seeing
-    // this 400 should reach for `## Operator notes` instead: an over-cap bullet the agent
-    // itself could never have written (`MAX_BULLET_CHARS`, `siteReflection.ts`'s
-    // `applyOps`) freezes that site's learning forever, silently — `applyOps` drops any
-    // `update` whose `target` is over the cap, so the bullet becomes permanent, and if it
-    // also pushes the agent sections over `KNOWLEDGE_CHAR_CAP`, every future reflection
-    // write for the site is dropped whole (`reflectOnRun`'s overflow guard).
-    // The operator is still trusted and still not injection-scanned or ceiling-truncated —
-    // this just holds a hand-edit to the same shape limit the agent is held to, with a
-    // 400 that says where the room to write freely actually is.
+    // The one size bound a PUT is held to: agent sections over `KNOWLEDGE_CHAR_CAP` mean
+    // every future reflection write for the site is dropped whole (`reflectOnRun`'s overflow
+    // guard), so a hand-edit that overflows it silently freezes that site's learning.
+    // Individual bullets have no length cap. The operator is still trusted and still not
+    // injection-scanned or truncated: this just refuses the one shape a hand-edit can create
+    // that the agent could never dig itself back out of.
     function agentSectionInvariantError(k: SiteKnowledge): string | null {
-      const oversizedBullet = AGENT_SECTIONS.some((section) => k.sections[section].some((b) => b.length > MAX_BULLET_CHARS));
-      if (oversizedBullet) {
-        return `a bullet in an agent section is over ${MAX_BULLET_CHARS} characters — the browse agent can never write one this long and could never update it either, freezing that section. Put freeform or long content in "## Operator notes" instead, which has no length limit.`;
-      }
       const size = agentCharCount(k);
       if (size > KNOWLEDGE_CHAR_CAP) {
         return `the agent sections total ${size} characters, over the ${KNOWLEDGE_CHAR_CAP}-character cap the browse agent itself is held to — every future update it tries to write would be dropped. Put freeform or long content in "## Operator notes" instead, which has no length limit.`;
@@ -785,7 +775,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // the agent itself might inject into a prompt unsupervised, not for content a human
       // just typed into their own dashboard, and scan-on-load (the browse loop's own read,
       // Task 3) still catches it before the next run either way. It IS held to the same
-      // per-bullet and agent-section-total limits the agent's own writes are held to
+      // agent-section-total limit the agent's own writes are held to
       // (`agentSectionInvariantError` above) — an operator PUT is the one path that can
       // create knowledge the agent can never again touch, so this is enforced here rather
       // than left to the next reflection call to notice.

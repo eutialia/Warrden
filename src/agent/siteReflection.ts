@@ -11,7 +11,6 @@ import {
   AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
   KnowledgeConflictError,
-  MAX_BULLET_CHARS,
   agentCharCount,
   defaultSeedsDir,
   loadKnowledgeWithVersion,
@@ -44,6 +43,9 @@ const MAX_OPS = 20;
 
 /** Refused operations carried in an event's `data`. The rest are counted, not quoted. */
 const MAX_DROPPED_REPORTED = 10;
+
+/** Bounds what a dropped operation quotes back into the event row, nothing else. */
+const DROPPED_FIELD_CAP = 400;
 
 /** Any `(confirmed YYYY-MM-DD)` stamp with the whitespace around it, anywhere in the text
  * — not just a trailing one. A stamp buried mid-bullet survives a trailing-only strip and
@@ -169,10 +171,9 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  * Every refusal is returned in `dropped` with a reason rather than silently discarded, and
  * one dropped operation never costs its siblings. The checks, per operation, in order:
  *
- * 0. Anything past `MAX_OPS` is dropped unread, and so is any bullet or target longer than
- *    `MAX_BULLET_CHARS`. Both bound what one response can do — to the file, and to the
- *    event that quotes the refusals back. The bullet cap is tested after check 3, so
- *    padding a hostile bullet past it cannot downgrade the refusal to a length complaint.
+ * 0. Anything past `MAX_OPS` is dropped unread, bounding what one response can do to the
+ *    file. Bullet length itself is not capped: the only bound on size is
+ *    `KNOWLEDGE_CHAR_CAP` across the agent sections, checked after the whole batch applies.
  * 1. A section outside `AGENT_SECTIONS` — `## Operator notes` above all, but also any name
  *    a model invented — is refused. The schema's enum cannot even express the operator
  *    section, so a well-formed response never reaches this; it is here because a schema is
@@ -184,8 +185,8 @@ function cloneKnowledge(k: SiteKnowledge): SiteKnowledge {
  * 3. The text may not forge file structure (`FORGERY_CHECKS`) and is scanned at `'strict'`
  *    before it can land. Stored knowledge is replayed into a later system prompt, so a
  *    bullet is the one place an injection gets to persist past the page it came from.
- *    Every one of these checks — forgery, scan, length — runs against the STAMPED,
- *    de-stuffed candidate (`stamped(op.text, today)`, the exact bytes that get stored), not
+ *    Both of these checks (forgery and scan) run against the STAMPED, de-stuffed
+ *    candidate (`stamped(op.text, today)`, the exact bytes that get stored), not
  *    against the raw `op.text`. `withoutStamp` deletes every `(confirmed YYYY-MM-DD)` found
  *    anywhere in the text before the real stamp is appended, so a fake stamp buried in the
  *    op is free padding at validation time — enough of it pushes a match past a
@@ -212,8 +213,16 @@ export function applyOps(
 ): { knowledge: SiteKnowledge; dropped: DroppedOp[] } {
   const knowledge = cloneKnowledge(k);
   const dropped: DroppedOp[] = [];
+  // The refused op is quoted back into the `subtitle.knowledge-dropped` event, which streams
+  // over SSE and renders in the dashboard. `op.text`/`op.target` are raw model output with no
+  // length bound of their own: a single refused op can be 50KB, and MAX_DROPPED_REPORTED of
+  // them would put a half-megabyte in one event row. Truncate each here so the reported op is
+  // bounded.
+  const capField = (s: string): string =>
+    s.length <= DROPPED_FIELD_CAP ? s : `${s.slice(0, DROPPED_FIELD_CAP)}…`;
   const drop = (op: KnowledgeOp, why: string, hostile?: true): void => {
-    dropped.push(hostile ? { op, why, hostile } : { op, why });
+    const capped: KnowledgeOp = { ...op, text: capField(op.text), target: capField(op.target) };
+    dropped.push(hostile ? { op: capped, why, hostile } : { op: capped, why });
   };
 
   for (const [i, op] of ops.entries()) {
@@ -243,9 +252,6 @@ export function applyOps(
       continue;
     }
     const candidate = stamped(op.text, opts.today);
-    // Hostile checks run before the length cap: both refuse the write, but only one of
-    // them raises the event to `attention`, and padding a forged heading past the cap
-    // must not be able to buy silence.
     const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate));
     if (forgery) {
       drop(op, forgery.why, true);
@@ -255,11 +261,6 @@ export function applyOps(
       drop(op, 'injection patterns in bullet', true);
       continue;
     }
-    if (candidate.length > MAX_BULLET_CHARS) {
-      drop(op, `bullet text over ${MAX_BULLET_CHARS} characters`);
-      continue;
-    }
-
     /** Whether the section already holds this bullet, ignoring the bullet at `exclude` —
      * which for an `update` is the one being replaced, since a rule matching only itself is
      * a re-confirmation and not a duplicate. */
@@ -279,12 +280,6 @@ export function applyOps(
     const wanted = withoutStamp(op.target);
     if (wanted === '') {
       drop(op, `${op.op} with no target bullet`);
-      continue;
-    }
-    if (op.target.length > MAX_BULLET_CHARS) {
-      // No stored bullet can be this long, so this only ever fails to match — but it is
-      // quoted back in the dropped event, and that is what needs bounding.
-      drop(op, `target text over ${MAX_BULLET_CHARS} characters`);
       continue;
     }
     const matches = knowledge.sections[section]
