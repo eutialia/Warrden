@@ -851,4 +851,42 @@ describe('app', () => {
       expect(detail.subtitleRuns[0].transcript).toEqual([{ ts: 1, tier: 'curl', action: 'search', detail: 'page' }]);
     });
   });
+
+  describe('trace routes', () => {
+    it('lists traces newest first with job metadata', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      const { id } = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'movie', targetId: 1, arrInstance: 'radarr', payload: { title: 'Dune' } });
+      ctx.trace.event({ jobId: id!, kind: 'trigger.manual', summary: 't' });
+      const res = await app.request('/api/traces');
+      const body = (await res.json()) as { traces: { jobId: number; targetTitle: string; entryCount: number }[] };
+      expect(res.status).toBe(200);
+      expect(body.traces[0]).toMatchObject({ jobId: id, targetTitle: 'Dune', entryCount: 1 });
+    });
+
+    it('returns entries without payloads, then one payload on demand', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      const { id } = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'movie', targetId: 1, arrInstance: 'radarr' });
+      ctx.trace.event({ jobId: id!, kind: 'trigger.manual', summary: 't', payload: () => ({ secret: 'body' }) });
+      const list = (await (await app.request(`/api/traces/${id}`)).json()) as { entries: Record<string, unknown>[] };
+      expect(list.entries[0].payload).toBeUndefined();
+      expect(list.entries[0].hasPayload).toBe(true);
+      const one = (await (await app.request(`/api/traces/${id}/entries/0`)).json()) as { payload: unknown };
+      expect(one.payload).toEqual({ secret: 'body' });
+    });
+
+    it('404s on unknown trace and unknown entry', async () => {
+      const app = createApp(makeCtx());
+      expect((await app.request('/api/traces/999')).status).toBe(404);
+      expect((await app.request('/api/traces/999/entries/0')).status).toBe(404);
+    });
+
+    it('overview reports debugEnabled from config', async () => {
+      const ctx = makeCtx();
+      ctx.config.debug.enabled = true;
+      const res = (await (await createApp(ctx).request('/api/overview')).json()) as { debugEnabled: boolean };
+      expect(res.debugEnabled).toBe(true);
+    });
+  });
 });

@@ -30,6 +30,7 @@ import { Overview } from '../db/overview.js';
 import { PlacedFiles } from '../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '../db/siteProfiles.js';
 import { SubtitleRuns } from '../db/subtitleRuns.js';
+import { TraceEntries } from '../db/traceEntries.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 import { NOOP_TRACER } from '../trace/tracer.js';
@@ -375,6 +376,45 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         subtitleRuns: new SubtitleRuns(db).listByJob(job.id),
       });
     });
+
+    const traces = new TraceEntries(db);
+
+    app.get('/api/traces', (c) => {
+      const summaries = traces.summaries(100);
+      const out = summaries.flatMap((s) => {
+        const job = queue.get(s.job_id);
+        if (!job) return [];
+        const title = typeof job.payload.title === 'string' ? job.payload.title : `${job.target_kind} #${job.target_id}`;
+        return [{
+          jobId: s.job_id,
+          pipeline: job.pipeline,
+          targetTitle: title,
+          jobStatus: job.status,
+          entryCount: s.entry_count,
+          firstTs: s.first_ts,
+          lastTs: s.last_ts,
+        }];
+      });
+      return c.json({ traces: out });
+    });
+
+    app.get('/api/traces/:jobId/entries/:seq', (c) => {
+      const jobId = Number(c.req.param('jobId'));
+      const seq = Number(c.req.param('seq'));
+      const row = Number.isInteger(jobId) && Number.isInteger(seq) ? traces.get(jobId, seq) : null;
+      if (!row) return c.json({ error: 'entry not found' }, 404);
+      return c.json({ ...row, payload: row.payload === null ? null : (JSON.parse(row.payload) as unknown) });
+    });
+
+    app.get('/api/traces/:jobId', (c) => {
+      const jobId = Number(c.req.param('jobId'));
+      const rows = Number.isInteger(jobId) ? traces.listByJob(jobId) : [];
+      if (rows.length === 0) return c.json({ error: 'trace not found' }, 404);
+      return c.json({
+        jobId,
+        entries: rows.map(({ payload, ...rest }) => ({ ...rest, hasPayload: payload !== null })),
+      });
+    });
   }
 
   if (ctx.queue && ctx.config && ctx.clients) {
@@ -444,6 +484,14 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         targetId,
         payload: { source: 'manual' },
       });
+      if (result.id !== null) {
+        ctx.trace?.event({
+          jobId: result.id,
+          kind: 'trigger.manual',
+          summary: `manual subtitle (${arrInstance})`,
+          payload: () => parsed.data,
+        });
+      }
       return c.json({ outcome: result.outcome });
     });
   }
@@ -719,7 +767,9 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // Everything the dashboard home needs to answer "is Warrden healthy right now?"
     // in one request: queue depth, the review backlog, recent outcomes, and the mount
     // probe that would otherwise be a second round-trip.
-    app.get('/api/overview', (c) => c.json({ ...overview.counts(), storage: cachedStorage() }));
+    app.get('/api/overview', (c) =>
+      c.json({ ...overview.counts(), storage: cachedStorage(), debugEnabled: ctx.config?.debug.enabled ?? false }),
+    );
   }
 
   if (ctx.config && ctx.dataDir) {
