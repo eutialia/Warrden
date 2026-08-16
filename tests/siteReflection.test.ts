@@ -47,15 +47,12 @@ function reflection(overrides?: Partial<{ verdict: SiteVerdict; reason: string; 
   return { verdict: 'usable', reason: 'worked', ops: [], ...overrides };
 }
 
-/** `makeCtx` with `site-notes` configured, i.e. self-learning switched ON — every test but
- * the off-switch one needs it, since `reflectOnRun` resolves the call-site before it
+/** `makeCtx` with an LLM model configured, i.e. self-learning switched ON. Every test but
+ * the off-switch one needs it, since `reflectOnRun` resolves the model before it
  * generates anything. */
 function reflectCtx(overrides?: Partial<AppContext>): AppContext {
   const ctx = makeCtx(overrides);
-  ctx.config.llm.profiles[ctx.config.llm.activeProfile] = {
-    ...ctx.config.llm.profiles[ctx.config.llm.activeProfile],
-    [REFLECT_CALLSITE]: { provider: 'openai', model: 'test-model' },
-  };
+  ctx.config.llm.model = { provider: 'openai', model: 'test-model' };
   return ctx;
 }
 
@@ -595,9 +592,9 @@ describe('reflectOnRun', () => {
     expect(saved.sections.Pitfalls).toEqual([`IF 503 THEN retry. (confirmed ${TODAY})`]);
   });
 
-  it('leaves the file untouched and returns null when the callsite is unconfigured', async () => {
-    // The real generator on a config with no `site-notes` entry — the production off
-    // switch. Nothing reaches it: `reflectOnRun` resolves the call-site itself first.
+  it('leaves the file untouched and returns null when no model is configured', async () => {
+    // The real generator on a config with no `llm.model`: the production off switch.
+    // Nothing reaches it, `reflectOnRun` resolves the model itself first.
     const ctx = makeCtx({ llm: new AiSdkGenerator(baseConfig()) });
     saveKnowledge(ctx.dataDir, base());
     const before = readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8');

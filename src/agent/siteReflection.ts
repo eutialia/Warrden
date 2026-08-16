@@ -413,10 +413,11 @@ export async function reflectOnRun(input: {
   const label = siteLabel(site.baseUrl);
 
   try {
-    // Before any provider work: an unconfigured call-site is how self-learning stays off,
-    // and `resolveModel` is the only thing that can tell that apart from a call that was
-    // configured and failed. Both throw `LlmError` out of `generate`.
-    resolveModel(ctx.config, REFLECT_CALLSITE);
+    // Before any provider work: no model configured is how self-learning stays off (along
+    // with every other LLM feature), and `resolveModel` is the only thing that can tell
+    // that apart from a call that was configured and failed. Both throw `LlmError` out of
+    // `generate`.
+    resolveModel(ctx.config);
   } catch (err) {
     if (!(err instanceof LlmError)) throw err;
     ctx.events.append({

@@ -205,7 +205,7 @@ export function openAttentionForJob(
   return { app, attentionItems, item, jobId };
 }
 
-/** A default `Config` (schema defaults only) for tests that build their own `llm.profiles` entries. */
+/** A default `Config` (schema defaults only) for tests that set their own `llm.model`. */
 export function baseConfig(): Config {
   return ConfigSchema.parse({});
 }

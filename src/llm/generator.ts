@@ -40,25 +40,22 @@ export class LlmError extends Error {
   }
 }
 
-/** A resolved provider + model id, e.g. from a callsite's config entry. */
+/** A resolved provider + model id, as configured under `llm.model`. */
 export interface ModelRef {
   provider: Provider;
   model: string;
 }
 
 /**
- * Resolves a callsite (e.g. 'release-pick') to its configured model, plus optional
- * fallback, from `cfg.llm.profiles[cfg.llm.activeProfile]`. Throws `LlmError` when the
- * callsite has no entry in the active profile. Returns a copy, not the live config
- * object, so callers can't accidentally mutate `cfg` through it.
+ * Resolves the one configured model, plus optional fallback, from `cfg.llm.model`: every
+ * call-site runs on it. Throws `LlmError` when nothing is configured (a fresh install, and
+ * the switch that keeps every LLM feature off until an operator opts in). Returns a copy,
+ * not the live config object, so callers can't accidentally mutate `cfg` through it.
  */
-export function resolveModel(cfg: Config, callsite: string): ModelRef & { fallback?: ModelRef } {
-  const entry = cfg.llm.profiles[cfg.llm.activeProfile]?.[callsite];
+export function resolveModel(cfg: Config): ModelRef & { fallback?: ModelRef } {
+  const entry = cfg.llm.model;
   if (!entry) {
-    throw new LlmError(
-      `No model configured for callsite "${callsite}" in profile "${cfg.llm.activeProfile}"`,
-      callsite,
-    );
+    throw new LlmError('No LLM model configured (set llm.model in settings)', 'llm.model');
   }
   return { ...entry, fallback: entry.fallback ? { ...entry.fallback } : undefined };
 }
@@ -130,7 +127,8 @@ function requireKey(cfg: Config, provider: 'openrouter' | 'openai' | 'anthropic'
   return key;
 }
 
-/** `StructuredGenerator` backed by the Vercel AI SDK, with per-callsite model + fallback resolution. */
+/** `StructuredGenerator` backed by the Vercel AI SDK, running every call-site on the one
+ * configured model, with its optional fallback. */
 export class AiSdkGenerator implements StructuredGenerator {
   constructor(
     private readonly cfg: Config,
@@ -138,7 +136,7 @@ export class AiSdkGenerator implements StructuredGenerator {
   ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
-    const { fallback, ...primary } = resolveModel(this.cfg, opts.callsite);
+    const { fallback, ...primary } = resolveModel(this.cfg);
     const call: StepHandle = opts.trace
       ? this.trace.begin({
           jobId: opts.trace.jobId,

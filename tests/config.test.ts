@@ -10,7 +10,7 @@ describe('config store', () => {
     const cfg = loadConfig(tmp());
     expect(cfg.server.port).toBe(9797);
     expect(cfg.arrs).toEqual([]);
-    expect(cfg.llm.activeProfile).toBe('prod');
+    expect(cfg.llm.model).toBeUndefined();
     expect(cfg.reconcileIntervalMinutes).toBe(15);
     expect(cfg.ingest).toEqual({ mountMarkers: [], downloadRoots: [] });
   });
@@ -26,32 +26,52 @@ describe('config store', () => {
     expect(loadConfig(dir)).toEqual(cfg);
   });
 
-  it('does not share nested default structure (llm.profiles) across parses', () => {
+  it('does not share nested default structure across parses', () => {
     // Zod v4 shallow-clones a literal default per parse: the top-level object/array
     // is already fresh every time, but anything nested inside it is the same shared
-    // reference across parses. `llm.profiles` (`{ dev: {...}, prod: {...} }`) is the
-    // real regression this guards — a literal default here would share `profiles.dev`
-    // across every config loaded in-process. The `arrs`/`pathMappings`/`picking.tags`
-    // assertions below don't independently prove the bug (those defaults have no
-    // nested structure, so even a literal `.default([])` gives a fresh array each
-    // parse) — they're kept for defense-in-depth since the factory form is applied
-    // uniformly to all of them.
+    // reference across parses. Every object/array default here uses the factory form
+    // (`() => ...`) so the safety is structural rather than case-by-case, and this
+    // guards that it stays that way: mutate one parse's defaults, the other must not
+    // see them.
     const cfgA = loadConfig(tmp());
     const cfgB = loadConfig(tmp());
 
     cfgA.arrs.push({ name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:8989', apiKey: 'k' });
-    cfgA.llm.profiles.dev['release-pick'] = { provider: 'anthropic', model: 'claude' };
     cfgA.pathMappings.push({ from: '/a', to: '/b' });
     cfgA.picking.tags.push('CHS subs');
+    cfgA.subtitle.sites.push({ baseUrl: 'https://acg.rip' });
+    cfgA.llm.keys.openrouter = 'k';
 
     expect(cfgA.arrs).not.toBe(cfgB.arrs);
     expect(cfgB.arrs).toEqual([]);
-    expect(cfgA.llm.profiles.dev).not.toBe(cfgB.llm.profiles.dev);
-    expect(cfgB.llm.profiles.dev).toEqual({});
     expect(cfgA.pathMappings).not.toBe(cfgB.pathMappings);
     expect(cfgB.pathMappings).toEqual([]);
     expect(cfgA.picking.tags).not.toBe(cfgB.picking.tags);
     expect(cfgB.picking.tags).toEqual([]);
+    expect(cfgA.subtitle.sites).not.toBe(cfgB.subtitle.sites);
+    expect(cfgB.subtitle.sites).toEqual([]);
+    expect(cfgA.llm.keys).not.toBe(cfgB.llm.keys);
+    expect(cfgB.llm.keys).toEqual({});
+  });
+
+  it('leaves llm.model unset on a fresh config and keeps a configured one through a round-trip', () => {
+    const dir = tmp();
+    const cfg = loadConfig(dir);
+    expect(cfg.llm.model).toBeUndefined();
+    cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash', fallback: { provider: 'openai', model: 'gpt-5-mini' } };
+    saveConfig(dir, cfg);
+    expect(loadConfig(dir).llm.model).toEqual(cfg.llm.model);
+  });
+
+  it('rejects an llm.model with a blank model id', () => {
+    expect(ConfigSchema.safeParse({ llm: { model: { provider: 'openrouter', model: '' } } }).success).toBe(false);
+  });
+
+  it('drops a legacy per-callsite `profiles` block rather than failing to load', () => {
+    // Old config.json files carried `llm.activeProfile` / `llm.profiles`. Zod strips
+    // unknown keys, so they degrade to "no model configured". No migration code.
+    const cfg = ConfigSchema.parse({ llm: { activeProfile: 'prod', profiles: { prod: { 'release-pick': { provider: 'openai', model: 'x' } } } } });
+    expect(cfg.llm).toEqual({ keys: {} });
   });
 
   it.each([

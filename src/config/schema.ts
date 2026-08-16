@@ -12,7 +12,7 @@ import { z } from 'zod';
 export const SECRET_PLACEHOLDER = '•••';
 
 const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic', 'claude-code']);
-const CallsiteModelSchema = z.object({
+const LlmModelSchema = z.object({
   provider: ProviderSchema,
   model: z.string().min(1),
   fallback: z.object({ provider: ProviderSchema, model: z.string().min(1) }).optional(),
@@ -43,9 +43,9 @@ export const ConfigSchema = z
     // All object/array defaults use the factory form (`() => ({...})` / `() => [...]`)
     // rather than a literal. Zod v4 shallow-clones a literal default on every parse,
     // so the top-level object/array is fresh each time, but anything nested inside it
-    // (e.g. `profiles.dev`) is the same shared reference across parses. Any default
-    // with nested structure needs the factory form; used uniformly here so the safety
-    // is structural rather than case-by-case.
+    // is the same shared reference across parses. Any default with nested structure
+    // needs the factory form; used uniformly here so the safety is structural rather
+    // than case-by-case.
     server: z
       .object({
         port: z.number().int().min(1).max(65535).default(9797),
@@ -113,11 +113,9 @@ export const ConfigSchema = z
       .prefault({}),
     llm: z
       .object({
-        activeProfile: z.enum(['dev', 'prod']).default('prod'),
-        // profile -> callsite -> model config; Phase 1 callsite: 'release-pick'
-        profiles: z
-          .record(z.string(), z.record(z.string(), CallsiteModelSchema))
-          .default(() => ({ dev: {}, prod: {} })),
+        // The one model every call-site runs on. Optional: a fresh install has no provider
+        // configured, and `resolveModel` turns that into a clear error at the first call.
+        model: LlmModelSchema.optional(),
         keys: z
           .object({
             openrouter: z.string().min(1).optional(),

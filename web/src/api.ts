@@ -170,16 +170,12 @@ export interface ArrInstance {
 
 export type Provider = 'openrouter' | 'openai' | 'anthropic' | 'claude-code';
 
-export interface CallsiteModel {
+/** The one model every LLM call-site runs on (`llm.model`). */
+export interface LlmModel {
   provider: Provider;
   model: string;
   fallback?: { provider: Provider; model: string };
 }
-
-/** Every LLM call-site Warrden knows about, in the order each phase introduced it —
- * `llm.profiles` (a raw JSON editor on the Config page) accepts any string key, so this
- * exists purely as a discoverability hint for what to name one, not a validated list. */
-export const CALLSITES = ['release-pick', 'sidecar-match', 'bundle-map', 'site-search', 'archive-map', 'site-notes'] as const;
 
 export interface SubtitleSite {
   baseUrl: string;
@@ -197,8 +193,7 @@ export interface Config {
   subtitle: { languages: string[]; preferredGroups: string[]; sites: SubtitleSite[] };
   browser: { stepBudget: number; siteCooldownSeconds: number };
   llm: {
-    activeProfile: 'dev' | 'prod';
-    profiles: Record<string, Record<string, CallsiteModel>>;
+    model?: LlmModel;
     keys: { openrouter?: string; openai?: string; anthropic?: string };
   };
   reconcileIntervalMinutes: number;

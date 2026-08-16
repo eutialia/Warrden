@@ -13,9 +13,10 @@ import {
   type ArrInstance,
   type ArrKind,
   type Config,
+  type LlmModel,
+  type Provider,
   type StorageCheck,
 } from '@/api';
-import { LlmProfileEditor } from '@/components/LlmProfileEditor';
 import { MountHealth } from '@/components/MountHealth';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
@@ -31,7 +32,6 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
 import { TONE_TEXT } from '@/lib/tone';
 import { cn, formatUsage } from '@/lib/utils';
@@ -45,6 +45,16 @@ const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic',
 };
+
+const MODEL_PROVIDERS: { value: Provider; label: string }[] = [
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'claude-code', label: 'Claude Code' },
+];
+
+/** `Select` has no empty value, so "no fallback" needs a sentinel of its own. */
+const NO_FALLBACK = 'none';
 
 /** Mirrors server `standardMounts` — web has no shared package with the backend. */
 const STANDARD_MOUNT_ROWS = [
@@ -99,27 +109,16 @@ function numericFrom(c: Config): NumericDraft {
 }
 
 /**
- * Drops call-site routes whose model was never filled in, and blank fallbacks inside the
- * ones that stay. "Route this call-site" seeds an empty model, and the schema requires a
- * non-empty one — without this, one unfinished row 400s the entire page's save, taking
- * every unrelated edit with it. Same reasoning as the blank-arr filter below it.
+ * Drops a model whose id was never filled in, and a blank fallback inside one that stays.
+ * "Configure a model" seeds an empty id, and the schema requires a non-empty one. Without
+ * this, one unfinished row 400s the entire page's save, taking every unrelated edit with
+ * it. Same reasoning as the blank-arr filter below it.
  */
-function withoutBlankCallsites(profiles: Config['llm']['profiles']): Config['llm']['profiles'] {
-  return Object.fromEntries(
-    Object.entries(profiles).map(([profile, callsites]) => [
-      profile,
-      Object.fromEntries(
-        Object.entries(callsites)
-          .filter(([, entry]) => entry.model.trim() !== '')
-          .map(([callsite, entry]) => [
-            callsite,
-            entry.fallback && entry.fallback.model.trim() === ''
-              ? { provider: entry.provider, model: entry.model }
-              : entry,
-          ]),
-      ),
-    ]),
-  );
+function withoutBlankModel(model: LlmModel | undefined): LlmModel | undefined {
+  if (!model || model.model.trim() === '') return undefined;
+  return model.fallback && model.fallback.model.trim() === ''
+    ? { provider: model.provider, model: model.model }
+    : model;
 }
 
 function parseNumber(text: string): number | undefined {
@@ -143,7 +142,6 @@ export default function ConfigPage() {
   const [saving, setSaving] = useState(false);
   const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
   const [storageError, setStorageError] = useState<string | null>(null);
-  const [activeProfileTab, setActiveProfileTab] = useState('dev');
   const { theme, setTheme } = useTheme();
 
   const loadStorage = useCallback(() => {
@@ -167,7 +165,6 @@ export default function ConfigPage() {
     setBaseNumeric(numericFrom(c));
     setRemoveKeys({ openrouter: false, openai: false, anthropic: false });
     setSaveError(null);
-    setActiveProfileTab(c.llm.activeProfile);
   }, []);
 
   const load = useCallback(() => {
@@ -207,6 +204,11 @@ export default function ConfigPage() {
 
   function patch(next: Partial<Config>): void {
     setDraft((prev) => (prev ? { ...prev, ...next } : prev));
+  }
+
+  /** Field-level edit of `llm.model`, which only ever renders once a model exists. */
+  function patchModel(next: Partial<LlmModel>): void {
+    setDraft((prev) => (prev?.llm.model ? { ...prev, llm: { ...prev.llm, model: { ...prev.llm.model, ...next } } } : prev));
   }
 
   async function handleSave(): Promise<void> {
@@ -254,7 +256,7 @@ export default function ConfigPage() {
         maxSizeMB: parsed.maxSizeMB!,
       },
       browser: { stepBudget: parsed.stepBudget!, siteCooldownSeconds: parsed.siteCooldownSeconds! },
-      llm: { ...draft.llm, keys, profiles: withoutBlankCallsites(draft.llm.profiles) },
+      llm: { keys, model: withoutBlankModel(draft.llm.model) },
       reconcileIntervalMinutes: parsed.reconcileIntervalMinutes!,
       eventRetentionDays: draft.eventRetentionDays,
     };
@@ -610,54 +612,101 @@ export default function ConfigPage() {
           {/* AI models */}
           <Card id="models" className="scroll-mt-20">
             <CardHeader>
-              <CardTitle>AI models</CardTitle>
+              <CardTitle>AI model</CardTitle>
               <CardDescription>
-                Which model handles each task. Profiles let you keep a cheap development setup beside the one you
-                actually run.
+                The one model every AI task runs on: release picking, subtitle search, archive mapping, and the rest.
+                A fallback is tried only after the primary fails twice.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Active profile</Label>
-                <Select
-                  value={draft.llm.activeProfile}
-                  onValueChange={(v) => v && patch({ llm: { ...draft.llm, activeProfile: v as 'dev' | 'prod' } })}
-                >
-                  <SelectTrigger className="w-48">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="dev">dev</SelectItem>
-                    <SelectItem value="prod">prod</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  The profile Warrden runs with. You can edit either profile below without switching to it.
-                </p>
-              </div>
-
-              {/* The editor sits inside the tabs, not beside them: a trigger that
-                  controls no panel is a dead control to anything reading the page
-                  structure rather than looking at it. */}
-              <Tabs className="gap-3" value={activeProfileTab} onValueChange={(v) => setActiveProfileTab(v ?? 'dev')}>
-                <TabsList>
-                  <TabsTrigger value="dev">
-                    dev{draft.llm.activeProfile === 'dev' && <span className="ml-1.5 text-xs">· active</span>}
-                  </TabsTrigger>
-                  <TabsTrigger value="prod">
-                    prod{draft.llm.activeProfile === 'prod' && <span className="ml-1.5 text-xs">· active</span>}
-                  </TabsTrigger>
-                </TabsList>
-                {(['dev', 'prod'] as const).map((profile) => (
-                  <TabsContent key={profile} value={profile}>
-                    <LlmProfileEditor
-                      profile={profile}
-                      profiles={draft.llm.profiles}
-                      onChange={(profiles) => patch({ llm: { ...draft.llm, profiles } })}
+            <CardContent>
+              {draft.llm.model ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Provider</Label>
+                    <Select
+                      value={draft.llm.model.provider}
+                      onValueChange={(v) => v && patchModel({ provider: v as Provider })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MODEL_PROVIDERS.map((p) => (
+                          <SelectItem key={p.value} value={p.value}>
+                            {p.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Model</Label>
+                    <Input
+                      value={draft.llm.model.model}
+                      placeholder="e.g. sonnet"
+                      onChange={(e) => patchModel({ model: e.target.value })}
                     />
-                  </TabsContent>
-                ))}
-              </Tabs>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Fallback provider</Label>
+                    <Select
+                      value={draft.llm.model.fallback?.provider ?? NO_FALLBACK}
+                      onValueChange={(v) =>
+                        v &&
+                        patchModel(
+                          v === NO_FALLBACK
+                            ? { fallback: undefined }
+                            : { fallback: { provider: v as Provider, model: draft.llm.model?.fallback?.model ?? '' } },
+                        )
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NO_FALLBACK}>No fallback</SelectItem>
+                        {MODEL_PROVIDERS.map((p) => (
+                          <SelectItem key={p.value} value={p.value}>
+                            {p.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Fallback model</Label>
+                    <Input
+                      value={draft.llm.model.fallback?.model ?? ''}
+                      disabled={!draft.llm.model.fallback}
+                      placeholder={draft.llm.model.fallback ? 'e.g. gpt-4o-mini' : 'Pick a fallback provider first'}
+                      onChange={(e) =>
+                        draft.llm.model?.fallback &&
+                        patchModel({ fallback: { ...draft.llm.model.fallback, model: e.target.value } })
+                      }
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Button variant="ghost" size="sm" onClick={() => patch({ llm: { ...draft.llm, model: undefined } })}>
+                      <Trash2 />
+                      Clear the model
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    No model configured. Every AI task stays off until one is set.
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => patch({ llm: { ...draft.llm, model: { provider: 'openrouter', model: '' } } })}
+                  >
+                    <Plus />
+                    Configure a model
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
 

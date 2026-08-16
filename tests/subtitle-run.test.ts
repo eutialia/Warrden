@@ -7,7 +7,6 @@ import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
-import { REFLECT_CALLSITE } from '../src/agent/siteReflection.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
@@ -504,10 +503,7 @@ describe('runSubtitleJob', () => {
         { name: 'b', baseUrl: 'https://b.test' },
       ],
     });
-    fx.ctx.config.llm.profiles[fx.ctx.config.llm.activeProfile] = {
-      ...fx.ctx.config.llm.profiles[fx.ctx.config.llm.activeProfile],
-      [REFLECT_CALLSITE]: { provider: 'openai', model: 'test-model' },
-    };
+    fx.ctx.config.llm.model = { provider: 'openai', model: 'test-model' };
     // Only site b's reflection reaches the model — site a's fails before any generate call.
     fx.ctx.llm = new FakeGenerator([{ verdict: 'usable', reason: 'ok', ops: [] }]);
     // A directory sitting where site a's notes file belongs: loadKnowledge's readFileSync

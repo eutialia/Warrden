@@ -18,17 +18,26 @@ vi.mock('ai', async (importOriginal) => {
 });
 
 describe('resolveModel', () => {
-  it('resolves from the active profile', () => {
+  it('resolves the one configured model', () => {
     const cfg = baseConfig();
-    cfg.llm.profiles.prod['release-pick'] = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash' };
-    expect(resolveModel(cfg, 'release-pick')).toMatchObject({
+    cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash' };
+    expect(resolveModel(cfg)).toMatchObject({
       provider: 'openrouter',
       model: 'deepseek/deepseek-v4-flash',
     });
   });
 
-  it('throws LlmError when callsite unconfigured', () => {
-    expect(() => resolveModel(baseConfig(), 'release-pick')).toThrow(LlmError);
+  it('throws LlmError when no model is configured', () => {
+    expect(() => resolveModel(baseConfig())).toThrow(LlmError);
+  });
+
+  it('returns a copy, so callers cannot mutate the config through it', () => {
+    const cfg = baseConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'a', fallback: { provider: 'openai', model: 'b' } };
+    const resolved = resolveModel(cfg);
+    resolved.model = 'mutated';
+    resolved.fallback!.model = 'mutated';
+    expect(cfg.llm.model).toEqual({ provider: 'openrouter', model: 'a', fallback: { provider: 'openai', model: 'b' } });
   });
 });
 
@@ -94,7 +103,7 @@ describe('withFallback', () => {
 describe('AiSdkGenerator', () => {
   const schema = z.object({ ok: z.boolean() });
 
-  it('propagates LlmError from an unconfigured callsite without calling generateObject', async () => {
+  it('propagates LlmError from an unconfigured model without calling generateObject', async () => {
     generateObjectMock.mockReset();
     const generator = new AiSdkGenerator(baseConfig());
     await expect(
@@ -108,7 +117,7 @@ describe('AiSdkGenerator', () => {
     async (provider) => {
       generateObjectMock.mockReset();
       const cfg = baseConfig();
-      cfg.llm.profiles.prod['release-pick'] = { provider, model: 'some-model' };
+      cfg.llm.model = { provider, model: 'some-model' };
       const generator = new AiSdkGenerator(cfg);
       await expect(
         generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
@@ -124,7 +133,7 @@ describe('AiSdkGenerator', () => {
       .mockRejectedValueOnce(new Error('rate limited'))
       .mockResolvedValue({ object: { ok: true } });
     const cfg = baseConfig();
-    cfg.llm.profiles.prod['release-pick'] = {
+    cfg.llm.model = {
       provider: 'claude-code',
       model: 'primary-model',
       fallback: { provider: 'claude-code', model: 'fallback-model' },
@@ -144,7 +153,7 @@ describe('AiSdkGenerator', () => {
     const original = new Error('down');
     generateObjectMock.mockRejectedValue(original);
     const cfg = baseConfig();
-    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
     const generator = new AiSdkGenerator(cfg);
     expect.assertions(3);
     try {
@@ -162,7 +171,7 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = baseConfig();
-    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
     const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock
       .mockRejectedValueOnce(new Error('rate limited'))
@@ -200,7 +209,7 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = baseConfig();
-    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
     const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockRejectedValue(new Error('down'));
 
@@ -223,7 +232,7 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = baseConfig();
-    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
     const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockResolvedValueOnce({ object: { pick: 'a' } });
     await gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p' });
