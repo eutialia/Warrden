@@ -15,7 +15,6 @@ const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic']);
 const LlmModelSchema = z.object({
   provider: ProviderSchema,
   model: z.string().min(1),
-  fallback: z.object({ provider: ProviderSchema, model: z.string().min(1) }).optional(),
 });
 const ArrInstanceSchema = z.object({
   name: z.string().min(1),

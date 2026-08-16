@@ -58,7 +58,7 @@ describe('config store', () => {
     const dir = tmp();
     const cfg = loadConfig(dir);
     expect(cfg.llm.model).toBeUndefined();
-    cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash', fallback: { provider: 'openai', model: 'gpt-5-mini' } };
+    cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash' };
     saveConfig(dir, cfg);
     expect(loadConfig(dir).llm.model).toEqual(cfg.llm.model);
   });

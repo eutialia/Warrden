@@ -46,52 +46,44 @@ export interface ModelRef {
 }
 
 /**
- * Resolves the one configured model, plus optional fallback, from `cfg.llm.model`: every
- * call-site runs on it. Throws `LlmError` when nothing is configured (a fresh install, and
- * the switch that keeps every LLM feature off until an operator opts in). Returns a copy,
- * not the live config object, so callers can't accidentally mutate `cfg` through it.
+ * Resolves the one configured model from `cfg.llm.model`: every call-site runs on it.
+ * Throws `LlmError` when nothing is configured (a fresh install, and the switch that keeps
+ * every LLM feature off until an operator opts in). Returns a copy, not the live config
+ * object, so callers can't accidentally mutate `cfg` through it.
  */
-export function resolveModel(cfg: Config): ModelRef & { fallback?: ModelRef } {
+export function resolveModel(cfg: Config): ModelRef {
   const entry = cfg.llm.model;
   if (!entry) {
     throw new LlmError('No LLM model configured (set llm.model in settings)', 'llm.model');
   }
-  return { ...entry, fallback: entry.fallback ? { ...entry.fallback } : undefined };
+  return { ...entry };
 }
 
 /**
- * Runs `attempt` against `primary`, retrying once on failure, then against `fallback`
- * (if configured), retrying once more on failure, in that order: primary, primary,
- * fallback, fallback. Throws the last error once every attempt is exhausted. AI-SDK-free
- * and generic over any `{provider, model}`-shaped ref (not just `ModelRef`'s strict
- * `Provider` union) so the retry/fallback ladder is unit-testable on its own — not pure,
- * though: on total failure it mutates the thrown error's `cause` (see below).
+ * Runs `attempt`, retrying it once on failure. Throws the last error once both attempts
+ * are exhausted. AI-SDK-free so the retry is unit-testable on its own — not pure, though:
+ * on total failure it mutates the thrown error's `cause` (see below).
  *
- * Every *preceding* ladder attempt's error is collected and, when the last one is an
- * `Error` without a `cause` of its own, attached as an `AggregateError` on its `cause` —
- * so e.g. a keyless-fallback failure ("missing API key") doesn't silently mask what the
- * primary provider actually failed with. The thrown value is still exactly the last
- * error (same reference, same type); only its `cause` gains this extra context. The last
- * error itself is excluded from that `AggregateError` — it's already the thrown value,
- * so including it too would make it reference itself via `cause`.
+ * The first attempt's error is collected and, when the last one is an `Error` without a
+ * `cause` of its own, attached as an `AggregateError` on its `cause` — so a second failure
+ * with a less informative message doesn't silently mask what the first one actually failed
+ * with. The thrown value is still exactly the last error (same reference, same type); only
+ * its `cause` gains this extra context. The last error itself is excluded from that
+ * `AggregateError` — it's already the thrown value, so including it too would make it
+ * reference itself via `cause`.
  */
-export async function withFallback<T, M extends { provider: string; model: string } = ModelRef>(
-  attempt: (model: M) => Promise<T>,
-  primary: M,
-  fallback?: M,
-): Promise<T> {
-  const models = fallback ? [primary, primary, fallback, fallback] : [primary, primary];
+export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
   const errors: unknown[] = [];
-  for (const model of models) {
+  for (let i = 0; i < 2; i++) {
     try {
-      return await attempt(model);
+      return await attempt();
     } catch (err) {
       errors.push(err);
     }
   }
   const lastError = errors[errors.length - 1];
   if (errors.length > 1 && lastError instanceof Error && lastError.cause === undefined) {
-    lastError.cause = new AggregateError(errors.slice(0, -1), 'preceding ladder attempts');
+    lastError.cause = new AggregateError(errors.slice(0, -1), 'preceding attempts');
   }
   throw lastError;
 }
@@ -124,7 +116,7 @@ function requireKey(cfg: Config, provider: 'openrouter' | 'openai' | 'anthropic'
 }
 
 /** `StructuredGenerator` backed by the Vercel AI SDK, running every call-site on the one
- * configured model, with its optional fallback. */
+ * configured model. */
 export class AiSdkGenerator implements StructuredGenerator {
   constructor(
     private readonly cfg: Config,
@@ -132,22 +124,18 @@ export class AiSdkGenerator implements StructuredGenerator {
   ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
-    const { fallback, ...primary } = resolveModel(this.cfg);
+    const model = resolveModel(this.cfg);
     const call: StepHandle = opts.trace
       ? this.trace.begin({
           jobId: opts.trace.jobId,
           parentSeq: opts.trace.parentSeq,
           kind: 'llm.call',
-          summary: `${opts.callsite} via ${primary.provider}/${primary.model}`,
+          summary: `${opts.callsite} via ${model.provider}/${model.model}`,
           payload: () => ({ system: opts.system, prompt: opts.prompt }),
         })
       : NOOP_HANDLE;
     try {
-      const result = await withFallback<T>(
-        async (ref) => this.attemptOnce(opts, ref, call),
-        primary,
-        fallback,
-      );
+      const result = await withRetry(() => this.attemptOnce(opts, model, call));
       call.end('ok');
       return result;
     } catch (err) {
@@ -192,9 +180,9 @@ export class AiSdkGenerator implements StructuredGenerator {
         ...(cache.callProviderOptions
           ? { providerOptions: cache.callProviderOptions }
           : {}),
-        // Our own primary/primary/fallback/fallback ladder owns the retry count;
-        // the AI SDK's default internal retries would otherwise multiply each
-        // ladder slot into up to 3 provider calls of its own.
+        // Our own `withRetry` owns the retry count; the AI SDK's default internal
+        // retries would otherwise multiply each attempt into up to 3 provider calls
+        // of its own.
         maxRetries: 0,
       });
       attempt.end('ok', () => ({

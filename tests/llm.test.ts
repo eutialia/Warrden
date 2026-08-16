@@ -3,13 +3,13 @@ import { z } from 'zod';
 import type { Config } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
-import { AiSdkGenerator, LlmError, resolveModel, withFallback } from '../src/llm/generator.js';
+import { AiSdkGenerator, LlmError, resolveModel, withRetry } from '../src/llm/generator.js';
 import { SqlTracer } from '../src/trace/tracer.js';
 import { baseConfig, freshDb } from './helpers.js';
 
-// AiSdkGenerator.generate composes resolveModel + withFallback around `ai`'s generateObject.
+// AiSdkGenerator.generate composes resolveModel + withRetry around `ai`'s generateObject.
 // Mocking just that call keeps these tests network-free while still exercising the real
-// composition (unlike the pure resolveModel/withFallback tests below, which never touch it).
+// composition (unlike the pure resolveModel/withRetry tests below, which never touch it).
 // `vi.mock` factories are hoisted above imports, so the mock fn must be created via
 // `vi.hoisted` rather than a plain `const` — otherwise the factory would see a TDZ error.
 const { generateObjectMock } = vi.hoisted(() => ({ generateObjectMock: vi.fn() }));
@@ -34,70 +34,55 @@ describe('resolveModel', () => {
 
   it('returns a copy, so callers cannot mutate the config through it', () => {
     const cfg = baseConfig();
-    cfg.llm.model = { provider: 'openrouter', model: 'a', fallback: { provider: 'openai', model: 'b' } };
+    cfg.llm.model = { provider: 'openrouter', model: 'a' };
     const resolved = resolveModel(cfg);
     resolved.model = 'mutated';
-    resolved.fallback!.model = 'mutated';
-    expect(cfg.llm.model).toEqual({ provider: 'openrouter', model: 'a', fallback: { provider: 'openai', model: 'b' } });
+    expect(cfg.llm.model).toEqual({ provider: 'openrouter', model: 'a' });
   });
 });
 
-describe('withFallback', () => {
-  const primary = { provider: 'openrouter', model: 'a' };
-  const fallback = { provider: 'openai', model: 'b' };
-
-  it('returns first success without touching fallback', async () => {
+describe('withRetry', () => {
+  it('returns first success without a second attempt', async () => {
     const attempt = vi.fn().mockResolvedValue('ok');
-    expect(await withFallback(attempt, primary, fallback)).toBe('ok');
+    expect(await withRetry(attempt)).toBe('ok');
     expect(attempt).toHaveBeenCalledTimes(1);
   });
 
-  it('retries primary once then uses fallback', async () => {
-    const attempt = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('x'))
-      .mockRejectedValueOnce(new Error('x'))
-      .mockResolvedValue('ok');
-    expect(await withFallback(attempt, primary, fallback)).toBe('ok');
-    expect(attempt).toHaveBeenNthCalledWith(3, fallback);
+  it('retries once, returning the second attempt result', async () => {
+    const attempt = vi.fn().mockRejectedValueOnce(new Error('x')).mockResolvedValue('ok');
+    expect(await withRetry(attempt)).toBe('ok');
+    expect(attempt).toHaveBeenCalledTimes(2);
   });
 
-  it('throws last error when everything fails', async () => {
+  it('throws the last error after exactly two attempts', async () => {
     const attempt = vi.fn().mockRejectedValue(new Error('down'));
-    await expect(withFallback(attempt, primary, fallback)).rejects.toThrow('down');
-    expect(attempt).toHaveBeenCalledTimes(4);
+    await expect(withRetry(attempt)).rejects.toThrow('down');
+    expect(attempt).toHaveBeenCalledTimes(2);
   });
 
-  it('attaches every ladder error as an AggregateError cause on the thrown error, so a keyless-fallback failure does not mask the primary errors', async () => {
-    const primaryError = new Error('primary rate limited');
-    const fallbackError = new Error('fallback missing API key');
-    const attempt = vi
-      .fn()
-      .mockRejectedValueOnce(primaryError)
-      .mockRejectedValueOnce(primaryError)
-      .mockRejectedValueOnce(fallbackError)
-      .mockRejectedValueOnce(fallbackError);
+  it('attaches the first error as an AggregateError cause on the thrown error, so a vaguer second failure does not mask it', async () => {
+    const firstError = new Error('rate limited');
+    const lastError = new Error('socket hang up');
+    const attempt = vi.fn().mockRejectedValueOnce(firstError).mockRejectedValueOnce(lastError);
     let thrown: unknown;
     try {
-      await withFallback(attempt, primary, fallback);
+      await withRetry(attempt);
     } catch (err) {
       thrown = err;
     }
-    expect(thrown).toBe(fallbackError);
+    expect(thrown).toBe(lastError);
     expect((thrown as Error).cause).toBeInstanceOf(AggregateError);
     // The thrown error itself (the last attempt) is excluded — it's already the top-level
     // error, so including it in its own `cause` would make it reference itself.
-    expect((thrown as Error & { cause: AggregateError }).cause.errors).toEqual([
-      primaryError,
-      primaryError,
-      fallbackError,
-    ]);
+    expect((thrown as Error & { cause: AggregateError }).cause.errors).toEqual([firstError]);
   });
 
-  it('without fallback: two attempts only', async () => {
-    const attempt = vi.fn().mockRejectedValue(new Error('down'));
-    await expect(withFallback(attempt, primary)).rejects.toThrow('down');
-    expect(attempt).toHaveBeenCalledTimes(2);
+  it('leaves an error that already carries its own cause untouched', async () => {
+    const ownCause = new Error('root cause');
+    const lastError = new Error('wrapped', { cause: ownCause });
+    const attempt = vi.fn().mockRejectedValueOnce(new Error('first')).mockRejectedValueOnce(lastError);
+    await expect(withRetry(attempt)).rejects.toBe(lastError);
+    expect(lastError.cause).toBe(ownCause);
   });
 });
 
@@ -135,48 +120,55 @@ describe('AiSdkGenerator', () => {
     },
   );
 
-  it('falls back to the configured fallback model after the primary fails twice', async () => {
+  it('calls generateObject once when the first attempt succeeds', async () => {
     generateObjectMock.mockReset();
-    generateObjectMock
-      .mockRejectedValueOnce(new Error('rate limited'))
-      .mockRejectedValueOnce(new Error('rate limited'))
-      .mockResolvedValue({ object: { ok: true } });
+    generateObjectMock.mockResolvedValue({ object: { ok: true } });
     const cfg = keyedConfig();
-    cfg.llm.model = {
-      provider: 'anthropic',
-      model: 'primary-model',
-      fallback: { provider: 'anthropic', model: 'fallback-model' },
-    };
+    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
     const generator = new AiSdkGenerator(cfg);
     const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
     expect(result).toEqual({ ok: true });
-    expect(generateObjectMock).toHaveBeenCalledTimes(3);
-    // maxRetries: 0 on every call — the SDK's own retries must not multiply our ladder.
+    expect(generateObjectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries the configured model once after a failure, with maxRetries: 0 on every call', async () => {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockRejectedValueOnce(new Error('rate limited')).mockResolvedValue({ object: { ok: true } });
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    const generator = new AiSdkGenerator(cfg);
+    const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+    expect(result).toEqual({ ok: true });
+    expect(generateObjectMock).toHaveBeenCalledTimes(2);
+    // maxRetries: 0 on every call — the SDK's own retries must not multiply ours.
     expect(generateObjectMock.mock.calls.every(([opts]) => (opts as { maxRetries: number }).maxRetries === 0)).toBe(
       true,
     );
   });
 
-  it('wraps the final failure into an LlmError carrying the callsite and the original error as cause', async () => {
+  it('gives up after two attempts, wrapping the last failure into an LlmError carrying the callsite and that error as cause', async () => {
     generateObjectMock.mockReset();
-    const original = new Error('down');
-    generateObjectMock.mockRejectedValue(original);
+    const first = new Error('rate limited');
+    const last = new Error('down');
+    generateObjectMock.mockRejectedValueOnce(first).mockRejectedValueOnce(last);
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
     const generator = new AiSdkGenerator(cfg);
-    expect.assertions(3);
+    expect.assertions(5);
     try {
       await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
     } catch (err) {
       expect(err).toBeInstanceOf(LlmError);
       expect((err as InstanceType<typeof LlmError>).callsite).toBe('release-pick');
-      expect((err as Error).cause).toBe(original);
+      expect((err as Error).cause).toBe(last);
+      expect(generateObjectMock).toHaveBeenCalledTimes(2);
+      expect((last.cause as AggregateError).errors).toEqual([first]);
     }
   });
 });
 
 describe('AiSdkGenerator tracing', () => {
-  it('records a parent llm.call and one llm.attempt per ladder attempt', async () => {
+  it('records a parent llm.call and one llm.attempt per attempt', async () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = keyedConfig();

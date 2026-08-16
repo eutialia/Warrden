@@ -164,7 +164,7 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | `picking.seederFloor` | `3` | Minimum seeders for a candidate. |
 | `picking.minSizeMB` | `50` | Minimum release size in MB. |
 | `picking.maxSizeMB` | `60000` | Maximum release size in MB. |
-| `llm.model` | unset | The one model every AI task runs on: `{ provider, model, fallback? }`. Leaving it unset turns every AI feature off, self-learning included: the agent still reads whatever knowledge file exists but never writes one back. |
+| `llm.model` | unset | The one model every AI task runs on: `{ provider, model }`. Leaving it unset turns every AI feature off, self-learning included: the agent still reads whatever knowledge file exists but never writes one back. |
 | `llm.keys.openrouter` / `.openai` / `.anthropic` | unset | Provider API keys. |
 | `eventRetentionDays` | `30` | Days of event history to keep; `0` keeps everything. Items waiting on review are never trimmed. |
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop diffs each arr's full list as a webhook backstop; doubles as the grace period before a new `warrden-` tag/profile can be garbage-collected. |
