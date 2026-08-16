@@ -1,4 +1,5 @@
 import type { AppContext } from './context.js';
+import { TraceEntries, TRACE_RETENTION_DAYS } from './db/traceEntries.js';
 import { reconcile } from './reconcile/reconcile.js';
 import { errorMessage } from './util/errors.js';
 
@@ -38,6 +39,15 @@ export function scheduleEventPrune(ctx: AppContext): () => void {
           kind: 'events.pruned',
           message: `Removed ${removed} event(s) older than ${ctx.config.eventRetentionDays} days`,
           data: { removed, retentionDays: ctx.config.eventRetentionDays },
+        });
+      }
+
+      const tracesRemoved = new TraceEntries(ctx.db).prune(TRACE_RETENTION_DAYS);
+      if (tracesRemoved > 0) {
+        ctx.events.append({
+          kind: 'traces.pruned',
+          message: `Removed ${tracesRemoved} trace(s) older than ${TRACE_RETENTION_DAYS} days`,
+          data: { removed: tracesRemoved, retentionDays: TRACE_RETENTION_DAYS },
         });
       }
     } catch (err) {

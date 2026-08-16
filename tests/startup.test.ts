@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { reclaimAbandonedJobs, scheduleReconcile } from '../src/startup.js';
+import { reclaimAbandonedJobs, scheduleEventPrune, scheduleReconcile } from '../src/startup.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient, hasEvent } from './helpers.js';
 
 describe('reclaimAbandonedJobs', () => {
@@ -19,6 +20,24 @@ describe('reclaimAbandonedJobs', () => {
     const ctx = makeCtx();
     reclaimAbandonedJobs(ctx);
     expect(ctx.events.list()).toHaveLength(0);
+  });
+});
+
+describe('scheduleEventPrune', () => {
+  it('also prunes traces past retention and reports it via an event', () => {
+    const ctx = makeCtx();
+    new TraceEntries(ctx.db).append({
+      jobId: 1,
+      kind: 'a',
+      summary: 'old',
+      tsStart: Date.now() - 8 * 24 * 3600 * 1000,
+    });
+
+    const stop = scheduleEventPrune(ctx);
+    stop();
+
+    expect(new TraceEntries(ctx.db).listByJob(1)).toHaveLength(0);
+    expect(hasEvent(ctx.events.list(), 'traces.pruned')).toBe(true);
   });
 });
 
