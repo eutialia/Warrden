@@ -30,30 +30,59 @@ const RECONNECT_AFTER_MS = 15_000;
  * couple of tabs was enough to spend the budget and leave ordinary `fetch` calls queued
  * behind them with nothing to free them.
  */
-const subscribers = new Set<() => void>();
+/** One SSE frame off `/api/events/stream`, mirroring `EventRow` (server) minus its `ts`/`id`
+ * bookkeeping — all `useSseRefetch` filters need to decide whether to fire. */
+export interface SseEvent {
+  kind: string;
+  job_id: number | null;
+  data: Record<string, unknown>;
+}
+
+interface Subscriber {
+  fire: () => void;
+  filter: (e: SseEvent | null) => boolean;
+}
+
+const subscribers = new Set<Subscriber>();
 let source: EventSource | null = null;
 let retry: ReturnType<typeof setTimeout> | null = null;
 // The first open of a tab's life has nothing to catch up on — the pages' own initial
 // loads cover it. Every open after a drop does.
 let everConnected = false;
 
-function notifyAll(): void {
-  for (const fire of subscribers) fire();
+// null event = connection-level nudge (reconnect, heartbeat): everyone refetches.
+function notifyAll(event: SseEvent | null): void {
+  for (const sub of subscribers) {
+    if (sub.filter(event)) sub.fire();
+  }
 }
+
+// Trace entries are the noisiest event on the bus (one per pipeline step) and only the
+// debug trace view cares about them live — every other page opts out by default so a
+// running job doesn't debounce-thrash unrelated screens.
+const defaultFilter = (e: SseEvent | null): boolean => e === null || e.kind !== 'trace.appended';
 
 function openStream(): void {
   if (source !== null) return;
   const stream = new EventSource('/api/events/stream');
   source = stream;
 
-  stream.onmessage = notifyAll;
+  stream.onmessage = (msg: MessageEvent<string>) => {
+    let parsed: SseEvent | null = null;
+    try {
+      parsed = JSON.parse(msg.data) as SseEvent;
+    } catch {
+      // Malformed frame: treat as a generic nudge.
+    }
+    notifyAll(parsed);
+  };
 
   stream.onopen = () => {
     if (retry !== null) {
       clearTimeout(retry);
       retry = null;
     }
-    if (everConnected) notifyAll();
+    if (everConnected) notifyAll(null);
     everConnected = true;
   };
 
@@ -99,10 +128,24 @@ function closeStreamIfIdle(): void {
  *
  * `enabled: false` subscribes to nothing — for a page whose subject doesn't exist yet
  * (no `:id` resolved), rather than running a loop whose `onEvent` would just no-op.
+ *
+ * `filter` decides which SSE frames count as "something changed" for this caller;
+ * `null` means a connection-level nudge (reconnect, heartbeat, malformed frame) that
+ * every caller should treat as a refetch. Omit it for the default — everything except
+ * `trace.appended` — or pass one to opt into trace noise (the debug page) or narrow to
+ * a specific `job_id`/`kind`. Kept in a ref like `onEventRef` so an inline closure
+ * doesn't resubscribe the stream on every render.
  */
-export function useSseRefetch(onEvent: () => void, debounceMs = 500, enabled = true): void {
+export function useSseRefetch(
+  onEvent: () => void,
+  debounceMs = 500,
+  enabled = true,
+  filter?: (e: SseEvent | null) => boolean,
+): void {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
 
   useEffect(() => {
     if (!enabled) return;
@@ -118,11 +161,12 @@ export function useSseRefetch(onEvent: () => void, debounceMs = 500, enabled = t
     };
 
     const heartbeat = setInterval(() => onEventRef.current(), HEARTBEAT_MS);
-    subscribers.add(fire);
+    const sub: Subscriber = { fire, filter: (e) => (filterRef.current ?? defaultFilter)(e) };
+    subscribers.add(sub);
     openStream();
 
     return () => {
-      subscribers.delete(fire);
+      subscribers.delete(sub);
       clearInterval(heartbeat);
       if (debounce !== null) clearTimeout(debounce);
       closeStreamIfIdle();

@@ -204,6 +204,7 @@ export interface Config {
   reconcileIntervalMinutes: number;
   /** Days of event history to keep; 0 keeps everything. */
   eventRetentionDays: number;
+  debug: { enabled: boolean };
 }
 
 export interface SaveConfigResponse {
@@ -434,9 +435,49 @@ export interface Overview {
   recent: { webhooks: number; refined: number; subtitles: number; escalated: number };
   week: { done: number; failed: number };
   storage: StorageCheck[];
+  debugEnabled: boolean;
 }
 
 export function fetchOverview(): Promise<Overview> {
   return fetchJson<Overview>('/api/overview');
+}
+
+/** `GET /api/traces` — one row per job that has produced trace entries, newest first. */
+export interface TraceSummary {
+  jobId: number;
+  pipeline: string;
+  targetTitle: string;
+  jobStatus: string;
+  entryCount: number;
+  firstTs: number;
+  lastTs: number;
+}
+
+/** One `job_trace` row without its (often large) payload — `GET /api/traces/:jobId` returns
+ * these; fetch the full row with `fetchTraceEntry` when the payload is actually needed. */
+export interface TraceEntry {
+  id: number;
+  job_id: number;
+  seq: number;
+  parent_seq: number | null;
+  kind: string;
+  summary: string;
+  side_effect: 0 | 1;
+  status: 'running' | 'ok' | 'error';
+  ts_start: number;
+  ts_end: number | null;
+  hasPayload: boolean;
+}
+
+export function fetchTraces(): Promise<{ traces: TraceSummary[] }> {
+  return fetchJson('/api/traces');
+}
+
+export function fetchTrace(jobId: number | string): Promise<{ jobId: number; entries: TraceEntry[] }> {
+  return fetchJson(`/api/traces/${jobId}`);
+}
+
+export function fetchTraceEntry(jobId: number | string, seq: number): Promise<TraceEntry & { payload: unknown }> {
+  return fetchJson(`/api/traces/${jobId}/entries/${seq}`);
 }
 
