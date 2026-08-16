@@ -16,3 +16,28 @@ services:
       - /mnt/nas/Anime:/anime
       - /mnt/nas/Movies:/movies
       - /mnt/nas/Downloads:/downloads
+
+# Variant: no host mounts (e.g. the NAS is only reachable over SMB, or your file
+# manager's GVFS mounts are invisible to the docker daemon). Let docker mount the
+# shares itself as CIFS volumes; credentials go in .env (copy .env.example).
+# Replace the bind mounts above with named volumes and define them like this:
+#
+# x-cifs-o: &cifs-o "addr=nas.lan,username=${SMB_USERNAME:?set in .env},password=${SMB_PASSWORD:?set in .env},uid=1000,gid=1000"
+#
+# services:
+#   warrden:
+#     volumes:
+#       - tv:/tv
+#       - anime:/anime
+#       - movies:/movies
+#       - downloads:/downloads
+#
+# volumes:
+#   tv:
+#     driver_opts: { type: cifs, o: *cifs-o, device: "//nas.lan/media/Series" }
+#   anime:
+#     driver_opts: { type: cifs, o: *cifs-o, device: "//nas.lan/media/Anime" }
+#   movies:
+#     driver_opts: { type: cifs, o: *cifs-o, device: "//nas.lan/media/Movies" }
+#   downloads:
+#     driver_opts: { type: cifs, o: *cifs-o, device: "//nas.lan/downloads" }
