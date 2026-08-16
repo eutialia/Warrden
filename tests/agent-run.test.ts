@@ -9,6 +9,7 @@ import { emptyKnowledge, renderKnowledge, saveKnowledge } from '../src/agent/sit
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { SiteProfiles, type AccessTier } from '../src/db/siteProfiles.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import type { FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { SubtitleSiteConfig } from '../src/config/schema.js';
 import {
@@ -145,6 +146,21 @@ describe('searchSite', () => {
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.last_working_tier).toBe('chromium');
     expect(profile.fail_count).toBe(0);
+  });
+
+  it('traces the site run as one step with every transcript entry hanging off it', async () => {
+    const { ctx, job } = setup();
+    const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
+    ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    const rows = new TraceEntries(ctx.db).listByJob(job.id);
+    const site = rows.find((r) => r.kind === 'subtitle.site');
+    expect(site?.status).toBe('ok');
+    const steps = rows.filter((r) => r.kind === 'agent.step');
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps.every((r) => r.parent_seq === site?.seq)).toBe(true);
   });
 
   it('skips when within cooldown, emitting subtitle.site-cooldown', async () => {

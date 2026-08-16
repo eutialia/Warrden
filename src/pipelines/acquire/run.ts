@@ -1,4 +1,5 @@
 import type { ArrApi, ReleaseCandidate } from '../../arr/types.js';
+import { traceArrClient } from '../../arr/traced.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
 import { targetEventData } from '../../events/target.js';
@@ -72,10 +73,13 @@ interface RecordOutcomeInput {
  * own outcome was worse than an earlier one's.
  */
 export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void> {
-  const client = ctx.clients.get(job.arr_instance);
-  if (!client) {
+  const rawClient = ctx.clients.get(job.arr_instance);
+  if (!rawClient) {
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
+  // Wrapped once here so every downstream arr call — including the ones inside
+  // resolveTargetTitle and pinReleaseGroup — traces without each site opting in.
+  const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   if (job.target_kind === 'movie') {
     const title = await resolveTargetTitle(client, job);
@@ -240,6 +244,13 @@ async function attempt(
   const { kept, dropped: capDropped } = capCandidates(prefiltered);
   const dropped = [...prefilterDropped, ...capDropped];
 
+  ctx.trace.event({
+    jobId: input.jobId,
+    kind: 'pipeline.prefilter',
+    summary: `prefilter kept ${kept.length} of ${raw.length}`,
+    payload: () => ({ kept, dropped }),
+  });
+
   if (capDropped.length > 0) {
     const label = input.seasonNumber !== undefined ? `${input.title} Season ${input.seasonNumber}` : input.title;
     ctx.events.append({
@@ -263,6 +274,7 @@ async function attempt(
     kind: input.kind,
     seasonNumber: input.seasonNumber,
     hint: input.hint,
+    jobId: input.jobId,
   });
 
   if (pick.decision === 'none') {

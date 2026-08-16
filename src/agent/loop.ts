@@ -158,6 +158,8 @@ export async function runAgentLoop(input: {
   destDir: string;
   maxSteps: number;
   onTranscript: (e: TranscriptEntry) => void;
+  /** Files this loop's `llm.call` entries under the caller's per-site step. */
+  trace?: { jobId: number; parentSeq?: number };
 }): Promise<AgentOutcome> {
   const { llm, tier, site, profile, knowledge, destDir, maxSteps, onTranscript } = input;
   const query = input.hints?.title ?? input.query;
@@ -218,6 +220,7 @@ export async function runAgentLoop(input: {
       system,
       prompt,
       promptCache: true,
+      trace: input.trace,
     });
     onTranscript({ ts: Date.now(), tier: tier.tier, action: action.action, detail: `${action.note} (${action.url})` });
 

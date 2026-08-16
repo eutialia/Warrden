@@ -4,6 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ConfigSchema } from '../src/config/schema.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS } from '../src/pipelines/ingest/run.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
@@ -140,6 +141,22 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(rows.find((r) => r.source_path === assPath)).toMatchObject({ data: { lang: 'zh-Hans', matchedBy: 'deterministic' } });
 
     expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.placed')).toHaveLength(2);
+  });
+
+  it('traces the arr calls, the sweep and one side-effecting entry per placement', async () => {
+    const fx = ingestFixture();
+    writeFileSync(join(fx.torrentDir, 'Show - 05 [JPSC].ass'), 'subtitle-content');
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    const rows = new TraceEntries(fx.ctx.db).listByJob(job.id);
+    const kinds = rows.map((r) => r.kind);
+    expect(kinds).toContain('arr.request');
+    expect(kinds).toContain('pipeline.sweep');
+    const placed = rows.filter((r) => r.kind === 'pipeline.place');
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.side_effect).toBe(1);
   });
 
   it('LLM fallback: a cryptic name deterministic cannot place goes to one sidecar-match call; a matched id places it, a null answer raises ingest.unmatched and leaves it unplaced', async () => {

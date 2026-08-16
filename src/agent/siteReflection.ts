@@ -450,6 +450,7 @@ export async function reflectOnRun(input: {
         'Steps taken:',
         renderTranscript(transcript),
       ].join('\n'),
+      trace: { jobId: job.id },
     });
 
     const { knowledge: applied, dropped } = applyOps(knowledge, reflection.ops, {

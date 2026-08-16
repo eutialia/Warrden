@@ -64,8 +64,11 @@ export async function mapArchiveWithLlm(input: {
   seriesTitle: string;
   files: ArchiveCacheEntry[];
   episodes: EpisodeResource[]; // only hasFile episodes — a sub needs a video to sit beside
+  /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
+   * with no job at hand (tests), which just means the call isn't traced. */
+  jobId?: number;
 }): Promise<(number | null)[]> {
-  const { llm, seriesTitle, files, episodes } = input;
+  const { llm, seriesTitle, files, episodes, jobId } = input;
 
   if (files.length === 0) {
     return [];
@@ -96,6 +99,7 @@ export async function mapArchiveWithLlm(input: {
     schema: ArchiveMapResponseSchema,
     system,
     prompt,
+    trace: jobId !== undefined ? { jobId } : undefined,
   });
 
   const byFile = new Map<number, number | null>();

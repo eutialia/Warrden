@@ -332,6 +332,7 @@ async function matchArchiveRow(
         episodeFileId: 0,
         hasFile: true,
       })),
+      jobId: job.id,
     });
     const episodesById = new Map(missing.map((m) => [m.episodeId, m]));
     for (let i = 0; i < unmatchedEntries.length; i++) {

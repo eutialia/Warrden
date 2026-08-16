@@ -90,8 +90,9 @@ async function mapBundleWithLlm(input: {
   seriesTitle: string;
   items: ManualImportItem[];
   episodes: EpisodeResource[];
+  jobId?: number;
 }): Promise<{ episodeIdsByFile: number[][]; confidence: BundleConfidence; reasoning: string }> {
-  const { llm, seriesTitle, items, episodes } = input;
+  const { llm, seriesTitle, items, episodes, jobId } = input;
 
   const system = [
     'You map each numbered leftover video file from a torrent to the episode(s) it contains, using the episode table (season/episode, absolute number, title).',
@@ -114,6 +115,7 @@ async function mapBundleWithLlm(input: {
     schema: BundleMapResponseSchema,
     system,
     prompt,
+    trace: jobId !== undefined ? { jobId } : undefined,
   });
 
   const validEpisodeIds = new Set(episodes.map((e) => e.id));
@@ -197,8 +199,11 @@ export async function planBundleImport(input: {
   seriesId: number;
   items: ManualImportItem[]; // manual-import candidates for one folder/downloadId
   episodes: EpisodeResource[]; // FULL episode list (mapping targets episodes without files)
+  /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
+   * with no job at hand (tests), which just means the call isn't traced. */
+  jobId?: number;
 }): Promise<BundlePlan | null> {
-  const { llm, seriesTitle, seriesId, items, episodes } = input;
+  const { llm, seriesTitle, seriesId, items, episodes, jobId } = input;
 
   const validEpisodeIds = new Set(episodes.map((e) => e.id));
 
@@ -242,7 +247,7 @@ export async function planBundleImport(input: {
     // paid call, same as matchSidecarsWithLlm's empty-episode-table short-circuit.
     skipped.push(...remaining.map((item) => item.path));
   } else if (remaining.length > 0) {
-    const llmResult = await mapBundleWithLlm({ llm, seriesTitle, items: remaining, episodes });
+    const llmResult = await mapBundleWithLlm({ llm, seriesTitle, items: remaining, episodes, jobId });
     confidence = llmResult.confidence;
     reasoning = llmResult.reasoning;
 

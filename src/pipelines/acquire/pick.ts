@@ -85,8 +85,13 @@ export async function pickRelease(input: {
   kind: 'series' | 'movie';
   seasonNumber?: number;
   hint?: string;
+  /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
+   * with no job at hand (tests), which just means the call isn't traced. */
+  jobId?: number;
 }): Promise<PickResult> {
-  const { llm, candidates, ...promptInput } = input;
+  // `jobId` is destructured out explicitly: anything left in `promptInput` reaches
+  // `synthesizePolicyPrompt` and would change the prompt bytes.
+  const { llm, candidates, jobId, ...promptInput } = input;
 
   // Nothing to choose from — an empty candidate list isn't a policy question, so it's
   // not worth an LLM round-trip (cost, latency, and a queued fixture the caller would
@@ -105,6 +110,7 @@ export async function pickRelease(input: {
     schema: LlmPickResponseSchema,
     system,
     prompt,
+    trace: jobId !== undefined ? { jobId } : undefined,
   });
 
   if (result.decision === 'none') return { decision: 'none', reasoning: result.reasoning };

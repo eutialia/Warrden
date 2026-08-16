@@ -15,6 +15,7 @@ import { targetEventData } from '../../events/target.js';
 import { atomicCopy, walkFiles } from '../../fs/files.js';
 import { mapArrPath, type PathMapping } from '../../fs/paths.js';
 import { RescheduleError } from '../../jobs/errors.js';
+import { traceArrClient } from '../../arr/traced.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
@@ -80,10 +81,13 @@ type TargetContext = SeriesTargetContext | MovieTargetContext;
  * never undo the sidecar work above, or fail the job outright.
  */
 export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> {
-  const client = ctx.clients.get(job.arr_instance);
-  if (!client) {
+  const rawClient = ctx.clients.get(job.arr_instance);
+  if (!rawClient) {
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
+  // Wrapped once so every arr call this job makes (including the rescue stage's and
+  // resolveTargetTitle's) traces without each site opting in.
+  const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   assertMounted(ctx, job, 'ingest');
 
@@ -101,6 +105,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
       });
       return;
     }
+    ctx.trace.event({ jobId: job.id, kind: 'pipeline.wait', summary: 'waiting for arr import to settle' });
     throw new RescheduleError('arr still importing this target', SETTLE_RETRY_MS);
   }
 
@@ -164,6 +169,13 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // — itself recursive — walk the same physical file more than once, double-placing it and
   // double-listing it in the LLM batch below.
   const sidecarPaths = [...new Set(sourceDirsLocal.flatMap((d) => walkFiles(d, SIDECAR_EXTS)))];
+
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'pipeline.sweep',
+    summary: `swept ${sidecarPaths.length} sidecar file(s)`,
+    payload: () => sidecarPaths,
+  });
 
   // The specific video Radarr actually imported, identified by exact size match across
   // every swept dir's videos — works whether those dirs came from history or the fallback
@@ -468,6 +480,7 @@ async function sweepSidecars(
     seriesTitle: target.seriesTitle,
     files: llmBatch.map((p) => basename(p)),
     episodes: episodesWithFiles,
+    jobId: job.id,
   });
 
   llmBatch.forEach((sidecarPath, i) => {
@@ -630,6 +643,13 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
     jobId: job.id,
     data: { lang, matchedBy },
   });
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'pipeline.place',
+    summary: `placed ${targetName}`,
+    sideEffect: true,
+    payload: () => ({ from: sidecarPath, to: targetPath }),
+  });
   ctx.events.append({
     kind: 'ingest.placed',
     jobId: job.id,
@@ -716,7 +736,14 @@ async function rescueSeries(
   ]);
   const items = dedupeManualImportItems(itemsByScope.flat());
 
-  const plan = await planBundleImport({ llm: ctx.llm, seriesTitle: target.seriesTitle, seriesId, items, episodes: target.episodes });
+  const plan = await planBundleImport({
+    llm: ctx.llm,
+    seriesTitle: target.seriesTitle,
+    seriesId,
+    items,
+    episodes: target.episodes,
+    jobId: job.id,
+  });
   if (plan === null) return;
 
   if (plan.confidence !== 'low') {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
 import { candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
 
@@ -23,6 +24,14 @@ describe('runAcquireJob — single-season series (the common case)', () => {
     const rec: any = ctx.db.prepare('SELECT * FROM acquire_records').get();
     expect(rec).toMatchObject({ status: 'grabbed', picked_guid: 'g1', release_group: 'SubsPlease', source: 'webhook' });
     expect(rec.reasoning).toContain('CHS');
+  });
+  it('traces the arr calls and the prefilter outcome', async () => {
+    const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
+    await runAcquireJob(ctx, job);
+    // No `llm.call` here: FakeGenerator never traces (see Task 4's tests for that side).
+    const kinds = new TraceEntries(ctx.db).listByJob(job.id).map((r) => r.kind);
+    expect(kinds).toContain('arr.request');
+    expect(kinds).toContain('pipeline.prefilter');
   });
   it('records the source from job.payload.source when the enqueuer set one, instead of the "webhook" default', async () => {
     const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));

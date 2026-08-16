@@ -67,8 +67,11 @@ export async function matchSidecarsWithLlm(input: {
   seriesTitle: string;
   files: string[]; // sidecar file NAMES (not paths), 1-based numbering in the prompt
   episodes: EpisodeResource[]; // only hasFile episodes — a sidecar needs a video to sit beside
+  /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
+   * with no job at hand (tests), which just means the call isn't traced. */
+  jobId?: number;
 }): Promise<(number | null)[]> {
-  const { llm, seriesTitle, files, episodes } = input;
+  const { llm, seriesTitle, files, episodes, jobId } = input;
 
   // Nothing to match — an empty file list isn't worth an LLM round-trip.
   if (files.length === 0) {
@@ -102,6 +105,7 @@ export async function matchSidecarsWithLlm(input: {
     schema: SidecarMatchResponseSchema,
     system,
     prompt,
+    trace: jobId !== undefined ? { jobId } : undefined,
   });
 
   const byFile = new Map<number, number | null>();

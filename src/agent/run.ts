@@ -178,6 +178,13 @@ export async function searchSite(
   const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, deps.seedsDir ?? defaultSeedsDir());
 
   const runId = runs.start(job.id, siteLabel(site.baseUrl));
+  // One top-level step per site, so every agent step, LLM call and tier escalation of this
+  // site's run hangs off it in the trace view.
+  const siteStep = ctx.trace.begin({
+    jobId: job.id,
+    kind: 'subtitle.site',
+    summary: siteLabel(site.baseUrl),
+  });
   // Start at the remembered tier (with optional decay); unimplemented seams fall back via
   // indexOf === -1 → max(0, -1) === 0 in tierStartIndex.
   const startIdx = tierStartIndex(profile.last_working_tier, profile.last_success_at);
@@ -191,6 +198,13 @@ export async function searchSite(
   const onTranscriptEvent = (entry: TranscriptEntry): void => {
     transcript.push(entry);
     runs.appendTranscript(runId, [entry]);
+    ctx.trace.event({
+      jobId: job.id,
+      kind: 'agent.step',
+      parentSeq: siteStep.seq ?? undefined,
+      summary: `${entry.action}: ${entry.detail}`.slice(0, 200),
+      payload: () => entry,
+    });
     ctx.events.append({
       kind: 'subtitle.transcript',
       // A refused private/loopback destination carries `attention` (see the loop's
@@ -215,6 +229,7 @@ export async function searchSite(
     outcome: 'error' | 'exhausted' | 'gave-up',
   ): SiteRunResult => {
     runs.finish(runId, 'failed');
+    siteStep.end('error');
     profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
     ctx.events.append({
       kind,
@@ -250,10 +265,12 @@ export async function searchSite(
           destDir,
           maxSteps: ctx.config.browser.stepBudget,
           onTranscript: onTranscriptEvent,
+          trace: siteStep.seq !== null ? { jobId: job.id, parentSeq: siteStep.seq } : undefined,
         });
 
         if (outcome.kind === 'downloaded') {
           runs.finish(runId, 'done');
+          siteStep.end('ok');
           const searchUrl = outcome.searchUrl;
           const isNew =
             searchUrl !== null &&
