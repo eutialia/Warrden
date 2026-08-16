@@ -73,6 +73,7 @@ const SECTIONS = [
   { id: 'browser', label: 'Browser agent' },
   { id: 'models', label: 'AI models' },
   { id: 'keys', label: 'API keys' },
+  { id: 'debug', label: 'Debug' },
 ] as const;
 
 /** Numeric settings are held as text while editing so a half-typed value stays
@@ -700,6 +701,28 @@ export default function ConfigPage() {
                   </div>
                 );
               })}
+            </CardContent>
+          </Card>
+
+          {/* Debug */}
+          <Card id="debug" className="scroll-mt-20">
+            <CardHeader>
+              <CardTitle>Debug</CardTitle>
+              <CardDescription>Full-fidelity tracing for troubleshooting, at the cost of performance and secrecy.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="debug-enabled"
+                  checked={draft.debug.enabled}
+                  onCheckedChange={(checked) => patch({ debug: { enabled: checked } })}
+                />
+                <Label htmlFor="debug-enabled">Debug mode</Label>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Records every processing step in full, including request bodies, LLM prompts and API keys. Adds a
+                warning border while active. May impact performance.
+              </p>
             </CardContent>
           </Card>
         </SectionStack>

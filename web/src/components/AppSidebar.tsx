@@ -1,4 +1,4 @@
-import { Boxes, Globe, LayoutDashboard, ListChecks, Settings, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Boxes, Bug, Globe, LayoutDashboard, ListChecks, Settings, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   Sidebar,
@@ -38,6 +38,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
         match: (p) => p.startsWith('/activity') || p.startsWith('/jobs/'),
       },
       { title: 'Needs review', url: '/attention', icon: TriangleAlert, match: (p) => p.startsWith('/attention') },
+      { title: 'Debug', url: '/debug', icon: Bug, match: (p) => p.startsWith('/debug') },
     ],
   },
   {
@@ -64,6 +65,10 @@ export function AppSidebar() {
     return null;
   };
 
+  // Debug is a footgun (it logs secrets), so it only shows once the flag is on.
+  const visibleItems = (items: NavItem[]) =>
+    items.filter((item) => item.url !== '/debug' || data?.debugEnabled === true);
+
   return (
     <Sidebar>
       <SidebarHeader>
@@ -86,7 +91,7 @@ export function AppSidebar() {
             <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {group.items.map((item) => {
+                {visibleItems(group.items).map((item) => {
                   const badge = badgeFor(item.url);
                   return (
                     <SidebarMenuItem key={item.url}>

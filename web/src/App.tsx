@@ -2,12 +2,14 @@ import { ThemeProvider } from 'next-themes';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { AppHeader } from '@/components/AppHeader';
 import { AppSidebar } from '@/components/AppSidebar';
+import { DebugFrame } from '@/components/DebugFrame';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { Toaster } from '@/components/ui/sonner';
 import { OverviewProvider } from '@/hooks/useOverview';
 import Activity from '@/pages/Activity';
 import Attention from '@/pages/Attention';
 import ConfigPage from '@/pages/Config';
+import DebugPage from '@/pages/Debug';
 import JobDetail from '@/pages/JobDetail';
 import ManagedObjects from '@/pages/ManagedObjects';
 import NotFound from '@/pages/NotFound';
@@ -21,6 +23,7 @@ export default function App() {
     <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
       <BrowserRouter>
         <OverviewProvider>
+          <DebugFrame />
           <SidebarProvider>
             <AppSidebar />
             <SidebarInset>
@@ -35,6 +38,8 @@ export default function App() {
                     <Route path="/managed" element={<ManagedObjects />} />
                     <Route path="/sites" element={<Sites />} />
                     <Route path="/config" element={<ConfigPage />} />
+                    <Route path="/debug" element={<DebugPage />} />
+                    <Route path="/debug/:jobId" element={<DebugPage />} />
                     <Route path="*" element={<NotFound />} />
                   </Routes>
                 </div>
