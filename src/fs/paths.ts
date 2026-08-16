@@ -33,6 +33,19 @@ export function mapArrPath(mappings: PathMapping[], p: string): string {
   return best.to + p.slice(best.from.length);
 }
 
+/**
+ * Turns a URL's last path segment into a filesystem-safe name. Every char outside
+ * `[A-Za-z0-9._-]` becomes `_`, so a model-chosen or site-supplied segment can't escape the
+ * directory it is joined into via `..` or a separator (`join('/data/dl', 'x-../../etc/passwd')`
+ * would otherwise resolve outside it). Query strings are part of the tail and get flattened
+ * into the name like any other text. Capped at 180 chars to stay under filename limits once a
+ * caller prefixes it, and empty results fall back to `download`.
+ */
+export function safeUrlTailName(url: string): string {
+  const rawName = url.split('/').pop() || 'download';
+  return rawName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'download';
+}
+
 /** Make (and return) a directory under the data dir — used by `agent/siteKnowledge.ts`
  * (the site knowledge and seed directories). Not the single point every runtime-owned path
  * goes through: roughly ten direct `mkdirSync(join(dataDir, …))` calls remain across

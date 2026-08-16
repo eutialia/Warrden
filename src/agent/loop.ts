@@ -4,6 +4,7 @@ import type { StructuredGenerator } from '../llm/generator.js';
 import { refusedDestination, type RefusedDestination } from './destinationGuard.js';
 import type { FetchResult, FetchTier } from './tiers.js';
 import { siteKey } from '../config/siteLabel.js';
+import { safeUrlTailName } from '../fs/paths.js';
 import type { SiteProfileRow } from '../db/siteProfiles.js';
 import type { TranscriptEntry } from '../db/subtitleRuns.js';
 import { formatSearchHintsForPrompt, type SearchHints } from '../pipelines/subtitle/queries.js';
@@ -255,12 +256,10 @@ export async function runAgentLoop(input: {
     };
 
     if (action.action === 'download') {
-      // Sanitize the URL tail so a model-chosen path segment can't escape destDir via
-      // `..` or separators (join('/data/dl', 'x-1-../../etc/passwd') would otherwise
-      // resolve outside the download dir).
-      const rawName = action.url.split('/').pop() || 'download';
-      const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'download';
-      const destPath = join(destDir, `${siteKey(site.baseUrl)}-${Date.now()}-${safeName}`);
+      // The timestamp only disambiguates the transient file: destDir is the run's own scratch
+      // and can legitimately receive the same pack name twice in one run. Cache identity is
+      // derived from the URL downstream, not from this name.
+      const destPath = join(destDir, `${siteKey(site.baseUrl)}-${Date.now()}-${safeUrlTailName(action.url)}`);
       const res = await tier.fetch(action.url, {
         destPath,
         ...(referer !== undefined ? { referer } : {}),

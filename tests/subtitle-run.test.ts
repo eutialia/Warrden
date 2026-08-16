@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { describe, expect, it } from 'vitest';
@@ -78,10 +78,10 @@ x
 y
 `;
 
-function makeZip(files: Record<string, string>): string {
+function makeZip(files: Record<string, string>, name = 'pack.zip'): string {
   const zip = new AdmZip();
-  for (const [name, content] of Object.entries(files)) zip.addFile(name, Buffer.from(content));
-  const path = join(tmpDir(), 'pack.zip');
+  for (const [entry, content] of Object.entries(files)) zip.addFile(entry, Buffer.from(content));
+  const path = join(tmpDir(), name);
   zip.writeZip(path);
   return path;
 }
@@ -192,6 +192,64 @@ describe('runSubtitleJob', () => {
       source_path: filePath,
       data: { lang: 'zh-Hans', matchedBy: 'pipeline', drift: 'unverified' },
     });
+  });
+
+  /** A deps stub that hands back a fresh zip each call under the given url, named the way the
+   * agent loop names a download: run-scoped and timestamped, so the SAME url yields a DIFFERENT
+   * local basename every run. That difference is the whole point: cache identity has to come
+   * from the url, not the transient file. The pack holds only "Bonus.ass", which the LLM
+   * remainder maps to nothing (see NO_MATCH), so the episode stays missing and the second run
+   * reaches the site search again instead of stopping on coverage; caching happens before
+   * matching either way. */
+  function repeatSiteStub(url: string) {
+    let n = 0;
+    return {
+      searchSite: async () => {
+        n += 1;
+        return { download: { filePath: makeZip({ 'Bonus.ass': SRT }, `acg.rip-${Date.now()}-${n}-pack.zip`), url }, transcript: [], outcome: 'downloaded' as const };
+      },
+    };
+  }
+
+  type SiteStub = ReturnType<typeof repeatSiteStub>;
+
+  /** The LLM remainder verdict for a pack that matches nothing. Queued generously: each run
+   * asks once per cached row it revisits plus once for the fresh download. */
+  const NO_MATCH = { assignments: [{ file: 1, episodeId: null }], reasoning: 'no episode matches' };
+  const noMatches = (): FakeGenerator => new FakeGenerator(Array.from({ length: 6 }, () => NO_MATCH));
+  const cacheDirs = (fx: SubtitleFixture): string[] => readdirSync(join(fx.ctx.dataDir, 'subtitle', 'cache'));
+
+  /** Two separate runs against the same target. Each job is completed before the next is
+   * claimed, since the queue keeps one job per target in flight. */
+  async function runTwice(fx: SubtitleFixture, first: SiteStub, second: SiteStub): Promise<void> {
+    for (const deps of [first, second]) {
+      const job = claimSubtitleJob(fx);
+      await runSubtitleJob(fx.ctx, job, deps);
+      fx.ctx.queue.complete(job.id);
+    }
+  }
+
+  it('same pack url downloaded on two runs -> one archive_cache row and one cache dir', async () => {
+    const fx = subtitleFixture();
+    fx.ctx.llm = noMatches();
+    const deps = repeatSiteStub('https://acg.rip/files/Frieren%20[Group].zip');
+
+    await runTwice(fx, deps, deps);
+
+    const rows = new ArchiveCache(fx.ctx.db).forTarget(fx.arrInstance, 'series', fx.targetId);
+    expect(rows).toHaveLength(1);
+    expect(cacheDirs(fx)).toHaveLength(1);
+    expect(existsSync(join(rows[0]!.path, '0-Bonus.ass'))).toBe(true);
+  });
+
+  it('two different pack filenames -> distinct cache rows and dirs', async () => {
+    const fx = subtitleFixture();
+    fx.ctx.llm = noMatches();
+
+    await runTwice(fx, repeatSiteStub('https://acg.rip/files/pack-a.zip'), repeatSiteStub('https://acg.rip/files/pack-b.zip'));
+
+    expect(new ArchiveCache(fx.ctx.db).forTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(2);
+    expect(cacheDirs(fx)).toHaveLength(2);
   });
 
   it('site flow: a missing episode -> searchSite returns a zip -> extract -> deterministic map -> drift in-sync -> placed with correct name + provenance', async () => {

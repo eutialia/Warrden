@@ -11,7 +11,7 @@ import { SiteProfiles } from '../../db/siteProfiles.js';
 import type { TranscriptEntry } from '../../db/subtitleRuns.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
-import { mapArrPath } from '../../fs/paths.js';
+import { mapArrPath, safeUrlTailName } from '../../fs/paths.js';
 import type { ArrApi } from '../../arr/types.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
@@ -796,11 +796,19 @@ async function extractAndMatch(
   if (!isIngestibleSubtitlePayload(download.filePath)) return false;
 
   // Extract/copy into a PERSISTENT cache dir (outside runDir) so a later episode can reuse
-  // the pack without re-downloading. Keyed uniquely so ArchiveCache's (target, path) upsert
-  // refreshes the same row rather than piling up duplicates.
-  const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${basename(download.filePath)}`);
+  // the pack without re-downloading. A pack's identity is the site plus its own filename from
+  // the URL (which carries the title and the fansub group), NOT the downloaded file's local
+  // name, which carries a per-run timestamp. So the same pack fetched again lands in the same
+  // dir: one shared extracted copy, and ArchiveCache's (target, path) upsert refreshes that
+  // target's row instead of piling up a new one per run.
+  const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${safeUrlTailName(download.url)}`);
   let files: string[];
   try {
+    // Extract fresh: the tar/7z path collects whatever already sits in the dir, so extracting
+    // over a populated one would re-emit stale files alongside the new ones (and can rename a
+    // fresh file onto a path it just collected). The same pack regenerates the same numbered
+    // paths, so another target's row pointing here stays valid.
+    rmSync(cacheDir, { recursive: true, force: true });
     files = await extractArchive(download.filePath, cacheDir);
   } catch (err) {
     if (err instanceof UnsupportedArchiveError) return false;
