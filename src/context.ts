@@ -5,6 +5,7 @@ import type { EventLog } from './events/log.js';
 import type { JobQueue } from './jobs/queue.js';
 import type { StructuredGenerator } from './llm/generator.js';
 import type { MediaTools } from './media/tools.js';
+import type { Tracer } from './trace/tracer.js';
 
 // grows as later tasks add more fields
 export interface AppContext {
@@ -17,6 +18,7 @@ export interface AppContext {
   // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly
   clients: Map<string, ArrApi>;
   llm: StructuredGenerator;
+  trace: Tracer;
   // External media binaries (ffprobe/alass/ffsubsync) behind one seam — production wires
   // CliMediaTools, tests inject a fake. Optional so existing Partial<AppContext> call
   // sites (createApp routes) stay valid; pipeline code that needs it asserts its presence.

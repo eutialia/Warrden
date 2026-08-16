@@ -14,6 +14,7 @@ import { runAcquireJob } from './pipelines/acquire/run.js';
 import { runIngestJob } from './pipelines/ingest/run.js';
 import { runSubtitleJob } from './pipelines/subtitle/run.js';
 import { createApp } from './server/app.js';
+import { SqlTracer } from './trace/tracer.js';
 import { reclaimAbandonedJobs, scheduleEventPrune, scheduleReconcile } from './startup.js';
 import { errorMessage } from './util/errors.js';
 
@@ -25,17 +26,25 @@ function buildContext(dataDir: string): AppContext {
   const config = loadConfig(dataDir);
   const db = openDb(dataDir);
   const clients = new Map<string, ArrApi>(config.arrs.map((arr) => [arr.name, new ArrClient(arr)]));
+  const events = new EventLog(db);
+  // The closure reads `ctx.config.debug.enabled` live, so flipping the config toggle at
+  // runtime (no restart) takes effect immediately. Safe despite referencing `ctx` before
+  // it's assigned: the closure only runs once tracing is invoked, well after this
+  // function returns and `ctx` is fully initialized.
+  const trace = new SqlTracer(db, events, () => ctx.config.debug.enabled);
 
-  return {
+  const ctx: AppContext = {
     db,
     config,
     dataDir,
     queue: new JobQueue(db),
-    events: new EventLog(db),
+    events,
     clients,
     llm: new AiSdkGenerator(config),
+    trace,
     media: new CliMediaTools(),
   };
+  return ctx;
 }
 
 /** Fires `registerWebhooks` in the background rather than blocking startup on it — a slow

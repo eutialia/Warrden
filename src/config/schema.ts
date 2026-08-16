@@ -133,6 +133,11 @@ export const ConfigSchema = z
      * spans; the schema takes any non-negative number so a hand-edited config stays
      * valid. */
     eventRetentionDays: z.number().int().min(0).default(30),
+    debug: z
+      .object({
+        enabled: z.boolean().default(false),
+      })
+      .prefault({}),
   })
   .superRefine((cfg, ctx) => {
     // Defense-in-depth against `SECRET_PLACEHOLDER` ever being saved as a real secret:
