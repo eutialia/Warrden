@@ -185,11 +185,14 @@ export default function ConfigPage() {
   // A router navigation doesn't act on the fragment the way a real page load would, and
   // the section it names doesn't exist until the config resolves — so "Check mounts" on
   // the home screen would otherwise just drop you at the top of a long page.
+  // Depending on `draft` itself would re-scroll on every keystroke, since each edit
+  // clones it; only its arrival matters.
   const { hash } = useLocation();
+  const loaded = draft !== null;
   useEffect(() => {
-    if (!hash || draft === null) return;
+    if (!hash || !loaded) return;
     document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' });
-  }, [hash, draft]);
+  }, [hash, loaded]);
 
   // One dirty flag for the whole page. The API saves the config atomically anyway,
   // so per-section saves were both more clicks and a lie about the granularity.
