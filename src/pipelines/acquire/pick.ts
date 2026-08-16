@@ -13,7 +13,7 @@ import { synthesizePolicyPrompt } from './policy.js';
  * shape callers of `pickRelease` actually get back.
  */
 // A flat object, NOT a discriminated union: providers that take the schema as a tool /
-// structured-output definition (Anthropic, OpenAI json_schema, claude-code) require a
+// structured-output definition (Anthropic, OpenAI json_schema) require a
 // root-level `type: "object"`, and a union serializes to a bare `anyOf` they 400 on.
 // The pick-only fields are nullable instead; the superRefine enforces the pairing.
 // `.nullable()` WITHOUT `.default()` on the three pick-only fields, deliberately: `.default()`

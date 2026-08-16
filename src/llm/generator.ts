@@ -3,7 +3,6 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
 import { generateObject } from 'ai';
-import { createClaudeCode } from 'ai-sdk-provider-claude-code';
 import type { z } from 'zod';
 import type { Config, Provider } from '../config/schema.js';
 import { NOOP_HANDLE, NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
@@ -106,9 +105,6 @@ function createModel(cfg: Config, ref: ModelRef, callsite: string): LanguageMode
       return createOpenAI({ apiKey: requireKey(cfg, 'openai', callsite) })(ref.model);
     case 'anthropic':
       return createAnthropic({ apiKey: requireKey(cfg, 'anthropic', callsite) })(ref.model);
-    case 'claude-code':
-      // Subscription OAuth via the Claude Code CLI — no API key needed.
-      return createClaudeCode()(ref.model);
     default: {
       // Exhaustiveness check: fails to compile if `Provider` grows a case not handled above.
       const unreachable: never = ref.provider;

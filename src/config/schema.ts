@@ -11,7 +11,7 @@ import { z } from 'zod';
  * hand if this value ever changes. */
 export const SECRET_PLACEHOLDER = '•••';
 
-const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic', 'claude-code']);
+const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic']);
 const LlmModelSchema = z.object({
   provider: ProviderSchema,
   model: z.string().min(1),

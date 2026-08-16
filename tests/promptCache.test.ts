@@ -34,8 +34,4 @@ describe('planPromptCache', () => {
       openrouter: { cacheControl: { type: 'ephemeral' } },
     });
   });
-
-  it('claude-code: no remote cache API', () => {
-    expect(planPromptCache(true, 'claude-code', 'warrden:site-search')).toEqual({});
-  });
 });

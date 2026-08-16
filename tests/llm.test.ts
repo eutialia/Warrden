@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import type { Config } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { AiSdkGenerator, LlmError, resolveModel, withFallback } from '../src/llm/generator.js';
@@ -100,6 +101,14 @@ describe('withFallback', () => {
   });
 });
 
+/** `baseConfig()` plus the key the fixtures below need to get past `requireKey` and reach
+ * the mocked `generateObject`. */
+function keyedConfig(): Config {
+  const cfg = baseConfig();
+  cfg.llm.keys.anthropic = 'test-key';
+  return cfg;
+}
+
 describe('AiSdkGenerator', () => {
   const schema = z.object({ ok: z.boolean() });
 
@@ -132,11 +141,11 @@ describe('AiSdkGenerator', () => {
       .mockRejectedValueOnce(new Error('rate limited'))
       .mockRejectedValueOnce(new Error('rate limited'))
       .mockResolvedValue({ object: { ok: true } });
-    const cfg = baseConfig();
+    const cfg = keyedConfig();
     cfg.llm.model = {
-      provider: 'claude-code',
+      provider: 'anthropic',
       model: 'primary-model',
-      fallback: { provider: 'claude-code', model: 'fallback-model' },
+      fallback: { provider: 'anthropic', model: 'fallback-model' },
     };
     const generator = new AiSdkGenerator(cfg);
     const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
@@ -152,8 +161,8 @@ describe('AiSdkGenerator', () => {
     generateObjectMock.mockReset();
     const original = new Error('down');
     generateObjectMock.mockRejectedValue(original);
-    const cfg = baseConfig();
-    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
     const generator = new AiSdkGenerator(cfg);
     expect.assertions(3);
     try {
@@ -170,8 +179,8 @@ describe('AiSdkGenerator tracing', () => {
   it('records a parent llm.call and one llm.attempt per ladder attempt', async () => {
     generateObjectMock.mockReset();
     const db = freshDb();
-    const cfg = baseConfig();
-    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
     const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock
       .mockRejectedValueOnce(new Error('rate limited'))
@@ -208,8 +217,8 @@ describe('AiSdkGenerator tracing', () => {
   it('keeps system+prompt in the llm.call payload when every attempt fails', async () => {
     generateObjectMock.mockReset();
     const db = freshDb();
-    const cfg = baseConfig();
-    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
     const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockRejectedValue(new Error('down'));
 
@@ -231,8 +240,8 @@ describe('AiSdkGenerator tracing', () => {
   it('writes nothing without a trace option', async () => {
     generateObjectMock.mockReset();
     const db = freshDb();
-    const cfg = baseConfig();
-    cfg.llm.model = { provider: 'claude-code', model: 'primary-model' };
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
     const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockResolvedValueOnce({ object: { pick: 'a' } });
     await gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p' });

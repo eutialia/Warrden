@@ -8,7 +8,6 @@ import type { Provider } from '../config/schema.js';
  * | **Anthropic direct** | Explicit only: `cache_control` on a content block | Set message `providerOptions.anthropic.cacheControl` |
  * | **OpenAI direct** | Automatic for stable prefixes (≥~1024 tokens on many models). Optional sticky key | Keep system prefix stable; set call `providerOptions.openai.promptCacheKey` |
  * | **OpenRouter** | Auto for OpenAI/DeepSeek/Grok/…; Anthropic/Alibaba need breakpoints. Reads `anthropic` *or* `openrouter` cacheControl on messages; also top-level `cache_control` | Set both message-level and top-level openrouter options so Anthropic-via-OR works |
- * | **claude-code** | Local CLI / subscription — no provider prompt-cache API | No-op (stable messages still fine) |
  *
  * Putting only `anthropic: { cacheControl }` is NOT universal: OpenAI ignores it, and
  * OpenRouter works for Claude routes only because it also peeks at `anthropic.*`.
@@ -76,10 +75,6 @@ export function planPromptCache(
           openai: { promptCacheKey: cacheKey },
         },
       };
-
-    case 'claude-code':
-      // No remote prompt-cache API.
-      return {};
 
     default: {
       const _exhaustive: never = provider;
