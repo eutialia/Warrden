@@ -194,13 +194,29 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // (queue.ts's singleton rule), so a manual trigger and this automatic trigger race
   // cleanly. `source: 'ingest'` lets the subtitle runner (and any attention/retry that
   // links back) tell automatic runs from a manual dashboard one.
-  ctx.queue.enqueue({
+  const followUp = ctx.queue.enqueue({
     pipeline: 'subtitle',
     targetKind: job.target_kind,
     targetId: job.target_id,
     arrInstance: job.arr_instance,
     payload: { source: 'ingest' },
   });
+  // The trigger entry belongs to the NEW subtitle job's trace, not this one — it's the
+  // "why does this job exist" row the debug view reads. A coalesced enqueue returns a
+  // null id (it folded into an existing pending/running job) and gets no entry.
+  if (followUp.id !== null) {
+    ctx.trace.event({
+      jobId: followUp.id,
+      kind: 'trigger.pipeline',
+      summary: 'subtitle follow-up from ingest',
+      payload: () => ({
+        fromJobId: job.id,
+        arrInstance: job.arr_instance,
+        targetKind: job.target_kind,
+        targetId: job.target_id,
+      }),
+    });
+  }
 }
 
 /** Whether the file at `path` is exactly `size` bytes — `false` on ANY stat failure

@@ -13,6 +13,7 @@ import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
 import { mapArrPath, safeUrlTailName } from '../../fs/paths.js';
 import type { ArrApi } from '../../arr/types.js';
+import { traceArrClient } from '../../arr/traced.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
 import type { MediaTools } from '../../media/tools.js';
@@ -72,10 +73,13 @@ type CandidatePlan =
  * `subtitle.unresolved`.
  */
 export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubtitleDeps = {}): Promise<void> {
-  const client = ctx.clients.get(job.arr_instance);
-  if (!client) {
+  const rawClient = ctx.clients.get(job.arr_instance);
+  if (!rawClient) {
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
+  // Wrapped once so every arr call this job makes (resolveTargetMeta, listVideoTargets, ...)
+  // traces without each site opting in — same as acquire and ingest.
+  const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   assertMounted(ctx, job, 'subtitle');
 
@@ -608,6 +612,13 @@ function placeSubtitle(
   }
 
   atomicCopy(sourcePath, targetPath);
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'pipeline.place',
+    summary: `placed ${targetName}`,
+    sideEffect: true,
+    payload: () => ({ from: sourcePath, to: targetPath, lang: effectiveLang, drift }),
+  });
   placedFiles.upsert({
     arrInstance: job.arr_instance,
     targetKind: job.target_kind,

@@ -6,6 +6,7 @@ import { ArchiveCache } from '../src/db/archiveCache.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { SiteProfiles } from '../src/db/siteProfiles.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import { REFLECT_CALLSITE } from '../src/agent/siteReflection.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
@@ -279,6 +280,21 @@ describe('runSubtitleJob', () => {
     expect(rows[0]).toMatchObject({
       data: { matchedBy: 'pipeline', drift: 'in-sync', site: 'acg.rip', sourceFile: expect.stringContaining('Show - S01E05.ass') },
     });
+  });
+
+  it('traces the arr calls and one side-effecting entry per placement', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub(PACK));
+
+    const rows = new TraceEntries(fx.ctx.db).listByJob(job.id);
+    expect(rows.map((r) => r.kind)).toContain('arr.request');
+    const placed = rows.filter((r) => r.kind === 'pipeline.place');
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.side_effect).toBe(1);
   });
 
   it('drifted candidate -> resyncAlass called -> re-assessed in-sync -> placed with subtitle.resynced', async () => {

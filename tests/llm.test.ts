@@ -196,6 +196,29 @@ describe('AiSdkGenerator tracing', () => {
     expect(okPayload.usage).toEqual({ inputTokens: 10, outputTokens: 2 });
   });
 
+  it('keeps system+prompt in the llm.call payload when every attempt fails', async () => {
+    generateObjectMock.mockReset();
+    const db = freshDb();
+    const cfg = baseConfig();
+    cfg.llm.profiles.prod['release-pick'] = { provider: 'claude-code', model: 'primary-model' };
+    const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
+    generateObjectMock.mockRejectedValue(new Error('down'));
+
+    await expect(
+      gen.generate({
+        callsite: 'release-pick',
+        schema: z.object({ pick: z.string() }),
+        system: 'sys',
+        prompt: 'user',
+        trace: { jobId: 7 },
+      }),
+    ).rejects.toThrow();
+
+    const call = new TraceEntries(db).listByJob(7).find((r) => r.kind === 'llm.call');
+    expect(call?.status).toBe('error');
+    expect(JSON.parse(call?.payload ?? '')).toMatchObject({ system: 'sys', prompt: 'user', error: expect.stringContaining('down') });
+  });
+
   it('writes nothing without a trace option', async () => {
     generateObjectMock.mockReset();
     const db = freshDb();

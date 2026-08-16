@@ -159,6 +159,20 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(placed[0]!.side_effect).toBe(1);
   });
 
+  it('writes a trigger.pipeline entry on the subtitle job the handoff enqueues', async () => {
+    const fx = ingestFixture();
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    const followUp = fx.ctx.queue.list().find((j) => j.pipeline === 'subtitle');
+    expect(followUp).toBeDefined();
+    const rows = new TraceEntries(fx.ctx.db).listByJob(followUp!.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'trigger.pipeline', summary: 'subtitle follow-up from ingest' });
+    expect(JSON.parse(rows[0]!.payload ?? '')).toMatchObject({ fromJobId: job.id, targetId: fx.targetId });
+  });
+
   it('LLM fallback: a cryptic name deterministic cannot place goes to one sidecar-match call; a matched id places it, a null answer raises ingest.unmatched and leaves it unplaced', async () => {
     const fx = ingestFixture();
     const matchedPath = join(fx.torrentDir, 'Random Title - XYZ.ass');
