@@ -69,16 +69,34 @@ export class EventLog {
       }
     }
 
+    this.fanOut(parsed);
+    return parsed;
+  }
+
+  // Fan-out without persistence: trace append notifications are high-volume and
+  // carry ids only, so they ride the SSE stream but never touch the events table.
+  broadcast(e: AppendInput): void {
+    this.fanOut({
+      id: 0,
+      ts: Date.now(),
+      kind: e.kind,
+      level: e.level ?? 'info',
+      job_id: e.jobId ?? null,
+      message: e.message,
+      data: (e.data ?? {}) as Record<string, unknown>,
+    });
+  }
+
+  private fanOut(row: EventRow): void {
     for (const fn of this.subscribers) {
       try {
-        fn(parsed);
+        fn(row);
       } catch (err) {
         // A misbehaving subscriber (e.g. a dropped SSE connection) must not stop the
         // row from being persisted or starve subscribers registered after it.
         console.error('EventLog subscriber threw', err);
       }
     }
-    return parsed;
   }
 
   /**

@@ -156,3 +156,25 @@ describe('EventLog', () => {
     });
   });
 });
+
+describe('EventLog.broadcast', () => {
+  it('fans out to subscribers without persisting a row', () => {
+    const log = new EventLog(freshDb());
+    const seen: string[] = [];
+    log.subscribe((e) => seen.push(e.kind));
+    log.broadcast({ kind: 'trace.appended', jobId: 3, message: '', data: { seq: 5 } });
+    expect(seen).toEqual(['trace.appended']);
+    expect(log.list()).toHaveLength(0);
+  });
+
+  it('isolates subscriber failures like append does', () => {
+    const log = new EventLog(freshDb());
+    log.subscribe(() => {
+      throw new Error('boom');
+    });
+    const seen: number[] = [];
+    log.subscribe((e) => seen.push(e.job_id ?? -1));
+    expect(() => log.broadcast({ kind: 'trace.appended', jobId: 1, message: '' })).not.toThrow();
+    expect(seen).toEqual([1]);
+  });
+});
