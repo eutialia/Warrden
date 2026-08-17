@@ -10,6 +10,15 @@ const NOTIFICATION_NAME = 'Warrden';
  * gated on without an `as AppContext` cast. */
 type RegisterCtx = Pick<AppContext, 'db' | 'config' | 'clients' | 'events'>;
 
+/** The address an existing notification is currently POSTing to, or `undefined` when the arr
+ * didn't return the field at all. Absent is deliberately not "wrong": a real Sonarr/Radarr
+ * always includes its implementation's settings, so treating a missing `url` as stale would
+ * only ever churn a webhook we can't actually prove anything about. */
+function notificationUrl(notification: NotificationSummary): string | undefined {
+  const field = notification.fields?.find((f) => f.name === 'url');
+  return typeof field?.value === 'string' ? field.value : undefined;
+}
+
 /**
  * Self-registers the Warrden webhook notification on every configured arr instance
  * that doesn't already have one. Idempotent (checks by name before creating) and
@@ -31,6 +40,8 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
       continue;
     }
 
+    const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
+
     try {
       const existing = await client.listNotifications();
       const found = existing.find((n) => n.name === NOTIFICATION_NAME);
@@ -39,22 +50,27 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
       // recreate-failure warning if the replacement create doesn't land.
       let recreatedFromId: number | undefined;
       if (found) {
-        if (found.onDownload === true && found.onUpgrade === true) {
+        const registeredUrl = notificationUrl(found);
+        // A rename of this instance, or a `server.publicUrl` change, moves the path we
+        // actually serve — the arr keeps POSTing to the old one and every event it sends is
+        // dropped on the floor, silently and for as long as nobody notices.
+        const pointsElsewhere = registeredUrl !== undefined && registeredUrl !== url;
+        if (found.onDownload === true && found.onUpgrade === true && !pointsElsewhere) {
           // Already present in the arr and subscribed to everything we need, but the
           // local registry may have been reset (fresh db, restore) — re-record it so
           // GC (reconcile.ts's gc()) can still find it.
           managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
           continue;
         }
-        // Registered by Phase 1 without import events — recreate rather than PUT: a full
-        // notification update requires round-tripping every field, and delete+create with
-        // our own known-good body is simpler and idempotent under the name check above.
+        // Missing import events (a Phase 1 registration), or pointing at an address that
+        // isn't ours any more — recreate rather than PUT: a full notification update
+        // requires round-tripping every field, and delete+create with our own known-good
+        // body is simpler and idempotent under the name check above.
         await client.deleteNotification(found.id);
         managedObjects.delete(arr.name, 'notification', found.id);
         recreatedFromId = found.id;
       }
 
-      const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
       const body = {
         name: NOTIFICATION_NAME,
         implementation: 'Webhook',
@@ -124,19 +140,48 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
   }
 }
 
+// One pass at a time, and at most one pass waiting behind it. Two rapid saves would
+// otherwise interleave their list-then-create against the same arr and register the webhook
+// twice, since neither sees the other's create in its own `listNotifications`. The wait
+// collapses to the latest ctx on purpose: an older config is exactly what the newer one
+// supersedes, so running both in turn would only re-point the webhook backwards first.
+let draining = false;
+let queued: RegisterCtx | null = null;
+
 /** Fires `registerWebhooks` in the background rather than blocking its caller on it — a
  * slow or unreachable arr instance would otherwise delay the HTTP server coming up at
  * startup (and, on a config save, the response to the operator's own PUT), plus every
- * other arr's registration behind it. `registerWebhooks` already isolates per-instance
- * failures internally; this `catch` is the last-resort net for anything that still escapes
- * it, reported as a `warn` event (rather than `console.error`, so it's visible on the
- * dashboard like every other background failure). */
+ * other arr's registration behind it. Passes are serialized (see above); the caller gets
+ * no handle either way, so a queued pass is indistinguishable from an immediate one. */
 export function registerWebhooksInBackground(ctx: RegisterCtx): void {
-  registerWebhooks(ctx).catch((err: unknown) => {
-    ctx.events.append({
-      kind: 'webhook.register-crashed',
-      level: 'warn',
-      message: `Webhook registration threw unexpectedly: ${errorMessage(err)}`,
-    });
-  });
+  queued = ctx;
+  if (draining) return;
+  draining = true;
+  void drainQueue();
+}
+
+/** `registerWebhooks` already isolates per-instance failures internally; the `catch` here is
+ * the last-resort net for anything that still escapes it, reported as a `warn` event (rather
+ * than `console.error`, so it's visible on the dashboard like every other background
+ * failure) and never allowed to stall the queue behind it. */
+async function drainQueue(): Promise<void> {
+  try {
+    while (queued) {
+      const ctx = queued;
+      queued = null;
+      try {
+        await registerWebhooks(ctx);
+      } catch (err) {
+        ctx.events.append({
+          kind: 'webhook.register-crashed',
+          level: 'warn',
+          message: `Webhook registration threw unexpectedly: ${errorMessage(err)}`,
+        });
+      }
+    }
+  } finally {
+    // Same synchronous turn as the loop's own exit check, so a caller can never slip in
+    // between "nothing queued" and "not draining" and have its pass dropped.
+    draining = false;
+  }
 }

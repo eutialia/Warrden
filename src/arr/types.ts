@@ -68,6 +68,10 @@ export interface NotificationSummary {
   name: string;
   onDownload?: boolean;
   onUpgrade?: boolean;
+  /** The implementation's own settings, as name/value pairs. Only `url` is read (see
+   * `registerWebhooks`), and only to tell a webhook still pointing at us from one left
+   * behind by a rename or a `server.publicUrl` change. */
+  fields?: { name: string; value?: unknown }[];
 }
 
 export interface QueueRecord {

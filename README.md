@@ -54,11 +54,11 @@ uid/gid `1000`.
 On first start, Warrden writes a default `config.json` into the data volume and serves a
 dashboard at `http://<host>:9797`. Before adding any arr instance, set `server.publicUrl`
 on the Config page: that's the address Warrden registers as its own webhook, so your arrs
-must be able to reach it. The webhook (named "Warrden") is re-checked on every startup —
-and on every save that changes your arr instances or `publicUrl` — then recreated
-whenever it's missing or not subscribed to both On Download and On Upgrade. A healthy
-webhook is left alone, which also means changing `publicUrl` later does not re-point it;
-delete the "Warrden" webhook in the arr's own settings first if you need to move it.
+must be able to reach it. The webhook (named "Warrden") is re-checked on every startup,
+and on every save that changes your arr instances or `publicUrl`, then recreated whenever
+it's missing, not subscribed to both On Download and On Upgrade, or still pointing at an
+address that isn't yours any more. So renaming an instance or moving `publicUrl` re-points
+the webhook on the next save, with nothing to delete by hand.
 
 Then add your arr instances (name, kind, base URL, API key), set picking preferences,
 and choose an LLM provider. Config saves apply immediately: everything editable in

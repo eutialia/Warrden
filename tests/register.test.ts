@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { registerWebhooks } from '../src/arr/register.js';
+import { registerWebhooks, registerWebhooksInBackground } from '../src/arr/register.js';
 import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import type { ArrApi } from '../src/arr/types.js';
@@ -32,15 +32,54 @@ describe('registerWebhooks', () => {
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 1, name: 'Warrden' }]);
   });
 
-  it('skips creation but still records a pre-existing "Warrden" notification already subscribed to import events', async () => {
-    const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden', onDownload: true, onUpgrade: true }] });
-    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+  it.each([
+    { scenario: 'the arr did not report a url field at all', fields: undefined },
+    { scenario: 'its url still points at us', fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }] },
+  ])(
+    'skips creation but still records a pre-existing "Warrden" notification already subscribed to import events when $scenario',
+    async ({ fields }) => {
+      const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden', onDownload: true, onUpgrade: true, fields }] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+      await registerWebhooks(ctx);
+
+      expect(client.createNotification).not.toHaveBeenCalled();
+      expect(client.deleteNotification).not.toHaveBeenCalled();
+      expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 7, name: 'Warrden' }]);
+    },
+  );
+
+  it.each([
+    {
+      scenario: 'the instance was renamed since it registered',
+      config: configWithArrs('sonarr'),
+      registeredUrl: 'http://localhost:9797/webhooks/sonarr-old',
+      expectedUrl: 'http://localhost:9797/webhooks/sonarr',
+    },
+    {
+      scenario: 'server.publicUrl changed since it registered',
+      config: { ...configWithArrs('sonarr'), server: { port: 9797, publicUrl: 'http://warrden.local:9797' } },
+      registeredUrl: 'http://localhost:9797/webhooks/sonarr',
+      expectedUrl: 'http://warrden.local:9797/webhooks/sonarr',
+    },
+  ])('re-points a healthy "Warrden" notification whose url is stale because $scenario', async ({ config, registeredUrl, expectedUrl }) => {
+    const client = fakeArrClient({
+      notifications: [{ id: 7, name: 'Warrden', onDownload: true, onUpgrade: true, fields: [{ name: 'url', value: registeredUrl }] }],
+    });
+    const ctx = ctxWithClient('sonarr', client, { config });
+    new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
 
     await registerWebhooks(ctx);
 
-    expect(client.createNotification).not.toHaveBeenCalled();
-    expect(client.deleteNotification).not.toHaveBeenCalled();
-    expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 7, name: 'Warrden' }]);
+    expect(client.deleteNotification).toHaveBeenCalledWith(7);
+    // The arr is left POSTing to the address we actually serve, not the one it had.
+    expect(client.notifications).toEqual([
+      expect.objectContaining({ id: 1, name: 'Warrden', fields: [{ name: 'url', value: expectedUrl }, { name: 'method', value: 1 }] }),
+    ]);
+    expect(ctx.events.list()).toContainEqual(
+      expect.objectContaining({ kind: 'webhook.registered', data: expect.objectContaining({ recreated: true, url: expectedUrl }) }),
+    );
+    expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 1, name: 'Warrden' }]);
   });
 
   it.each([
@@ -154,5 +193,35 @@ describe('registerWebhooks', () => {
     expect(warnEvents).toHaveLength(1);
     expect(warnEvents[0]).toMatchObject({ kind: 'webhook.register-failed', data: { instance: 'sonarr' } });
     expect(managedObjectRows(ctx)).toEqual([]);
+  });
+});
+
+describe('registerWebhooksInBackground', () => {
+  it('serializes passes, so two rapid saves cannot interleave list-then-create into a double registration', async () => {
+    const client = fakeArrClient();
+    let listed = 0;
+    let release: (() => void) | undefined;
+    client.listNotifications = async () => {
+      listed++;
+      // The first pass parks here until the test releases it. If the two passes were allowed
+      // to run concurrently, the second would list an empty store and create a duplicate.
+      if (listed === 1) await new Promise<void>((resolve) => (release = resolve));
+      return [...client.notifications];
+    };
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    registerWebhooksInBackground(ctx);
+    await vi.waitFor(() => expect(listed).toBe(1));
+
+    registerWebhooksInBackground(ctx);
+    expect(listed).toBe(1); // parked behind the first pass rather than racing it
+
+    release!();
+    await vi.waitFor(() => expect(listed).toBe(2));
+
+    // The queued pass ran only after the first settled, found the webhook it had created,
+    // and left it alone.
+    expect(client.createNotification).toHaveBeenCalledTimes(1);
+    expect(client.notifications).toHaveLength(1);
   });
 });

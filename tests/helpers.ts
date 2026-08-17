@@ -432,12 +432,15 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       return [...client.notifications];
     },
     createNotification: vi.fn(async (body: object): Promise<NotificationSummary> => {
-      const b = body as { name: string; onDownload?: boolean; onUpgrade?: boolean };
+      const b = body as { name: string; onDownload?: boolean; onUpgrade?: boolean; fields?: NotificationSummary['fields'] };
+      // `fields` is carried through the same way a real arr does: the registered webhook URL
+      // lives in there, and `registerWebhooks` reads it back to spot a stale registration.
       const created: NotificationSummary = {
         id: nextNotificationId++,
         name: b.name,
         onDownload: b.onDownload,
         onUpgrade: b.onUpgrade,
+        fields: b.fields,
       };
       client.notifications.push(created);
       return created;
