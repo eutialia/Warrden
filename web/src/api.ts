@@ -155,10 +155,6 @@ export interface SiteKnowledge {
  * left before the agent itself can no longer update it. Keep in sync if that cap moves. */
 export const KNOWLEDGE_CHAR_CAP = 10_000;
 
-/** Substituted for every secret value (`llm.keys.*`, `arrs[].apiKey`) by `GET /api/config`.
- * Leaving it untouched on `PUT` preserves the stored secret; sending a new value rotates it. */
-export const SECRET_PLACEHOLDER = '•••';
-
 export type ArrKind = 'sonarr' | 'radarr';
 
 export interface ArrInstance {
@@ -168,13 +164,12 @@ export interface ArrInstance {
   apiKey: string;
 }
 
-export type Provider = 'openrouter' | 'openai' | 'anthropic' | 'claude-code';
+export type Provider = 'openrouter' | 'openai' | 'anthropic';
 
 /** The one model every LLM call-site runs on (`llm.model`). */
 export interface LlmModel {
   provider: Provider;
   model: string;
-  fallback?: { provider: Provider; model: string };
 }
 
 export interface SubtitleSite {
@@ -188,7 +183,7 @@ export interface Config {
   server: { port: number; publicUrl: string };
   arrs: ArrInstance[];
   pathMappings: { from: string; to: string }[];
-  picking: { tags: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
+  picking: { prefer: string[]; avoid: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
   ingest: { mountMarkers: string[]; downloadRoots: string[] };
   subtitle: { languages: string[]; preferredGroups: string[]; sites: SubtitleSite[] };
   browser: { stepBudget: number; siteCooldownSeconds: number };
@@ -204,7 +199,6 @@ export interface Config {
 
 export interface SaveConfigResponse {
   saved: boolean;
-  restartRequired: boolean;
 }
 
 export interface ApiIssue {
@@ -419,6 +413,22 @@ export interface StorageCheck {
 
 export function fetchStorageHealth(): Promise<{ checks: StorageCheck[] }> {
   return fetchJson('/api/health/storage');
+}
+
+/** One configured arr instance's reachability, as `client.ping()` reports it. Mirrors
+ * `ArrPingStatus` in `src/arr/types.ts`. */
+export interface ArrCheck {
+  name: string;
+  kind: ArrKind;
+  baseUrl: string;
+  status: 'ok' | 'unauthorized' | 'unreachable';
+}
+
+/** `GET /api/health/arrs` — one live probe per configured instance, run concurrently
+ * server-side. The route only exists once arr clients are mounted, so this 404s on an
+ * install that has never had a working instance. */
+export function fetchArrHealth(): Promise<{ checks: ArrCheck[] }> {
+  return fetchJson('/api/health/arrs');
 }
 
 /** Everything the home screen needs in one request. Mirrors `OverviewCounts` in
