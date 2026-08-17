@@ -73,19 +73,21 @@ export function resolveModel(cfg: Config): ModelRef {
  * reference itself via `cause`.
  */
 export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
-  const errors: unknown[] = [];
-  for (let i = 0; i < 2; i++) {
-    try {
-      return await attempt();
-    } catch (err) {
-      errors.push(err);
+  let firstError: unknown;
+  try {
+    return await attempt();
+  } catch (err) {
+    firstError = err;
+  }
+
+  try {
+    return await attempt();
+  } catch (err) {
+    if (err instanceof Error && err.cause === undefined) {
+      err.cause = new AggregateError([firstError], 'preceding attempts');
     }
+    throw err;
   }
-  const lastError = errors[errors.length - 1];
-  if (errors.length > 1 && lastError instanceof Error && lastError.cause === undefined) {
-    lastError.cause = new AggregateError(errors.slice(0, -1), 'preceding attempts');
-  }
-  throw lastError;
 }
 
 /** Builds the AI SDK language model for a resolved provider/model, keyed from `cfg.llm.keys`. */

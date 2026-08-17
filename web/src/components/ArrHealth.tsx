@@ -1,4 +1,5 @@
 import type { ArrCheck } from '@/api';
+import { unreachableCount } from '@/components/MountHealth';
 import { ToneBadge } from '@/components/ToneBadge';
 
 /**
@@ -10,6 +11,6 @@ import { ToneBadge } from '@/components/ToneBadge';
  */
 export function ArrHealth({ checks }: { checks: ArrCheck[] }) {
   if (checks.length === 0) return null;
-  const bad = checks.filter((c) => c.status !== 'ok').length;
+  const bad = unreachableCount(checks);
   return <ToneBadge tone={bad > 0 ? 'danger' : 'success'}>{bad > 0 ? `${bad} unreachable` : 'All connected'}</ToneBadge>;
 }

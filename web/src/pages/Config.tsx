@@ -4,7 +4,6 @@ import { Plus, Trash2 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { toast } from 'sonner';
 import {
-  ApiError,
   apiErrorMessage,
   fetchArrHealth,
   fetchConfig,
@@ -149,16 +148,13 @@ export default function ConfigPage() {
 
   const load = useCallback(() => {
     setLoadError(null);
+    // Three independent routes, each with its own error handling and its own piece of the
+    // page — chaining the probes behind the config read only made the page slower to settle.
+    loadStorage();
+    loadArrHealth();
     fetchConfig()
-      .then((c) => {
-        loadFormState(c);
-        loadStorage();
-        loadArrHealth();
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof ApiError ? err.message : 'Failed to load settings';
-        setLoadError(message);
-      });
+      .then(loadFormState)
+      .catch((err: unknown) => setLoadError(apiErrorMessage(err, 'Failed to load settings')));
   }, [loadFormState, loadStorage, loadArrHealth]);
 
   useEffect(load, [load]);
@@ -186,17 +182,16 @@ export default function ConfigPage() {
     setDraft((prev) => (prev ? { ...prev, ...next } : prev));
   }
 
-  /** Field-level edit of `llm.model`, which only ever renders once a model exists. */
+  /** Field-level edit of `llm.model`, upserting: the provider Select is the one control that
+   * renders before a model exists, and choosing from nothing seeds an empty model id because
+   * the card only asks for a model once it knows where the model lives. Switching provider on
+   * a configured model keeps the id that was typed, since it is the operator's to rewrite,
+   * not ours to clear. */
   function patchModel(next: Partial<LlmModel>): void {
-    setDraft((prev) => (prev?.llm.model ? { ...prev, llm: { ...prev.llm, model: { ...prev.llm.model, ...next } } } : prev));
-  }
-
-  /** Choosing a provider from nothing seeds an empty model id: the card only asks for a
-   * model once it knows where the model lives. Switching provider on a configured model
-   * keeps the id that was typed, since it is the operator's to rewrite, not ours to clear. */
-  function selectProvider(provider: Provider): void {
     setDraft((prev) =>
-      prev ? { ...prev, llm: { ...prev.llm, model: { provider, model: prev.llm.model?.model ?? '' } } } : prev,
+      prev
+        ? { ...prev, llm: { ...prev.llm, model: { provider: 'openrouter', model: '', ...prev.llm.model, ...next } } }
+        : prev,
     );
   }
 
@@ -281,17 +276,16 @@ export default function ConfigPage() {
 
       await saveConfig(payload);
       toast.success('Settings saved');
-      loadFormState(await fetchConfig());
+      // Same three independent reads as `load()`, and re-read for the same reason: the
+      // server is the authority on what was actually stored, and both probes now have new
+      // instances to answer for.
       loadStorage();
       loadArrHealth();
+      loadFormState(await fetchConfig());
     } catch (err) {
-      if (err instanceof ApiError) {
-        setSaveError(err.message);
-        toast.error(err.message);
-      } else {
-        setSaveError('Failed to save');
-        toast.error('Failed to save');
-      }
+      const message = apiErrorMessage(err, 'Failed to save');
+      setSaveError(message);
+      toast.error(message);
     } finally {
       setSaving(false);
     }
@@ -655,7 +649,7 @@ export default function ConfigPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label className="text-xs">Provider</Label>
-                <Select value={model?.provider ?? ''} onValueChange={(v) => v && selectProvider(v as Provider)}>
+                <Select value={model?.provider ?? ''} onValueChange={(v) => v && patchModel({ provider: v as Provider })}>
                   <SelectTrigger>
                     <SelectValue placeholder="Choose a provider" />
                   </SelectTrigger>

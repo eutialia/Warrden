@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
-import { MountHealth, unreachableMounts } from '@/components/MountHealth';
+import { MountHealth, unreachableCount } from '@/components/MountHealth';
 import { PageHeader } from '@/components/PageHeader';
 import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusBadge, PipelineBadge } from '@/components/StatusBadge';
@@ -37,7 +37,7 @@ interface Verdict {
  * waiting on a decision, failures are informational after the fact.
  */
 function verdictOf(data: OverviewData): Verdict {
-  const bad = unreachableMounts(data.storage);
+  const bad = unreachableCount(data.storage);
   if (bad > 0) {
     return {
       tone: 'danger',
