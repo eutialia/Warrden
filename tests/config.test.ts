@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig, saveConfig, ConfigError } from '../src/config/store.js';
-import { ConfigSchema, SECRET_PLACEHOLDER } from '../src/config/schema.js';
+import { ConfigSchema } from '../src/config/schema.js';
 import { tmpDir as tmp } from './helpers.js';
 
 describe('config store', () => {
@@ -104,17 +104,6 @@ describe('config store', () => {
         loadConfig(dir); // ensures the dir and config.json exist
         writeFileSync(join(dir, 'config.json'), '{ not valid json');
         return () => loadConfig(dir);
-      },
-    },
-    {
-      // Defense-in-depth: `src/server/app.ts`'s merge logic is the primary guard against
-      // ever saving the redaction sentinel as a real secret, but the schema itself refuses
-      // it too, for any other path into `saveConfig`.
-      scenario: 'an arr apiKey literally set to the redaction sentinel',
-      setup: (dir: string) => {
-        const cfg = loadConfig(dir);
-        cfg.arrs.push({ name: 'x', kind: 'sonarr', baseUrl: 'http://x:0', apiKey: SECRET_PLACEHOLDER });
-        return () => saveConfig(dir, cfg);
       },
     },
     {

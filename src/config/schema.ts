@@ -1,16 +1,5 @@
 import { z } from 'zod';
 
-/** Placeholder `GET /api/config` (`src/server/app.ts`) substitutes for every secret value
- * (`llm.keys.*`, `arrs[].apiKey`) instead of the real one. Exported so the API layer (which
- * restores it back to the stored secret on `PUT`, and rejects it outright when there's
- * nothing stored to restore from — a renamed or brand-new arr instance) and this schema
- * (which refuses to ever accept it as a literal saved value, as a second line of defense)
- * share the one definition on the server side. There is no shared package between the
- * server and `web/` in Phase 1, though — `web/src/api.ts` hand-copies this exact same
- * character as its own `SECRET_PLACEHOLDER` constant, and the two must be kept in sync by
- * hand if this value ever changes. */
-export const SECRET_PLACEHOLDER = '•••';
-
 const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic']);
 const LlmModelSchema = z.object({
   provider: ProviderSchema,
@@ -142,28 +131,6 @@ export const ConfigSchema = z
       .prefault({}),
   })
   .superRefine((cfg, ctx) => {
-    // Defense-in-depth against `SECRET_PLACEHOLDER` ever being saved as a real secret:
-    // `src/server/app.ts`'s merge logic is the primary guard (it 400s before this schema
-    // even runs), but this catches every other path into `saveConfig` too.
-    cfg.arrs.forEach((arr, i) => {
-      if (arr.apiKey === SECRET_PLACEHOLDER) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['arrs', i, 'apiKey'],
-          message: `"${SECRET_PLACEHOLDER}" is a placeholder, not a real secret — it must never be saved as one`,
-        });
-      }
-    });
-    for (const [key, value] of Object.entries(cfg.llm.keys)) {
-      if (value === SECRET_PLACEHOLDER) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['llm', 'keys', key],
-          message: `"${SECRET_PLACEHOLDER}" is a placeholder, not a real secret — it must never be saved as one`,
-        });
-      }
-    }
-
     // Arr instance names double as the key into `ctx.clients` (`Map<string, ArrApi>`) and
     // the job queue's `arr_instance` column — a duplicate silently clobbers one instance's
     // client/config with another's rather than failing loudly, so it's rejected here.

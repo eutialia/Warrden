@@ -20,7 +20,7 @@ import {
 import { registerWebhooksInBackground } from '../arr/register.js';
 import type { ArrApi, ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
-import { ConfigSchema, SECRET_PLACEHOLDER, type Config } from '../config/schema.js';
+import { ConfigSchema, type Config } from '../config/schema.js';
 import { siteKey } from '../config/siteLabel.js';
 import { saveConfig } from '../config/store.js';
 import { applyConfig, type AppContext } from '../context.js';
@@ -60,90 +60,6 @@ function parseLimit(raw: string | undefined, fallback: number): number {
 // `?level=` (empty) means "no filter", same as omitting the param entirely.
 function parseLevel(raw: string | undefined): string | undefined {
   return raw === undefined || raw === '' ? undefined : raw;
-}
-
-type LlmKeys = Config['llm']['keys'];
-
-/** Thrown by `restoreArrApiKey` when an incoming arr entry's `apiKey` is still the
- * `SECRET_PLACEHOLDER` sentinel but no stored arr shares its `name` — there's nothing to
- * restore it from, and the sentinel itself must never reach `saveConfig`. Caught in the
- * `PUT /api/config` handler and turned into a 400 (`ConfigSchema`'s own sentinel-rejecting
- * `superRefine` is only the second line of defense, for anything that reaches it by some
- * other path). */
-class ConfigMergeError extends Error {}
-
-/** Replaces every *set* `llm.keys` value, and every `arrs[].apiKey` (always set — it's
- * required by `ArrInstanceSchema`), with the `SECRET_PLACEHOLDER` sentinel for
- * `GET /api/config`. An unset llm key stays absent rather than becoming a fake sentinel,
- * so the dashboard can tell "never configured" apart from "configured, just not shown". */
-function redactConfig(config: Config): Config {
-  const redactedKeys = Object.fromEntries(
-    Object.entries(config.llm.keys).map(([key, value]) => [key, value === undefined ? value : SECRET_PLACEHOLDER]),
-  ) as LlmKeys;
-  const redactedArrs = config.arrs.map((arr) => ({ ...arr, apiKey: SECRET_PLACEHOLDER }));
-  return { ...config, arrs: redactedArrs, llm: { ...config.llm, keys: redactedKeys } };
-}
-
-/**
- * Undoes `redactConfig` on the way in, for both secrets it redacts:
- *
- * - `llm.keys`: any value still equal to the `•••` sentinel (the dashboard round-tripped
- *   it unchanged) is swapped back for the real stored secret. A key set to anything else
- *   (a new value, or dropped from the object) passes through as the caller wrote it. The
- *   whole `llm.keys` object being missing — not just individual keys inside it — is
- *   treated the same as every key being the sentinel: a PUT that doesn't mention keys at
- *   all (e.g. a client only patching an unrelated field) must not fall through to the
- *   schema's `{}` default and silently erase every stored secret.
- * - `arrs[].apiKey`: same sentinel swap, matched by `name` against the stored `arrs`
- *   list — an arr entry keeps its stored key if its `apiKey` is still the sentinel and
- *   its `name` still matches a stored entry; a brand-new or rotated key passes through
- *   unchanged. Unlike `llm.keys`, a missing `arrs` array or a missing `apiKey` on an
- *   entry is *not* given the same treatment: an absent `arrs` legitimately means "remove
- *   every instance" (the schema default), and `apiKey` is a required field, so dropping
- *   it is correctly a 400, not a silent no-op. A sentinel `apiKey` whose `name` *doesn't*
- *   match anything stored (a rename, or a new entry that somehow arrives pre-redacted)
- *   throws `ConfigMergeError` rather than saving the literal sentinel as a credential —
- *   there is nothing to restore it from.
- *
- * @throws ConfigMergeError if an arr entry's `apiKey` is the sentinel with no stored
- * match to restore it from.
- */
-function restoreSecrets(body: unknown, current: Config): unknown {
-  if (typeof body !== 'object' || body === null) return body;
-  const record = body as Record<string, unknown>;
-
-  const llmValue = record.llm;
-  const llmRecord: Record<string, unknown> =
-    typeof llmValue === 'object' && llmValue !== null ? { ...(llmValue as Record<string, unknown>) } : {};
-
-  const keysValue = llmRecord.keys;
-  const restoredKeys: Record<string, unknown> =
-    typeof keysValue === 'object' && keysValue !== null
-      ? Object.fromEntries(
-          Object.entries(keysValue as Record<string, unknown>).map(([key, value]) => [
-            key,
-            value === SECRET_PLACEHOLDER ? current.llm.keys[key as keyof LlmKeys] : value,
-          ]),
-        )
-      : current.llm.keys; // `llm.keys` omitted entirely -> every stored secret survives as-is
-
-  const arrsValue = record.arrs;
-  const restoredArrs = Array.isArray(arrsValue) ? arrsValue.map((entry) => restoreArrApiKey(entry, current)) : arrsValue;
-
-  return { ...record, arrs: restoredArrs, llm: { ...llmRecord, keys: restoredKeys } };
-}
-
-function restoreArrApiKey(entry: unknown, current: Config): unknown {
-  if (typeof entry !== 'object' || entry === null) return entry;
-  const arrRecord = entry as Record<string, unknown>;
-  if (arrRecord.apiKey !== SECRET_PLACEHOLDER) return entry;
-  const name = arrRecord.name;
-  const stored = typeof name === 'string' ? current.arrs.find((a) => a.name === name) : undefined;
-  if (!stored) {
-    const label = typeof name === 'string' && name.length > 0 ? name : '(unnamed)';
-    throw new ConfigMergeError(`apiKey required for new or renamed instance '${label}'`);
-  }
-  return { ...arrRecord, apiKey: stored.apiKey };
 }
 
 // 2000 is a generous ceiling for a freeform operator note, not a real limit anyone should
@@ -908,23 +824,19 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
     app.get('/api/health/storage', (c) => c.json({ checks: probeStorage() }));
 
+    // Secrets are served as stored: this is a self-hosted dashboard whose operator owns
+    // the config file anyway, and hiding a key on GET only works if the server merges it
+    // back in on PUT, which made a rename indistinguishable from a lost credential.
     app.get('/api/config', (c) => {
-      return c.json(redactConfig(requireConfig(ctx)));
+      return c.json(requireConfig(ctx));
     });
 
+    // The body is the whole config, not a patch: what it says is what gets saved, so a
+    // key the client leaves out is a key the operator deleted.
     app.put('/api/config', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
       const previous = requireConfig(ctx);
-      let merged: unknown;
-      try {
-        merged = restoreSecrets(body, previous);
-      } catch (err) {
-        if (err instanceof ConfigMergeError) {
-          return c.json({ error: err.message }, 400);
-        }
-        throw err;
-      }
-      const result = ConfigSchema.safeParse(merged);
+      const result = ConfigSchema.safeParse(body);
       if (!result.success) {
         return c.json({ error: 'invalid config', issues: result.error.issues }, 400);
       }

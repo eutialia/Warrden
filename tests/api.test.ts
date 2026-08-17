@@ -92,14 +92,14 @@ describe('dashboard api', () => {
       registerSpy = stubRegistration();
     });
 
-    it('redacts llm keys and arr apiKeys on GET and preserves them through a PUT round-trip', async () => {
+    it('serves llm keys and arr apiKeys verbatim on GET, and a round-tripped PUT saves them back unchanged', async () => {
       const ctx = makeCtx({ config: configWithArrs('sonarr') });
       ctx.config.llm.keys.openrouter = 'sk-secret';
       const app = createApp(ctx);
 
       const got: any = await (await app.request('/api/config')).json();
-      expect(got.llm.keys.openrouter).toBe('•••');
-      expect(got.arrs[0].apiKey).toBe('•••');
+      expect(got.llm.keys.openrouter).toBe('sk-secret');
+      expect(got.arrs[0].apiKey).toBe('test-api-key');
 
       const res = await app.request('/api/config', {
         method: 'PUT',
@@ -107,8 +107,8 @@ describe('dashboard api', () => {
         headers: { 'content-type': 'application/json' },
       });
       expect(res.status).toBe(200);
-      expect(ctx.config.llm.keys.openrouter).toBe('sk-secret'); // sentinel preserved the secret
-      expect(ctx.config.arrs[0].apiKey).toBe('test-api-key'); // sentinel preserved the arr's key too
+      expect(ctx.config.llm.keys.openrouter).toBe('sk-secret');
+      expect(ctx.config.arrs[0].apiKey).toBe('test-api-key');
     });
 
     it('a PUT actually persists to disk — a fresh loadConfig() off the same dataDir sees it, not just ctx.config in memory', async () => {
@@ -126,7 +126,7 @@ describe('dashboard api', () => {
 
       const onDisk = loadConfig(ctx.dataDir);
       expect(onDisk.reconcileIntervalMinutes).toBe(42);
-      expect(onDisk.arrs[0]?.apiKey).toBe('test-api-key'); // the sentinel-restored secret was persisted too, not just held in memory
+      expect(onDisk.arrs[0]?.apiKey).toBe('test-api-key'); // the secret was persisted too, not just held in memory
     });
 
     it('rejects invalid config with issues', async () => {
@@ -235,7 +235,9 @@ describe('dashboard api', () => {
       expect(await webhookRes.json()).toEqual({ handled: false, reason: 'unknown instance' });
     });
 
-    describe('secret redact/restore round trip', () => {
+    // A PUT body is the whole truth: whatever it says about secrets IS the new config, with
+    // no server-side merge against what was stored.
+    describe('PUT body is the whole config', () => {
       function seedCtx(): AppContext {
         const ctx = makeCtx({
           config: {
@@ -254,18 +256,28 @@ describe('dashboard api', () => {
 
       it.each([
         {
-          label: 'omitting llm.keys entirely on PUT keeps every stored secret',
+          label: 'omitting llm.keys entirely on PUT deletes every stored secret',
           mutate: (body: any) => {
             delete body.llm.keys;
           },
           expectedStatus: 200,
           verify: (ctx: AppContext) => {
-            expect(ctx.config.llm.keys.openrouter).toBe('sk-or-secret');
+            expect(ctx.config.llm.keys).toEqual({});
+          },
+        },
+        {
+          label: 'omitting one stored key deletes just that one',
+          mutate: (body: any) => {
+            delete body.llm.keys.openrouter;
+          },
+          expectedStatus: 200,
+          verify: (ctx: AppContext) => {
+            expect(ctx.config.llm.keys.openrouter).toBeUndefined();
             expect(ctx.config.llm.keys.anthropic).toBe('sk-an-secret');
           },
         },
         {
-          label: 'rotating one key while the other stays the sentinel only changes the rotated one',
+          label: 'rotating one key leaves the others alone',
           mutate: (body: any) => {
             body.llm.keys.openrouter = 'sk-or-rotated';
           },
@@ -286,17 +298,6 @@ describe('dashboard api', () => {
           },
         },
         {
-          label: 'each arr apiKey sentinel restores its own stored key, matched by name',
-          mutate: () => {
-            /* no-op: PUT the GET response back verbatim */
-          },
-          expectedStatus: 200,
-          verify: (ctx: AppContext) => {
-            expect(ctx.config.arrs.find((a) => a.name === 'sonarr')?.apiKey).toBe('sonarr-key');
-            expect(ctx.config.arrs.find((a) => a.name === 'radarr')?.apiKey).toBe('radarr-key');
-          },
-        },
-        {
           label: 'an empty-string llm key is rejected with 400, not saved as a blank credential',
           mutate: (body: any) => {
             body.llm.keys.openrouter = '';
@@ -307,16 +308,14 @@ describe('dashboard api', () => {
           },
         },
         {
-          label: 'renaming an arr instance while its apiKey is still the sentinel is rejected with 400',
+          label: 'renaming an arr instance saves cleanly, carrying its key over under the new name',
           mutate: (body: any) => {
-            body.arrs[0].name = 'sonarr-renamed'; // dashboard round-tripped the sentinel, unaware of the rename
+            body.arrs[0].name = 'sonarr-renamed';
           },
-          expectedStatus: 400,
+          expectedStatus: 200,
           verify: (ctx: AppContext) => {
-            // Nothing was saved: the original instance survives under its original name
-            // and key, and no "sonarr-renamed" entry (holding the literal sentinel) exists.
-            expect(ctx.config.arrs.find((a) => a.name === 'sonarr')?.apiKey).toBe('sonarr-key');
-            expect(ctx.config.arrs.some((a) => a.name === 'sonarr-renamed')).toBe(false);
+            expect(ctx.config.arrs.find((a) => a.name === 'sonarr-renamed')?.apiKey).toBe('sonarr-key');
+            expect(ctx.config.arrs.some((a) => a.name === 'sonarr')).toBe(false);
           },
         },
         {
@@ -332,9 +331,6 @@ describe('dashboard api', () => {
         {
           label: 'duplicate arr instance names are rejected with 400',
           mutate: (body: any) => {
-            // Both entries share the stored "sonarr" name, so restoreArrApiKey resolves
-            // each sentinel apiKey fine on its own — the rejection has to come from the
-            // schema's uniqueness check, not the secret-restore step.
             body.arrs.push({ ...body.arrs[0] });
           },
           expectedStatus: 400,
