@@ -145,15 +145,15 @@ export interface ManualImportFile {
   releaseGroup?: string;
 }
 
+/** What a health probe can conclude about an instance: it answered, it refused our key,
+ * or we never got a usable answer at all (wrong port, down, DNS, timeout). */
+export type ArrPingStatus = 'ok' | 'unauthorized' | 'unreachable';
+
 /**
  * The public surface of `ArrClient`, extracted so consumers (and their tests) depend
  * on this interface rather than the concrete class — fakes can implement it directly
  * with no cast, and `AppContext.clients` can hold either a real client or a fake.
  */
-/** What a health probe can conclude about an instance: it answered, it refused our key,
- * or we never got a usable answer at all (wrong port, down, DNS, timeout). */
-export type ArrPingStatus = 'ok' | 'unauthorized' | 'unreachable';
-
 export interface ArrApi {
   /** Cheap reachability/credential check for the settings UI. Never throws — every
    * failure mode is one of the three statuses. */

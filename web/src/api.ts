@@ -425,8 +425,9 @@ export interface ArrCheck {
 }
 
 /** `GET /api/health/arrs` — one live probe per configured instance, run concurrently
- * server-side. The route only exists once arr clients are mounted, so this 404s on an
- * install that has never had a working instance. */
+ * server-side. The route is always mounted: with no instances configured it answers
+ * `{ checks: [] }` rather than 404ing, so a rejection here means the request itself
+ * failed (network, or the server erroring), never "nothing to probe". */
 export function fetchArrHealth(): Promise<{ checks: ArrCheck[] }> {
   return fetchJson('/api/health/arrs');
 }

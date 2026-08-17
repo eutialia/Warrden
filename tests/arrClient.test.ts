@@ -5,7 +5,10 @@ import { arrInstance } from './helpers.js';
 /** Stubs the global `fetch` with a canned response/rejection and hands back the spy so a
  * test can assert on the exact URL and headers the client sent. */
 function stubFetch(impl: () => Promise<Response>) {
-  const spy = vi.fn(impl);
+  // Typed as `fetch` itself, not as the no-arg `impl`: that's what makes `mock.calls[0]`
+  // come back as fetch's real argument tuple, so the URL/headers assertions below need
+  // no cast to reach it.
+  const spy = vi.fn<typeof fetch>(impl);
   vi.stubGlobal('fetch', spy);
   return spy;
 }
@@ -21,9 +24,9 @@ describe('ArrClient.ping', () => {
     const status = await new ArrClient(arrInstance({ baseUrl: 'http://sonarr:8989/', apiKey: 'k-1' })).ping();
 
     expect(status).toBe('ok');
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchSpy.mock.calls[0]!;
     expect(url).toBe('http://sonarr:8989/api/v3/system/status');
-    expect((init.headers as Record<string, string>)['X-Api-Key']).toBe('k-1');
+    expect((init?.headers as Record<string, string>)['X-Api-Key']).toBe('k-1');
   });
 
   it.each([401, 403])('reports unauthorized on %i', async (status) => {

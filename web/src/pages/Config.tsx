@@ -120,10 +120,11 @@ export default function ConfigPage() {
   const [saving, setSaving] = useState(false);
   const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
   const [storageError, setStorageError] = useState<string | null>(null);
-  // `null` is "nobody has answered": before the first probe, and after one that failed.
-  // The route is only mounted once an arr client exists, so an install with no working
-  // instance 404s here. That is an absence of data, not a verdict, so the rows say nothing
-  // rather than accusing every instance of being down.
+  // `null` is "nobody has answered": before the first probe, and after one whose REQUEST
+  // failed (network, or the server erroring). An instance-less install is not that case —
+  // the route always exists and answers `{ checks: [] }`. Either way `null` is an absence
+  // of data, not a verdict, so the rows stay quiet rather than accusing every instance of
+  // being down.
   const [arrChecks, setArrChecks] = useState<ArrCheck[] | null>(null);
   const { theme, setTheme } = useTheme();
 

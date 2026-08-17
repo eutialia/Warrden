@@ -67,7 +67,7 @@ describe('Overview.counts', () => {
         placedPath: path,
         videoPath: '/lib/v.mkv',
         sourcePath: '/dl/s',
-        jobId: null,
+        jobId: undefined,
       });
     place('subtitle', '/lib/a.ass');
     place('subtitle', '/lib/b.ass');

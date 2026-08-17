@@ -43,7 +43,11 @@ describe('isMountPoint / probeStorage', () => {
       expect(byId.movies?.status).toBe('not-mounted');
       expect(byId.downloads?.status).toBe('not-mounted');
       expect(byId.series?.detail).toMatch(/bind mount/i);
-      expect(checks.every((c) => c.id !== 'download-root')).toBe(true);
+      // `download-root` is a retired id no probe may resurrect. Widened to `string[]`
+      // because it no longer exists in `StandardMountId` — comparing it directly is a
+      // type error, which is exactly the point of the assertion.
+      const ids: string[] = checks.map((c) => c.id);
+      expect(ids).not.toContain('download-root');
     } finally {
       clearEnv();
     }
