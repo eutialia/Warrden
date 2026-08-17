@@ -371,7 +371,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       }
       const { arrInstance, targetKind, targetId, title, hint } = parsed.data;
       // Checked against `ctx.clients` (the runner's actual resolution source), not
-      // `config.arrs` — see `handleWebhook`'s matching comment. This is a client mistake (a
+      // `config.arrs`, see `handleWebhook`'s matching comment. This is a client mistake (a
       // typo'd or since-removed instance name), so it's a 400 here rather than the webhook
       // route's always-200 "unknown instance" (which exists only because arrs retry non-2xx
       // deliveries; nothing retries a dashboard button click).
@@ -836,7 +836,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
           requireConfig(ctx).arrs.map(async (arr) => {
             const client = clients.get(arr.name);
             // `applyConfig` builds `clients` straight from `config.arrs`, so a configured
-            // instance without one is a desync bug — reporting it as 'unreachable' would
+            // instance without one is a desync bug: reporting it as 'unreachable' would
             // dress that up as an arr problem the operator can't fix.
             if (!client) throw new Error(`no arr client for configured instance "${arr.name}"`);
             return { name: arr.name, kind: arr.kind, baseUrl: arr.baseUrl, status: await client.ping() };
@@ -867,7 +867,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const publicUrlChanged = previous.server.publicUrl !== result.data.server.publicUrl;
       // Every consumer reads `ctx.config` (and, for arr calls, `ctx.clients`) live, so
       // pointing the context at the new config is all it takes for the save to be fully in
-      // effect — nothing here is deferred to a restart. Only `server.port` still needs one,
+      // effect. Nothing here is deferred to a restart; only `server.port` still needs one,
       // since the listener is bound before any of this runs.
       applyConfig(ctx, result.data);
       // Destructured AFTER applyConfig: it replaces `ctx.clients` with a new Map, and

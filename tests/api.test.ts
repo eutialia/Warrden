@@ -134,7 +134,7 @@ describe('dashboard api', () => {
       { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
     ])('rejects an unusable llm.model on PUT rather than silently saving it as unset: $scenario', async ({ model }) => {
       // Boot degrades this to unset (a server that won't start can't serve the UI that would
-      // fix it); a PUT does not — the operator is watching, and a green toast over a dropped
+      // fix it); a PUT does not, because the operator is watching and a green toast over a dropped
       // model selection is worse than a 400 naming the field.
       const ctx = makeCtx();
       const app = createApp(ctx);

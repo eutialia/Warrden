@@ -111,7 +111,7 @@ export default function ConfigPage() {
   const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
   const [storageError, setStorageError] = useState<string | null>(null);
   // `null` is "nobody has answered": before the first probe, and after one whose REQUEST
-  // failed (network, or the server erroring). An instance-less install is not that case —
+  // failed (network, or the server erroring). An instance-less install is not that case:
   // the route always exists and answers `{ checks: [] }`. Either way `null` is an absence
   // of data, not a verdict, so the rows stay quiet rather than accusing every instance of
   // being down.
@@ -149,7 +149,7 @@ export default function ConfigPage() {
   const load = useCallback(() => {
     setLoadError(null);
     // Three independent routes, each with its own error handling and its own piece of the
-    // page — chaining the probes behind the config read only made the page slower to settle.
+    // page. Chaining the probes behind the config read only made the page slower to settle.
     loadStorage();
     loadArrHealth();
     fetchConfig()
@@ -230,7 +230,7 @@ export default function ConfigPage() {
     }
 
     // A provider with no model id is an unfinished choice, not a decision to run without a
-    // model — the same rule as the half-filled instance above. Dropping it silently sent a
+    // model, the same rule as the half-filled instance above. Dropping it silently sent a
     // green toast while the card snapped back to empty. "Clear the model" is the way out.
     if (draft.llm.model && draft.llm.model.model.trim() === '') {
       const message = 'AI model needs a model id. Fill it in or clear the model.';
@@ -253,7 +253,7 @@ export default function ConfigPage() {
     try {
       // The PUT is the whole document, but this page only owns part of it. Rebasing on a
       // fresh read means a save here can't revert what another page (Subtitle sources) wrote
-      // since this one mounted — mounts and path mappings, which no page edits, ride along
+      // since this one mounted. Mounts and path mappings, which no page edits, ride along
       // the same way.
       const current = await fetchConfig();
       const payload: Config = {
@@ -474,7 +474,7 @@ export default function ConfigPage() {
           <CardHeader>
             <CardTitle className="text-2xl">History</CardTitle>
             <CardDescription>
-              How long Warrden keeps its event log. Items that need your review are never trimmed — only the
+              How long Warrden keeps its event log. Items that need your review are never trimmed, only the
               record of what already happened.
             </CardDescription>
           </CardHeader>
@@ -504,12 +504,12 @@ export default function ConfigPage() {
           </CardContent>
         </Card>
 
-        {/* Storage — four fixed mounts, never editable */}
+        {/* Storage: four fixed mounts, never editable */}
         <Card id="storage" className="scroll-mt-20">
           <CardHeader>
             <CardTitle className="text-2xl">Storage mounts</CardTitle>
             <CardDescription>
-              Warrden expects exactly four bind mounts. Set them when you create the container — this page only checks
+              Warrden expects exactly four bind mounts. Set them when you create the container. This page only checks
               that they are reachable.
             </CardDescription>
             <CardAction>
@@ -570,7 +570,7 @@ export default function ConfigPage() {
               <TagInput
                 values={draft.picking.prefer}
                 onChange={(prefer) => patch({ picking: { ...draft.picking, prefer } })}
-                placeholder="e.g. 1080p remux — Enter to add"
+                placeholder="e.g. 1080p remux (Enter to add)"
               />
             </div>
             <div className="space-y-2">
@@ -578,7 +578,7 @@ export default function ConfigPage() {
               <TagInput
                 values={draft.picking.avoid}
                 onChange={(avoid) => patch({ picking: { ...draft.picking, avoid } })}
-                placeholder="e.g. HEVC re-encodes — Enter to add"
+                placeholder="e.g. HEVC re-encodes (Enter to add)"
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -685,7 +685,7 @@ export default function ConfigPage() {
                       }
                     />
                     <p className="text-xs text-muted-foreground">
-                      Stored per provider — switching provider keeps the other keys. Clear the field to delete the
+                      Stored per provider: switching provider keeps the other keys. Clear the field to delete the
                       stored key.
                     </p>
                   </div>

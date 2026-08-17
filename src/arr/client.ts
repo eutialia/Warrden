@@ -73,8 +73,8 @@ export class ArrClient implements ArrApi {
       await this.request('GET', '/system/status', { timeoutMs: PING_TIMEOUT_MS });
       return 'ok';
     } catch (err) {
-      // Anything that isn't an HTTP answer — DNS, refused connection, TLS, the timeout
-      // abort — never reached the instance, which is indistinguishable from it being down.
+      // Anything that isn't an HTTP answer (DNS, refused connection, TLS, the timeout
+      // abort) never reached the instance, which is indistinguishable from it being down.
       if (!(err instanceof ArrApiError)) return 'unreachable';
       return err.status === 401 || err.status === 403 ? 'unauthorized' : 'unreachable';
     }

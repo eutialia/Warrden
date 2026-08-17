@@ -21,14 +21,14 @@ interface PolicyPrompt {
  * user's freeform Prefer/Avoid preferences verbatim, preferring higher seeders on ties,
  * and returning JSON per the caller's schema), the user prompt lists those preferences
  * as bullets under their own headers and names the target title/season. Pure string
- * building — the numbered candidate list itself is appended by the pick step, not here.
+ * building: the numbered candidate list itself is appended by the pick step, not here.
  */
 export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): PolicyPrompt {
   const system = [
     'You are selecting a single release to download for a media library.',
     "Pick exactly ONE release from the numbered candidate list the user provides, honoring the user's freeform preferences verbatim: favor releases matching the Prefer list and steer away from releases matching the Avoid list.",
     'If no candidate is viable given those preferences, declare none viable instead of forcing a pick.',
-    'Avoid entries are strong negative preferences, not absolute bans — pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
+    'Avoid entries are strong negative preferences, not absolute bans: pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
     'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
     "Answer with the candidate's number (the # prefix on its line in the list, e.g. 2 for \"#2 [...]\") — not its title or any other identifier.",
     'When you pick, also extract the release group — the fansub/release group name in the picked title, usually bracketed at the start or end — into releaseGroup; use null only if no group is identifiable.',
@@ -40,7 +40,7 @@ export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): Poli
     : input.title;
 
   // Internal newlines are normalized to single spaces so one entry always renders as
-  // exactly one bullet — an entry containing a literal newline would otherwise fracture
+  // exactly one bullet: an entry containing a literal newline would otherwise fracture
   // into multiple bullet-list lines, and the extra ones wouldn't start with "- ".
   const bullets = (header: string, entries: string[]) =>
     `${header}:\n${entries.map((e) => `- ${e.replace(/\s*\n\s*/g, ' ')}`).join('\n')}`;

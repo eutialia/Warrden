@@ -159,7 +159,7 @@ export type ArrPingStatus = 'ok' | 'unauthorized' | 'unreachable';
  * with no cast, and `AppContext.clients` can hold either a real client or a fake.
  */
 export interface ArrApi {
-  /** Cheap reachability/credential check for the settings UI. Never throws — every
+  /** Cheap reachability/credential check for the settings UI. Never throws: every
    * failure mode is one of the three statuses. */
   ping(): Promise<ArrPingStatus>;
   listSeries(): Promise<SeriesResource[]>;

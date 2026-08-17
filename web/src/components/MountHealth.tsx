@@ -1,7 +1,7 @@
 import type { StorageCheck } from '@/api';
 import { ToneBadge } from '@/components/ToneBadge';
 
-/** How many checks are reporting anything other than `ok` — the number every health badge
+/** How many checks are reporting anything other than `ok`: the number every health badge
  * leads with. Typed over the status field alone, since the mount and arr probes agree on
  * that one sentinel and on nothing else. */
 export function unreachableCount(checks: { status: string }[]): number {

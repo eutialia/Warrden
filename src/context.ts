@@ -33,7 +33,7 @@ export interface AppContext {
 
 /**
  * Points `ctx` at `next`: the config itself, plus a freshly built `ArrClient` per
- * configured instance. The single place `ctx.clients` is (re)built — startup calls it once
+ * configured instance. The single place `ctx.clients` is (re)built: startup calls it once
  * and `PUT /api/config` calls it on every save, so an added, renamed, re-keyed or removed
  * arr instance is live the moment it's saved instead of waiting for a restart. Everything
  * else reads `ctx.config` live already, so swapping the reference here is all they need.

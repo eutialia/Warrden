@@ -57,7 +57,7 @@ export function loadConfig(dataDir: string): Config {
       },
     ]);
   }
-  // Boot is the one place an unusable `llm.model` degrades instead of throwing — see
+  // Boot is the one place an unusable `llm.model` degrades instead of throwing, see
   // `BootConfigSchema`. Every other entry point (saveConfig, PUT /api/config) is strict.
   return parseConfig(raw, BootConfigSchema);
 }

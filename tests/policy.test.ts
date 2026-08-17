@@ -51,7 +51,7 @@ describe('synthesizePolicyPrompt', () => {
   it('frames Avoid as a strong negative preference rather than an absolute ban', () => {
     const { system } = synthesizePolicyPrompt({ prefer: [], avoid: [], title: 'X', kind: 'movie' });
     expect(system).toContain(
-      'Avoid entries are strong negative preferences, not absolute bans — pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
+      'Avoid entries are strong negative preferences, not absolute bans: pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
     );
   });
 
@@ -90,7 +90,7 @@ describe('synthesizePolicyPrompt', () => {
         'You are selecting a single release to download for a media library.',
         "Pick exactly ONE release from the numbered candidate list the user provides, honoring the user's freeform preferences verbatim: favor releases matching the Prefer list and steer away from releases matching the Avoid list.",
         'If no candidate is viable given those preferences, declare none viable instead of forcing a pick.',
-        'Avoid entries are strong negative preferences, not absolute bans — pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
+        'Avoid entries are strong negative preferences, not absolute bans: pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
         'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
         "Answer with the candidate's number (the # prefix on its line in the list, e.g. 2 for \"#2 [...]\") — not its title or any other identifier.",
         'When you pick, also extract the release group — the fansub/release group name in the picked title, usually bracketed at the start or end — into releaseGroup; use null only if no group is identifiable.',

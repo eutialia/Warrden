@@ -36,7 +36,7 @@ function buildContext(dataDir: string): AppContext {
     dataDir,
     queue: new JobQueue(db),
     events,
-    // Filled in by `applyConfig` below — the one place clients are built, shared with the
+    // Filled in by `applyConfig` below, the one place clients are built, shared with the
     // config route so startup and a live save can't drift apart.
     clients: new Map<string, ArrApi>(),
     llm: new AiSdkGenerator(() => ctx.config, trace),

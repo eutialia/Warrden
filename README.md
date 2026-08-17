@@ -172,7 +172,7 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 
 API keys are stored and shown in plain text: the dashboard hands you back exactly what
 is on disk, and a save writes back exactly what's in the fields. So clearing an
-`llm.keys` field *is* the deletion — nothing is merged back from the stored config.
+`llm.keys` field *is* the deletion: nothing is merged back from the stored config.
 `arrs[].apiKey` is required, so blanking it is rejected; remove the instance to drop it.
 
 ### Path mappings example

@@ -5,7 +5,7 @@ import { errorMessage } from '../util/errors.js';
 
 const NOTIFICATION_NAME = 'Warrden';
 
-/** Only the parts of AppContext registration actually reads — same idiom as
+/** Only the parts of AppContext registration actually reads, the same idiom as
  * `HandleWebhookCtx` in `webhooks.ts`, so the config route can hand it the fields it has
  * gated on without an `as AppContext` cast. */
 type RegisterCtx = Pick<AppContext, 'db' | 'config' | 'clients' | 'events'>;
@@ -52,7 +52,7 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
       if (found) {
         const registeredUrl = notificationUrl(found);
         // A rename of this instance, or a `server.publicUrl` change, moves the path we
-        // actually serve — the arr keeps POSTing to the old one and every event it sends is
+        // actually serve: the arr keeps POSTing to the old one and every event it sends is
         // dropped on the floor, silently and for as long as nobody notices.
         const pointsElsewhere = registeredUrl !== undefined && registeredUrl !== url;
         if (found.onDownload === true && found.onUpgrade === true && !pointsElsewhere) {
@@ -63,7 +63,7 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
           continue;
         }
         // Missing import events (a Phase 1 registration), or pointing at an address that
-        // isn't ours any more — recreate rather than PUT: a full notification update
+        // isn't ours any more: recreate rather than PUT, since a full notification update
         // requires round-tripping every field, and delete+create with our own known-good
         // body is simpler and idempotent under the name check above.
         await client.deleteNotification(found.id);
@@ -148,7 +148,7 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
 let draining = false;
 let queued: RegisterCtx | null = null;
 
-/** Fires `registerWebhooks` in the background rather than blocking its caller on it — a
+/** Fires `registerWebhooks` in the background rather than blocking its caller on it: a
  * slow or unreachable arr instance would otherwise delay the HTTP server coming up at
  * startup (and, on a config save, the response to the operator's own PUT), plus every
  * other arr's registration behind it. Passes are serialized (see above); the caller gets

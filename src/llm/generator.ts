@@ -61,15 +61,15 @@ export function resolveModel(cfg: Config): ModelRef {
 
 /**
  * Runs `attempt`, retrying it once on failure. Throws the last error once both attempts
- * are exhausted. AI-SDK-free so the retry is unit-testable on its own — not pure, though:
+ * are exhausted. AI-SDK-free so the retry is unit-testable on its own. Not pure, though:
  * on total failure it mutates the thrown error's `cause` (see below).
  *
  * The first attempt's error is collected and, when the last one is an `Error` without a
- * `cause` of its own, attached as an `AggregateError` on its `cause` — so a second failure
+ * `cause` of its own, attached as an `AggregateError` on its `cause`, so a second failure
  * with a less informative message doesn't silently mask what the first one actually failed
  * with. The thrown value is still exactly the last error (same reference, same type); only
  * its `cause` gains this extra context. The last error itself is excluded from that
- * `AggregateError` — it's already the thrown value, so including it too would make it
+ * `AggregateError`: it's already the thrown value, so including it too would make it
  * reference itself via `cause`.
  */
 export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {

@@ -424,7 +424,7 @@ export interface ArrCheck {
   status: 'ok' | 'unauthorized' | 'unreachable';
 }
 
-/** `GET /api/health/arrs` — one live probe per configured instance, run concurrently
+/** `GET /api/health/arrs`: one live probe per configured instance, run concurrently
  * server-side. The route is always mounted: with no instances configured it answers
  * `{ checks: [] }` rather than 404ing, so a rejection here means the request itself
  * failed (network, or the server erroring), never "nothing to probe". */

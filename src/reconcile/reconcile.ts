@@ -42,7 +42,7 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   for (const [name, client] of ctx.clients) {
     // This loop iterates the Map it started with, but a save mid-pass replaces `ctx.clients`
     // and `ctx.config` together: an instance renamed or removed since then has no `arrs[]`
-    // entry left to say what flavor it is. Skip it rather than guess — the next pass runs off
+    // entry left to say what flavor it is. Skip it rather than guess; the next pass runs off
     // the rebuilt Map, where it either exists under its new name or is gone for good.
     const kind = instanceKind(ctx.config, name);
     if (kind === undefined) continue;

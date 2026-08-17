@@ -146,7 +146,7 @@ export default function Sites() {
    * rebased on a fresh read rather than on this page's copy, which can be up to a
    * heartbeat old: `PUT /api/config` replaces the whole document and the body is the
    * whole truth (API keys included, in plain text), so sending our stale copy would
-   * quietly undo anything saved from Settings in the meantime — up to reverting a key
+   * quietly undo anything saved from Settings in the meantime, up to reverting a key
    * rotated a minute ago. Mounts and path mappings ride along in `current` for the same
    * reason: they are fixed outside the UI and no page may rewrite them. */
   const persist = useCallback(
