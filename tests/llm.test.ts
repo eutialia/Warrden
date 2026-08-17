@@ -99,7 +99,7 @@ describe('AiSdkGenerator', () => {
 
   it('propagates LlmError from an unconfigured model without calling generateObject', async () => {
     generateObjectMock.mockReset();
-    const generator = new AiSdkGenerator(baseConfig());
+    const generator = new AiSdkGenerator(() => baseConfig());
     await expect(
       generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
     ).rejects.toThrow(LlmError);
@@ -112,7 +112,7 @@ describe('AiSdkGenerator', () => {
       generateObjectMock.mockReset();
       const cfg = baseConfig();
       cfg.llm.model = { provider, model: 'some-model' };
-      const generator = new AiSdkGenerator(cfg);
+      const generator = new AiSdkGenerator(() => cfg);
       await expect(
         generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
       ).rejects.toThrow(/Missing API key/);
@@ -125,7 +125,7 @@ describe('AiSdkGenerator', () => {
     generateObjectMock.mockResolvedValue({ object: { ok: true } });
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
-    const generator = new AiSdkGenerator(cfg);
+    const generator = new AiSdkGenerator(() => cfg);
     const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
     expect(result).toEqual({ ok: true });
     expect(generateObjectMock).toHaveBeenCalledTimes(1);
@@ -136,7 +136,7 @@ describe('AiSdkGenerator', () => {
     generateObjectMock.mockRejectedValueOnce(new Error('rate limited')).mockResolvedValue({ object: { ok: true } });
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
-    const generator = new AiSdkGenerator(cfg);
+    const generator = new AiSdkGenerator(() => cfg);
     const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
     expect(result).toEqual({ ok: true });
     expect(generateObjectMock).toHaveBeenCalledTimes(2);
@@ -153,7 +153,7 @@ describe('AiSdkGenerator', () => {
     generateObjectMock.mockRejectedValueOnce(first).mockRejectedValueOnce(last);
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
-    const generator = new AiSdkGenerator(cfg);
+    const generator = new AiSdkGenerator(() => cfg);
     expect.assertions(5);
     try {
       await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
@@ -165,6 +165,26 @@ describe('AiSdkGenerator', () => {
       expect((last.cause as AggregateError).errors).toEqual([first]);
     }
   });
+
+  it('reads the config live, so a model saved after construction is used on the very next call (no restart)', async () => {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({ object: { ok: true } });
+    let cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'first-model' };
+    const generator = new AiSdkGenerator(() => cfg);
+
+    await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+
+    // Reassigned wholesale, exactly like `applyConfig` swaps `ctx.config` on a config PUT —
+    // mutating the same object in place would pass even against a captured-at-construction
+    // snapshot, and so would prove nothing.
+    cfg = keyedConfig();
+    cfg.llm.model = { provider: 'anthropic', model: 'second-model' };
+    await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+
+    const modelIds = generateObjectMock.mock.calls.map(([opts]) => (opts as { model: { modelId: string } }).model.modelId);
+    expect(modelIds).toEqual(['first-model', 'second-model']);
+  });
 });
 
 describe('AiSdkGenerator tracing', () => {
@@ -173,7 +193,7 @@ describe('AiSdkGenerator tracing', () => {
     const db = freshDb();
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
-    const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
+    const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock
       .mockRejectedValueOnce(new Error('rate limited'))
       .mockResolvedValueOnce({
@@ -211,7 +231,7 @@ describe('AiSdkGenerator tracing', () => {
     const db = freshDb();
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
-    const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
+    const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockRejectedValue(new Error('down'));
 
     await expect(
@@ -234,7 +254,7 @@ describe('AiSdkGenerator tracing', () => {
     const db = freshDb();
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
-    const gen = new AiSdkGenerator(cfg, new SqlTracer(db, new EventLog(db), () => true));
+    const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockResolvedValueOnce({ object: { pick: 'a' } });
     await gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p' });
     expect(new TraceEntries(db).summaries()).toHaveLength(0);

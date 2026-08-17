@@ -17,12 +17,13 @@ import {
   saveKnowledge,
   type SiteKnowledge,
 } from '../agent/siteKnowledge.js';
-import type { ManualImportFile } from '../arr/types.js';
+import { registerWebhooksInBackground } from '../arr/register.js';
+import type { ArrApi, ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
 import { ConfigSchema, SECRET_PLACEHOLDER, type Config } from '../config/schema.js';
 import { siteKey } from '../config/siteLabel.js';
 import { saveConfig } from '../config/store.js';
-import type { AppContext } from '../context.js';
+import { applyConfig, type AppContext } from '../context.js';
 import { AcquireRecords } from '../db/acquireRecords.js';
 import { AttentionItems, type AttentionStatus } from '../db/attention.js';
 import { ManagedObjects } from '../db/managedObjects.js';
@@ -228,6 +229,14 @@ function requireConfig(ctx: Partial<AppContext>): Config {
   return ctx.config;
 }
 
+/** The live `ctx.clients`, read per request for the same reason `requireConfig` is: a
+ * config save swaps BOTH (`applyConfig`), so a Map captured when the routes were mounted
+ * would keep answering for arr instances the operator has since renamed or removed. */
+function requireClients(ctx: Partial<AppContext>): Map<string, ArrApi> {
+  if (!ctx.clients) throw new Error('clients unexpectedly unset after being gated on at startup');
+  return ctx.clients;
+}
+
 export function createApp(ctx: Partial<AppContext>): Hono {
   const app = new Hono();
 
@@ -278,14 +287,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   if (ctx.queue && ctx.events && ctx.config && ctx.clients) {
     const queue = ctx.queue;
     const events = ctx.events;
-    const clients = ctx.clients;
 
     app.post('/webhooks/:instance', async (c) => {
       const instance = c.req.param('instance');
       const payload: unknown = await c.req.json().catch(() => undefined);
       // `requireConfig(ctx)` (not a value snapshotted here at mount time) so a config
       // reloaded via `PUT /api/config` is picked up starting with the very next webhook.
-      const webhookCtx = { queue, events, config: requireConfig(ctx), clients, trace: ctx.trace ?? NOOP_TRACER };
+      const webhookCtx = { queue, events, config: requireConfig(ctx), clients: requireClients(ctx), trace: ctx.trace ?? NOOP_TRACER };
       // Always 200: the arrs retry non-2xx webhook deliveries, which we don't want.
       return c.json(handleWebhook(webhookCtx, instance, payload));
     });
@@ -438,7 +446,6 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
   if (ctx.queue && ctx.config && ctx.clients) {
     const queue = ctx.queue;
-    const clients = ctx.clients;
 
     app.post('/api/acquire', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
@@ -448,12 +455,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       }
       const { arrInstance, targetKind, targetId, title, hint } = parsed.data;
       // Checked against `ctx.clients` (the runner's actual resolution source), not
-      // `config.arrs` — see `handleWebhook`'s matching comment for why the two can drift.
-      // This is still a client mistake (typo'd/removed/not-yet-restarted instance name),
-      // so it's a 400 here rather than the webhook route's always-200 "unknown instance"
-      // (which exists only because arrs retry non-2xx deliveries; nothing retries a
-      // dashboard button click).
-      if (!clients.has(arrInstance)) {
+      // `config.arrs` — see `handleWebhook`'s matching comment. This is a client mistake (a
+      // typo'd or since-removed instance name), so it's a 400 here rather than the webhook
+      // route's always-200 "unknown instance" (which exists only because arrs retry non-2xx
+      // deliveries; nothing retries a dashboard button click).
+      if (!requireClients(ctx).has(arrInstance)) {
         return c.json({ error: `unknown arr instance "${arrInstance}"` }, 400);
       }
       const result = queue.enqueue({
@@ -490,7 +496,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const { arrInstance, targetKind, targetId } = parsed.data;
       // Same "checked against ctx.clients, the runner's actual resolution source" rule as
       // /api/acquire — see that route's matching comment.
-      if (!clients.has(arrInstance)) {
+      if (!requireClients(ctx).has(arrInstance)) {
         return c.json({ error: `unknown arr instance "${arrInstance}"` }, 400);
       }
       const result = queue.enqueue({
@@ -512,7 +518,6 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   if (ctx.db && ctx.queue && ctx.clients && ctx.events) {
     const db = ctx.db;
     const queue = ctx.queue;
-    const clients = ctx.clients;
     const events = ctx.events;
     const attentionItems = new AttentionItems(db);
     // Guards `POST /api/attention/:id/accept` against two overlapping requests for the SAME
@@ -566,8 +571,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
       // Same "known client" check `/api/acquire` makes — checked against `ctx.clients`
       // (the runner's actual resolution source), not `config.arrs`; see that route's
-      // matching comment for why the two can drift.
-      if (!clients.has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
+      // matching comment.
+      if (!requireClients(ctx).has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
 
       // Re-enqueues the JOB'S OWN pipeline (ingest or acquire, whichever it actually
       // was) — unlike repick below, a retry isn't necessarily an acquire re-pick, so it
@@ -602,7 +607,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (item.job_id === null) return c.json({ error: 'attention item has no linked job' }, 400);
       const job = queue.get(item.job_id);
       if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
-      if (!clients.has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
+      if (!requireClients(ctx).has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
 
       const body: unknown = await c.req.json().catch(() => ({}));
       const parsed = RepickBodySchema.safeParse(body);
@@ -666,7 +671,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // malformed payload never gets as far as touching the arr.
         const parsed = AcceptDataSchema.safeParse(item.data);
         if (!parsed.success) return c.json({ error: 'malformed accept data', issues: parsed.error.issues }, 400);
-        const client = clients.get(parsed.data.instance);
+        const client = requireClients(ctx).get(parsed.data.instance);
         if (!client) return c.json({ error: `unknown arr instance "${parsed.data.instance}"` }, 400);
 
         await client.executeManualImport(parsed.data.files as ManualImportFile[], 'copy');
@@ -688,7 +693,6 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   if (ctx.db && ctx.clients && ctx.events && ctx.config) {
     const db = ctx.db;
     const events = ctx.events;
-    const clients = ctx.clients;
     const managedObjects = new ManagedObjects(db);
 
     app.get('/api/managed-objects', (c) => {
@@ -702,7 +706,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // `requireConfig(ctx)` (not a value captured at mount time) so a config reloaded via
       // `PUT /api/config` — e.g. an arr instance's `kind` correcting a typo — is honored on
       // the very next delete, same as every other config-reading route in this file.
-      const { deletedInArr } = await deleteManagedObject({ db, clients, events, config: requireConfig(ctx) }, row);
+      const { deletedInArr } = await deleteManagedObject({ db, clients: requireClients(ctx), events, config: requireConfig(ctx) }, row);
       // The dashboard needs to tell the operator whether the live Sonarr/Radarr object is
       // actually gone, or just this row's own bookkeeping — see `deleteManagedObject`'s doc
       // for the cases where it's the latter (no client configured, a foreign-named live
@@ -910,9 +914,10 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
     app.put('/api/config', async (c) => {
       const body: unknown = await c.req.json().catch(() => undefined);
+      const previous = requireConfig(ctx);
       let merged: unknown;
       try {
-        merged = restoreSecrets(body, requireConfig(ctx));
+        merged = restoreSecrets(body, previous);
       } catch (err) {
         if (err instanceof ConfigMergeError) {
           return c.json({ error: err.message }, 400);
@@ -924,12 +929,23 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         return c.json({ error: 'invalid config', issues: result.error.issues }, 400);
       }
       saveConfig(dataDir, result.data);
-      // Restart applies provider/LLM changes in Phase 1 (noted in the response below), but
-      // everything else the config touches (server port aside) is read live off `ctx.config`
-      // on every request — updating it in place lets a subsequent GET reflect the new save
-      // without a restart.
-      ctx.config = result.data;
-      return c.json({ saved: true, restartRequired: true });
+      const arrsChanged = JSON.stringify(previous.arrs) !== JSON.stringify(result.data.arrs);
+      const publicUrlChanged = previous.server.publicUrl !== result.data.server.publicUrl;
+      // Every consumer reads `ctx.config` (and, for arr calls, `ctx.clients`) live, so
+      // pointing the context at the new config is all it takes for the save to be fully in
+      // effect — nothing here is deferred to a restart. Only `server.port` still needs one,
+      // since the listener is bound before any of this runs.
+      applyConfig(ctx, result.data);
+      // Destructured AFTER applyConfig: it replaces `ctx.clients` with a new Map, and
+      // registration must use the rebuilt one, not the Map this route saw on entry.
+      const { db, events, clients } = ctx;
+      if ((arrsChanged || publicUrlChanged) && db && events && clients) {
+        // A new/renamed/re-pointed instance needs its webhook; existing healthy ones are
+        // left alone by `registerWebhooks` itself. Background, so an unreachable arr can't
+        // stall the operator's own save.
+        registerWebhooksInBackground({ db, events, clients, config: result.data });
+      }
+      return c.json({ saved: true });
     });
   }
 

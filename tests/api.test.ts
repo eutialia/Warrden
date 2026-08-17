@@ -1,5 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
+import { ArrClient } from '../src/arr/client.js';
+import * as register from '../src/arr/register.js';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { loadConfig } from '../src/config/store.js';
@@ -79,6 +81,17 @@ describe('dashboard api', () => {
   });
 
   describe('GET/PUT /api/config', () => {
+    // Webhook (re-)registration is the one thing a config save fires at a real arr over the
+    // network, so it's stubbed for every test here — and spying (rather than a `vi.mock`
+    // factory) lets a test assert whether a given save asked for it at all. `restoreMocks`
+    // in vitest.config.ts puts the real one back after each test.
+    const stubRegistration = (): ReturnType<typeof vi.spyOn> =>
+      vi.spyOn(register, 'registerWebhooksInBackground').mockImplementation(() => {});
+    let registerSpy: ReturnType<typeof stubRegistration>;
+    beforeEach(() => {
+      registerSpy = stubRegistration();
+    });
+
     it('redacts llm keys and arr apiKeys on GET and preserves them through a PUT round-trip', async () => {
       const ctx = makeCtx({ config: configWithArrs('sonarr') });
       ctx.config.llm.keys.openrouter = 'sk-secret';
@@ -128,22 +141,62 @@ describe('dashboard api', () => {
       expect(res.status).toBe(400);
     });
 
-    it('a PUT immediately updates ctx.config so a later GET sees it, without a restart', async () => {
+    it('a PUT immediately updates ctx.config so a later GET sees it', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
       const got: any = await (await app.request('/api/config')).json();
       got.reconcileIntervalMinutes = 30;
-      await app.request('/api/config', {
+      const res = await app.request('/api/config', {
         method: 'PUT',
         body: JSON.stringify(got),
         headers: { 'content-type': 'application/json' },
       });
+      // Nothing is deferred to a restart, so the response says exactly one thing.
+      expect(await res.json()).toEqual({ saved: true });
 
       const after: any = await (await app.request('/api/config')).json();
       expect(after.reconcileIntervalMinutes).toBe(30);
     });
 
-    it('webhook/acquire "known instance" is driven by ctx.clients, not config.arrs — an instance already in config but not yet wired up (pre-restart) is still unknown', async () => {
+    it('a PUT rebuilds ctx.clients from the saved arrs — a newly added instance is live immediately', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const app = createApp(ctx);
+      const got: any = await (await app.request('/api/config')).json();
+      got.arrs.push({ name: 'radarr', kind: 'radarr', baseUrl: 'http://radarr:0', apiKey: 'radarr-key' });
+
+      const res = await app.request('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify(got),
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.status).toBe(200);
+
+      expect([...ctx.clients.keys()]).toEqual(['sonarr', 'radarr']);
+      // Real clients, rebuilt from the saved config — not the fake the ctx started with.
+      expect(ctx.clients.get('radarr')).toBeInstanceOf(ArrClient);
+      expect(ctx.clients.get('sonarr')).toBeInstanceOf(ArrClient);
+
+      // A brand-new instance needs its webhook registering.
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-registers webhooks when publicUrl changes, and not when an unrelated field does', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const app = createApp(ctx);
+      const put = async (body: unknown): Promise<Response> =>
+        app.request('/api/config', { method: 'PUT', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });
+
+      const got: any = await (await app.request('/api/config')).json();
+      got.eventRetentionDays = 21;
+      await put(got);
+      expect(registerSpy).not.toHaveBeenCalled();
+
+      got.server.publicUrl = 'http://warrden.local:9797';
+      await put(got);
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('webhook/acquire "known instance" is driven by ctx.clients, not config.arrs — an instance in config with no client wired up is still unknown', async () => {
       const ctx = makeCtx({ config: configWithArrs('sonarr') }); // in config.arrs, but no ArrClient registered yet
       const app = createApp(ctx);
 
@@ -162,7 +215,7 @@ describe('dashboard api', () => {
       expect(acquireRes.status).toBe(400);
     });
 
-    it('removing an arr from config does not retroactively revoke webhook access — ctx.clients (built once at startup) is untouched by a config PUT', async () => {
+    it('removing an arr from config revokes webhook access on save — ctx.clients is rebuilt from it, not left behind', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const app = createApp(ctx);
       const got: any = await (await app.request('/api/config')).json();
@@ -179,9 +232,7 @@ describe('dashboard api', () => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ eventType: 'Test' }),
       });
-      // Still known: the client persists until a restart rebuilds ctx.clients from the new
-      // config (arr connections are startup-only — see the README's config docs).
-      expect(await webhookRes.json()).toEqual({ handled: true });
+      expect(await webhookRes.json()).toEqual({ handled: false, reason: 'unknown instance' });
     });
 
     describe('secret redact/restore round trip', () => {

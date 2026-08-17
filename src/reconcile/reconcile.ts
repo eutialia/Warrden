@@ -40,23 +40,6 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   const seriesByInstance = new Map<string, SeriesResource[]>();
 
   for (const [name, client] of ctx.clients) {
-    // `ctx.clients` (built once at startup) and `ctx.config.arrs` (live — a `PUT
-    // /api/config` reassigns it immediately) can drift: renaming or removing an arr
-    // instance leaves its old `ArrClient` in `ctx.clients` under a name `instanceKind`
-    // no longer recognizes. Guessing at its kind would make `fetchInstanceResources` call
-    // BOTH list endpoints, and the one the real arr flavor doesn't implement 404s — taking
-    // this whole instance's reconcile+GC down every single pass until a restart rebuilds
-    // `ctx.clients`. Skip it outright instead, touching neither `seen` nor GC.
-    if (instanceKind(ctx.config, name) === undefined) {
-      ctx.events.append({
-        kind: 'reconcile.config-drift',
-        level: 'warn',
-        message: `Skipping reconcile for "${name}" — no matching arrs[] entry in the current config (renamed or removed since this process started); restart to pick up the change`,
-        data: { instance: name },
-      });
-      continue;
-    }
-
     try {
       const { series, movies } = await fetchInstanceResources(ctx, name, client);
       seriesByInstance.set(name, series);

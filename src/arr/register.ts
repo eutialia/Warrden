@@ -5,13 +5,18 @@ import { errorMessage } from '../util/errors.js';
 
 const NOTIFICATION_NAME = 'Warrden';
 
+/** Only the parts of AppContext registration actually reads — same idiom as
+ * `HandleWebhookCtx` in `webhooks.ts`, so the config route can hand it the fields it has
+ * gated on without an `as AppContext` cast. */
+type RegisterCtx = Pick<AppContext, 'db' | 'config' | 'clients' | 'events'>;
+
 /**
  * Self-registers the Warrden webhook notification on every configured arr instance
  * that doesn't already have one. Idempotent (checks by name before creating) and
  * fault-tolerant: a broken/unreachable/unconfigured instance logs a warning and is
  * skipped, it never stops the rest from registering.
  */
-export async function registerWebhooks(ctx: AppContext): Promise<void> {
+export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
   const managedObjects = new ManagedObjects(ctx.db);
 
   for (const arr of ctx.config.arrs) {
@@ -117,4 +122,21 @@ export async function registerWebhooks(ctx: AppContext): Promise<void> {
       });
     }
   }
+}
+
+/** Fires `registerWebhooks` in the background rather than blocking its caller on it — a
+ * slow or unreachable arr instance would otherwise delay the HTTP server coming up at
+ * startup (and, on a config save, the response to the operator's own PUT), plus every
+ * other arr's registration behind it. `registerWebhooks` already isolates per-instance
+ * failures internally; this `catch` is the last-resort net for anything that still escapes
+ * it, reported as a `warn` event (rather than `console.error`, so it's visible on the
+ * dashboard like every other background failure). */
+export function registerWebhooksInBackground(ctx: RegisterCtx): void {
+  registerWebhooks(ctx).catch((err: unknown) => {
+    ctx.events.append({
+      kind: 'webhook.register-crashed',
+      level: 'warn',
+      message: `Webhook registration threw unexpectedly: ${errorMessage(err)}`,
+    });
+  });
 }

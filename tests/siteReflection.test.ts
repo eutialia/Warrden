@@ -595,7 +595,7 @@ describe('reflectOnRun', () => {
   it('leaves the file untouched and returns null when no model is configured', async () => {
     // The real generator on a config with no `llm.model`: the production off switch.
     // Nothing reaches it, `reflectOnRun` resolves the model itself first.
-    const ctx = makeCtx({ llm: new AiSdkGenerator(baseConfig()) });
+    const ctx = makeCtx({ llm: new AiSdkGenerator(() => baseConfig()) });
     saveKnowledge(ctx.dataDir, base());
     const before = readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8');
     const out = await reflect(ctx);

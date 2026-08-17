@@ -74,7 +74,14 @@ export function scheduleEventPrune(ctx: AppContext): () => void {
  * running — a slow pass against many/unreachable arr instances could otherwise overlap
  * with the next tick and run two reconciliation passes concurrently, doubling up on GC
  * bookkeeping and event volume for no benefit. Returns a stop function that clears the
- * interval.
+ * pending timer.
+ *
+ * A self-rescheduling `setTimeout` rather than a `setInterval`: each tick arms the next one
+ * off `ctx.config.reconcileIntervalMinutes` as it reads *then*, so an interval saved from
+ * Settings applies from the following tick onward. A `setInterval` would freeze the
+ * startup value for the life of the process. The next tick is armed when the current one
+ * fires (not when its pass finishes), keeping the cadence identical to the interval it
+ * replaces.
  */
 export function scheduleReconcile(ctx: AppContext): () => void {
   let running = false;
@@ -95,7 +102,15 @@ export function scheduleReconcile(ctx: AppContext): () => void {
       });
   };
 
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = (): void => {
+    timer = setTimeout(() => {
+      runOnce();
+      arm();
+    }, ctx.config.reconcileIntervalMinutes * 60_000);
+  };
+
   runOnce();
-  const interval = setInterval(runOnce, ctx.config.reconcileIntervalMinutes * 60_000);
-  return () => clearInterval(interval);
+  arm();
+  return () => clearTimeout(timer);
 }

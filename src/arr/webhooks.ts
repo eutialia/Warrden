@@ -52,10 +52,9 @@ type HandleWebhookCtx = Pick<AppContext, 'queue' | 'events' | 'config' | 'client
 export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, payload: unknown): HandleWebhookResult {
   // `ctx.clients` (not `ctx.config.arrs`) is checked here because it's what the runner
   // actually resolves against (`ctx.clients.get(job.arr_instance)` in
-  // `src/pipelines/acquire/run.ts`) — the two can drift: a brand-new instance can be in
-  // `config.arrs` before a restart has wired up its `ArrClient` (arr connections are
-  // startup-only, per the README), and enqueueing against it here would only fail later,
-  // uncaught, when the runner actually tries to process the job.
+  // `src/pipelines/acquire/run.ts`): enqueueing a job for an instance with no client would
+  // only fail later, uncaught, when the runner actually tries to process it. The two are
+  // rebuilt together by `applyConfig`, so this is also the live view of what's configured.
   if (!ctx.clients.has(instanceName)) {
     return { handled: false, reason: 'unknown instance' };
   }

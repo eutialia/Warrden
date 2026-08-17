@@ -118,10 +118,10 @@ export function hasEvent(events: EventRow[], kind: string): boolean {
  * majority of tests need, instead of hand-building `clients: new Map([[name, client]])`
  * every time. Deliberately does NOT also wire `config.arrs` for `name` (unlike
  * `ingestFixture`, which needs both to agree) — several tests rely on `ctx.clients` and
- * `ctx.config.arrs` disagreeing (or `config.arrs` being empty) to exercise the drift
- * between them (see e.g. `webhooks.ts`'s and `reconcile.ts`'s own comments on why they
- * check `ctx.clients`, not `config.arrs`); pass `{ config: configWithArrs(name) }` via
- * `overrides` for a test that wants both to agree.
+ * `ctx.config.arrs` disagreeing (or `config.arrs` being empty) to prove that the code
+ * under test resolves through `ctx.clients` (what the runner uses), not `config.arrs`;
+ * pass `{ config: configWithArrs(name) }` via `overrides` for a test that wants both to
+ * agree, as production always does (`applyConfig` builds one from the other).
  */
 export function ctxWithClient(name: string, client: ArrApi, overrides?: Partial<AppContext>): AppContext {
   return makeCtx({ clients: new Map([[name, client]]), ...overrides });

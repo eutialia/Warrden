@@ -78,7 +78,7 @@ describe('handleWebhook', () => {
     expect(ctx.queue.claim()).toBeNull();
   });
 
-  it('rejects an instance that is in config.arrs but has no ctx.clients entry yet — clients, not config, is authoritative (a brand-new instance before a restart wires it up)', () => {
+  it('rejects an instance that is in config.arrs but has no ctx.clients entry — clients, not config, is authoritative (it is what the runner resolves against)', () => {
     const ctx = makeCtx({ config: configWithArrs('sonarr') }); // configured, but no client registered
     expect(handleWebhook(ctx, 'sonarr', seriesAdd)).toEqual({ handled: false, reason: 'unknown instance' });
     expect(ctx.queue.claim()).toBeNull();

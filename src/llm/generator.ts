@@ -116,15 +116,18 @@ function requireKey(cfg: Config, provider: 'openrouter' | 'openai' | 'anthropic'
 }
 
 /** `StructuredGenerator` backed by the Vercel AI SDK, running every call-site on the one
- * configured model. */
+ * configured model. Takes a getter rather than a `Config` so the model and API keys are
+ * read fresh on every call: a `PUT /api/config` swaps `ctx.config` wholesale, and a
+ * snapshot captured here at construction would keep serving the old one for the life of
+ * the process. */
 export class AiSdkGenerator implements StructuredGenerator {
   constructor(
-    private readonly cfg: Config,
+    private readonly getCfg: () => Config,
     private readonly trace: Tracer = NOOP_TRACER,
   ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
-    const model = resolveModel(this.cfg);
+    const model = resolveModel(this.getCfg());
     const call: StepHandle = opts.trace
       ? this.trace.begin({
           jobId: opts.trace.jobId,
@@ -160,7 +163,7 @@ export class AiSdkGenerator implements StructuredGenerator {
         })
       : NOOP_HANDLE;
     try {
-      const model = createModel(this.cfg, ref, opts.callsite);
+      const model = createModel(this.getCfg(), ref, opts.callsite);
       const cache = planPromptCache(opts.promptCache === true, ref.provider, `warrden:${opts.callsite}`);
       // System-as-message: stable prefix for automatic caches (OpenAI/etc.) and a place
       // to hang explicit breakpoints (Anthropic / OpenRouter→Claude). User half varies.

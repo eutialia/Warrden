@@ -70,31 +70,6 @@ describe('reconcile', () => {
     expect(event.data).toMatchObject({ count: 1, ids: [3], alreadyHandled: 1 });
   });
 
-  it('skips an instance whose ctx.clients name has no matching arrs[] entry (e.g. renamed/removed via a live config PUT) — no list calls, a single config-drift warn, other instances unaffected', async () => {
-    const drifted = fakeArrClient({ series: [series(1)] });
-    const healthy = fakeArrClient({ series: [series(2)] });
-    const ctx = makeCtx({
-      config: ConfigSchema.parse({ arrs: [arrInstance({ name: 'healthy', kind: 'sonarr', baseUrl: 'http://healthy:0' })] }),
-      clients: new Map([
-        ['sonarr', drifted], // stale name: ctx.clients still has it, but config.arrs no longer does
-        ['healthy', healthy],
-      ]),
-    });
-
-    await reconcile(ctx);
-
-    expect(drifted.listMovies).not.toHaveBeenCalled(); // fetchInstanceResources never ran for it
-    expect(new SyncState(ctx.db).read('bootstrap:sonarr')).toBeUndefined(); // reconcileInstance never ran either
-
-    const driftEvents = ctx.events.list().filter((e) => e.kind === 'reconcile.config-drift');
-    expect(driftEvents).toHaveLength(1);
-    expect(driftEvents[0]).toMatchObject({ level: 'warn', data: { instance: 'sonarr' } });
-    expect(driftEvents[0]!.message).toContain('sonarr');
-
-    // The healthy instance bootstrapped normally, unaffected by the drifted one.
-    expect(ctx.events.list().some((e) => e.kind === 'reconcile.bootstrapped' && e.data?.instance === 'healthy')).toBe(true);
-  });
-
   it('a gc() failure that escapes its own per-instance handling is caught as reconcile.gc-failed-global, and reconcile() still resolves', async () => {
     const client = fakeArrClient({ series: [series(1)] });
     const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });

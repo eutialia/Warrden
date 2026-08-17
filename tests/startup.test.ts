@@ -61,6 +61,31 @@ describe('scheduleReconcile', () => {
     stop();
   });
 
+  it('picks up a new interval from a live config save — the next tick is armed off the current value, not the one it started with', async () => {
+    const client = fakeArrClient({ series: [] });
+    client.listSeries = vi.fn(async () => []);
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+    ctx.config.reconcileIntervalMinutes = 1;
+
+    const stop = scheduleReconcile(ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.listSeries).toHaveBeenCalledTimes(1);
+
+    // Exactly what a config PUT does: swaps ctx.config wholesale (see applyConfig).
+    ctx.config = { ...ctx.config, reconcileIntervalMinutes: 5 };
+
+    await vi.advanceTimersByTimeAsync(60_000); // the tick already armed at the old 1min still fires
+    expect(client.listSeries).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(60_000); // ...but the next one is armed at 5min now
+    expect(client.listSeries).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    expect(client.listSeries).toHaveBeenCalledTimes(3);
+
+    stop();
+  });
+
   it('skips an overlapping tick while the previous pass is still running (mirrors startRunner\'s ticking guard)', async () => {
     let releaseFirstPass: () => void = () => {};
     const gate = new Promise<void>((resolve) => {

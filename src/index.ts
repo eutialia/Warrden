@@ -1,9 +1,8 @@
 import { serve } from '@hono/node-server';
-import { ArrClient } from './arr/client.js';
-import { registerWebhooks } from './arr/register.js';
+import { registerWebhooksInBackground } from './arr/register.js';
 import type { ArrApi } from './arr/types.js';
 import { loadConfig, resolveDataDir } from './config/store.js';
-import type { AppContext } from './context.js';
+import { applyConfig, type AppContext } from './context.js';
 import { openDb } from './db/db.js';
 import { EventLog } from './events/log.js';
 import { JobQueue } from './jobs/queue.js';
@@ -16,7 +15,6 @@ import { runSubtitleJob } from './pipelines/subtitle/run.js';
 import { createApp } from './server/app.js';
 import { SqlTracer } from './trace/tracer.js';
 import { reclaimAbandonedJobs, scheduleEventPrune, scheduleReconcile } from './startup.js';
-import { errorMessage } from './util/errors.js';
 
 /** Builds the fully-wired `AppContext` for a fresh process: config, db, one `ArrClient`
  * per configured instance, and the shared queue/event-log/LLM singletons everything else
@@ -25,12 +23,11 @@ import { errorMessage } from './util/errors.js';
 function buildContext(dataDir: string): AppContext {
   const config = loadConfig(dataDir);
   const db = openDb(dataDir);
-  const clients = new Map<string, ArrApi>(config.arrs.map((arr) => [arr.name, new ArrClient(arr)]));
   const events = new EventLog(db);
-  // The closure reads `ctx.config.debug.enabled` live, so flipping the config toggle at
-  // runtime (no restart) takes effect immediately. Safe despite referencing `ctx` before
-  // it's assigned: the closure only runs once tracing is invoked, well after this
-  // function returns and `ctx` is fully initialized.
+  // These closures read `ctx.config` live, so a config saved at runtime takes effect
+  // immediately. Safe despite referencing `ctx` before it's assigned: they only run once
+  // tracing/generation is invoked, well after this function returns and `ctx` is fully
+  // initialized.
   const trace = new SqlTracer(db, events, () => ctx.config.debug.enabled);
 
   const ctx: AppContext = {
@@ -39,28 +36,15 @@ function buildContext(dataDir: string): AppContext {
     dataDir,
     queue: new JobQueue(db),
     events,
-    clients,
-    llm: new AiSdkGenerator(config, trace),
+    // Filled in by `applyConfig` below — the one place clients are built, shared with the
+    // config route so startup and a live save can't drift apart.
+    clients: new Map<string, ArrApi>(),
+    llm: new AiSdkGenerator(() => ctx.config, trace),
     trace,
     media: new CliMediaTools(),
   };
+  applyConfig(ctx, config);
   return ctx;
-}
-
-/** Fires `registerWebhooks` in the background rather than blocking startup on it — a slow
- * or unreachable arr instance would otherwise delay the HTTP server (and every other arr's
- * own webhook registration) coming up at all. `registerWebhooks` already isolates
- * per-instance failures internally; this `catch` is the last-resort net for anything that
- * still escapes it, reported as a `warn` event (rather than `console.error`, so it's
- * visible on the dashboard like every other startup/background failure). */
-function registerWebhooksInBackground(ctx: AppContext): void {
-  registerWebhooks(ctx).catch((err: unknown) => {
-    ctx.events.append({
-      kind: 'webhook.register-crashed',
-      level: 'warn',
-      message: `Webhook registration threw unexpectedly: ${errorMessage(err)}`,
-    });
-  });
 }
 
 async function main(): Promise<void> {
