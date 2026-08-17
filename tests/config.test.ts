@@ -70,11 +70,24 @@ describe('config store', () => {
   it.each([
     { scenario: 'a blank model id', model: { provider: 'openrouter', model: '' } },
     { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
-  ])('degrades an unusable llm.model to unset rather than failing to load: $scenario', ({ model }) => {
-    // `.catch(undefined)` on the field: a config.json written by an older build must never
-    // stop the server from booting, because the settings UI that would fix it is served by
-    // that same server. Unset is the documented "no model configured" state.
-    expect(ConfigSchema.parse({ llm: { model } }).llm.model).toBeUndefined();
+  ])('degrades an unusable llm.model to unset at boot rather than failing to load: $scenario', ({ model }) => {
+    // A config.json written by an older build must never stop the server from booting,
+    // because the settings UI that would fix it is served by that same server. Unset is the
+    // documented "no model configured" state.
+    const dir = tmp();
+    loadConfig(dir); // writes the default config.json
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ llm: { model } }));
+    expect(loadConfig(dir).llm.model).toBeUndefined();
+  });
+
+  it.each([
+    { scenario: 'a blank model id', model: { provider: 'openrouter', model: '' } },
+    { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
+  ])('rejects that same unusable llm.model everywhere except boot: $scenario', ({ model }) => {
+    // The boot tolerance above is for a file already on disk. A caller handing us one now
+    // (a save, a PUT) gets told, rather than watching its model vanish into "unset".
+    expect(ConfigSchema.safeParse({ llm: { model } }).success).toBe(false);
+    expect(() => saveConfig(tmp(), { ...ConfigSchema.parse({}), llm: { keys: {}, model: model as never } })).toThrow(ConfigError);
   });
 
   it('drops the legacy `fallback` model rather than failing to load', () => {

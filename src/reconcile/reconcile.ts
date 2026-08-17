@@ -40,8 +40,15 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   const seriesByInstance = new Map<string, SeriesResource[]>();
 
   for (const [name, client] of ctx.clients) {
+    // This loop iterates the Map it started with, but a save mid-pass replaces `ctx.clients`
+    // and `ctx.config` together: an instance renamed or removed since then has no `arrs[]`
+    // entry left to say what flavor it is. Skip it rather than guess — the next pass runs off
+    // the rebuilt Map, where it either exists under its new name or is gone for good.
+    const kind = instanceKind(ctx.config, name);
+    if (kind === undefined) continue;
+
     try {
-      const { series, movies } = await fetchInstanceResources(ctx, name, client);
+      const { series, movies } = await fetchInstanceResources(client, kind);
       seriesByInstance.set(name, series);
       reconcileInstance(ctx, syncState, name, toResources(series, movies));
       await ingestBackstop(ctx, syncState, name, client);
@@ -66,17 +73,14 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   }
 }
 
-/** Fetches the resource list(s) relevant to `name`'s configured kind: only series for a
- * `sonarr` instance, only movies for `radarr`, or both when the kind is unknown — safer
- * than guessing wrong and silently skipping an instance's actual library. Skipping the
- * irrelevant call for a known kind also avoids hitting an endpoint the real arr flavor
- * doesn't implement (Sonarr has no `/movie`, Radarr no `/series`) on every single pass. */
+/** Fetches the resource list relevant to the instance's configured kind: only series for a
+ * `sonarr` instance, only movies for `radarr`. Skipping the irrelevant call avoids hitting an
+ * endpoint the real arr flavor doesn't implement (Sonarr has no `/movie`, Radarr no
+ * `/series`), which 404s and would lose the whole instance's pass. */
 async function fetchInstanceResources(
-  ctx: AppContext,
-  name: string,
   client: ArrApi,
+  kind: NonNullable<ReturnType<typeof instanceKind>>,
 ): Promise<{ series: SeriesResource[]; movies: MovieResource[] }> {
-  const kind = instanceKind(ctx.config, name);
   const series = kind === 'radarr' ? [] : await client.listSeries();
   const movies = kind === 'sonarr' ? [] : await client.listMovies();
   return { series, movies };

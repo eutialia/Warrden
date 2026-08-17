@@ -31,6 +31,34 @@ describe('reconcile', () => {
     expect(client.listMovies).not.toHaveBeenCalled();
   });
 
+  it('skips an instance the current config no longer knows (renamed or removed by a save mid-pass) instead of failing its whole pass', async () => {
+    // `ctx.clients` is the Map this pass started with; `ctx.config` is what a save left
+    // behind. Without the skip, the unknown kind makes fetchInstanceResources probe BOTH list
+    // endpoints, and the 404 from the one this arr doesn't implement takes the instance's
+    // entire pass down as reconcile.failed.
+    const stale = fakeArrClient({ series: [series(1)] });
+    stale.listMovies = vi.fn(async () => {
+      throw new Error('404 Radarr has no /movie on a Sonarr');
+    });
+    const live = fakeArrClient({ series: [series(2)] });
+    const ctx = makeCtx({
+      config: configWithArrs('sonarr'),
+      clients: new Map([
+        ['sonarr-old', stale],
+        ['sonarr', live],
+      ]),
+    });
+
+    await reconcile(ctx);
+
+    expect(stale.listMovies).not.toHaveBeenCalled();
+    expect(hasEvent(ctx.events.list(), 'reconcile.failed')).toBe(false);
+    // The instance still in the config bootstrapped normally; the vanished one recorded
+    // nothing at all, so a later pass under its new name starts clean.
+    expect(new SyncState(ctx.db).read('bootstrap:sonarr')).toBe(true);
+    expect(new SyncState(ctx.db).read('bootstrap:sonarr-old')).toBeUndefined();
+  });
+
   it('bootstrap: marks existing library seen without enqueueing', async () => {
     const ctx = ctxWithClient('sonarr', fakeArrClient({ series: [series(1), series(2)] }), { config: configWithArrs('sonarr') });
     await reconcile(ctx);

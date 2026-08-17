@@ -129,6 +129,24 @@ describe('dashboard api', () => {
       expect(onDisk.arrs[0]?.apiKey).toBe('test-api-key'); // the secret was persisted too, not just held in memory
     });
 
+    it.each([
+      { scenario: 'a blank model id', model: { provider: 'openrouter', model: '' } },
+      { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
+    ])('rejects an unusable llm.model on PUT rather than silently saving it as unset: $scenario', async ({ model }) => {
+      // Boot degrades this to unset (a server that won't start can't serve the UI that would
+      // fix it); a PUT does not — the operator is watching, and a green toast over a dropped
+      // model selection is worse than a 400 naming the field.
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      const res = await app.request('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ ...ctx.config, llm: { keys: {}, model } }),
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.status).toBe(400);
+      expect(ctx.config.llm.model).toBeUndefined();
+    });
+
     it('rejects invalid config with issues', async () => {
       const ctx = makeCtx();
       const app = createApp(ctx);

@@ -21,6 +21,16 @@ const SubtitleSiteSchema = z.object({
   searchUrlTemplate: z.string().min(1).optional(),
 });
 export type SubtitleSiteConfig = z.infer<typeof SubtitleSiteSchema>;
+const LlmKeysSchema = z
+  .object({
+    openrouter: z.string().min(1).optional(),
+    openai: z.string().min(1).optional(),
+    anthropic: z.string().min(1).optional(),
+  })
+  .default(() => ({}));
+// The one model every call-site runs on. Optional: a fresh install has no provider
+// configured, and `resolveModel` turns that into a clear error at the first call.
+const LlmSchema = z.object({ model: LlmModelSchema.optional(), keys: LlmKeysSchema }).prefault({});
 export const ConfigSchema = z
   .object({
     // Nested objects use .prefault() rather than .default(): in Zod v4, .default()
@@ -100,25 +110,7 @@ export const ConfigSchema = z
         siteCooldownSeconds: z.number().int().min(0).default(30),
       })
       .prefault({}),
-    llm: z
-      .object({
-        // The one model every call-site runs on. Optional: a fresh install has no provider
-        // configured, and `resolveModel` turns that into a clear error at the first call.
-        // `.catch(undefined)` degrades rather than rejects: a config.json carrying a value
-        // this schema no longer knows (a dropped provider like `claude-code`, a blank id)
-        // would otherwise fail `loadConfig` at boot, and a server that won't start can't
-        // serve the settings UI that would fix it. Degrading lands on that same documented
-        // unset state — AI features off, editable from the UI.
-        model: LlmModelSchema.optional().catch(undefined),
-        keys: z
-          .object({
-            openrouter: z.string().min(1).optional(),
-            openai: z.string().min(1).optional(),
-            anthropic: z.string().min(1).optional(),
-          })
-          .default(() => ({})),
-      })
-      .prefault({}),
+    llm: LlmSchema,
     reconcileIntervalMinutes: z.number().int().min(1).default(15),
     /** How long the event log is kept. `0` means keep everything, for anyone who would
      * rather grow a table than lose the history. The dashboard offers a fixed set of
@@ -144,6 +136,19 @@ export const ConfigSchema = z
       }
     });
   });
+/**
+ * `ConfigSchema`, but tolerant of an `llm.model` it can't make sense of. Used by `loadConfig`
+ * and nowhere else: a config.json carrying a value this build no longer knows (a dropped
+ * provider like `claude-code`, a blank id) would otherwise fail at boot, and a server that
+ * won't start can't serve the settings UI that would fix it. Degrading lands on the same
+ * documented unset state, AI features off, editable from the UI.
+ *
+ * A `PUT /api/config` body gets no such mercy: there the operator is right there watching,
+ * and a 400 naming the field beats a green toast over a silently dropped model.
+ */
+export const BootConfigSchema = ConfigSchema.safeExtend({
+  llm: z.object({ model: LlmModelSchema.optional().catch(undefined), keys: LlmKeysSchema }).prefault({}),
+});
 export type Config = z.infer<typeof ConfigSchema>;
 export type ArrInstance = z.infer<typeof ArrInstanceSchema>;
 export type Provider = z.infer<typeof ProviderSchema>;

@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { join } from 'node:path';
 import type { z } from 'zod';
 import { errorMessage } from '../util/errors.js';
-import { ConfigSchema, type Config } from './schema.js';
+import { BootConfigSchema, ConfigSchema, type Config } from './schema.js';
 
 export class ConfigError extends Error {
   readonly issues: z.core.$ZodIssue[];
@@ -26,8 +26,8 @@ function configPath(dataDir: string): string {
   return join(dataDir, 'config.json');
 }
 
-function parseConfig(raw: unknown): Config {
-  const result = ConfigSchema.safeParse(raw);
+function parseConfig(raw: unknown, schema: typeof ConfigSchema | typeof BootConfigSchema = ConfigSchema): Config {
+  const result = schema.safeParse(raw);
   if (!result.success) {
     throw new ConfigError(result.error.issues);
   }
@@ -57,7 +57,9 @@ export function loadConfig(dataDir: string): Config {
       },
     ]);
   }
-  return parseConfig(raw);
+  // Boot is the one place an unusable `llm.model` degrades instead of throwing — see
+  // `BootConfigSchema`. Every other entry point (saveConfig, PUT /api/config) is strict.
+  return parseConfig(raw, BootConfigSchema);
 }
 
 export function saveConfig(dataDir: string, cfg: Config): void {
