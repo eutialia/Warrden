@@ -147,7 +147,7 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | --- | --- | --- |
 | `server.port` | `9797` | Port the HTTP server (API + dashboard) listens on. |
 | `server.publicUrl` | `http://localhost:9797` | URL Warrden advertises to the arrs when registering its webhook. |
-| `arrs[].name` | — | Unique label, also the internal key; renaming means re-entering the API key. |
+| `arrs[].name` | — | Unique label, also the internal key: it's what jobs and provenance are recorded under, so a rename leaves that history behind. |
 | `arrs[].kind` | — | `sonarr` or `radarr`. |
 | `arrs[].baseUrl` | — | Base URL of the arr instance. |
 | `arrs[].apiKey` | — | API key for the arr instance. |
@@ -160,7 +160,8 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | `subtitle.sites[].searchUrlTemplate` | omitted | Search URL with `{query}`. Without it the agent discovers the search endpoint itself. |
 | `browser.stepBudget` | `20` | Ceiling on LLM steps for one site-search run. |
 | `browser.siteCooldownSeconds` | `30` | Re-hit floor per site after a failure; exponential, capped at 6h. |
-| `picking.tags` | `[]` | Freeform release-preference tags folded into the picking policy. |
+| `picking.prefer` | `[]` | Freeform policy lines handed to the picker verbatim; a candidate matching one is favored. |
+| `picking.avoid` | `[]` | The same, in reverse: a strong negative preference, not a hard filter. An avoided release is still picked when every alternative is worse. |
 | `picking.seederFloor` | `3` | Minimum seeders for a candidate. |
 | `picking.minSizeMB` | `50` | Minimum release size in MB. |
 | `picking.maxSizeMB` | `60000` | Maximum release size in MB. |
@@ -169,8 +170,9 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | `eventRetentionDays` | `30` | Days of event history to keep; `0` keeps everything. Items waiting on review are never trimmed. |
 | `reconcileIntervalMinutes` | `15` | How often the reconciliation loop diffs each arr's full list as a webhook backstop; doubles as the grace period before a new `warrden-` tag/profile can be garbage-collected. |
 
-Secrets show as `•••` once set. Leave them as `•••` to keep them, or retype to rotate.
-Clearing an `llm.keys` field is not a deletion; use its "Remove stored key" checkbox.
+API keys are stored and shown in plain text: the dashboard hands you back exactly what
+is on disk, and a save writes back exactly what's in the fields. So clearing an
+`llm.keys` field *is* the deletion — nothing is merged back from the stored config.
 `arrs[].apiKey` is required, so blanking it is rejected; remove the instance to drop it.
 
 ### Path mappings example
