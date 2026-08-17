@@ -6,9 +6,11 @@ import { toast } from 'sonner';
 import {
   ApiError,
   apiErrorMessage,
+  fetchArrHealth,
   fetchConfig,
   fetchStorageHealth,
   saveConfig,
+  type ArrCheck,
   type ArrInstance,
   type ArrKind,
   type Config,
@@ -16,6 +18,7 @@ import {
   type Provider,
   type StorageCheck,
 } from '@/api';
+import { ArrHealth } from '@/components/ArrHealth';
 import { MountHealth } from '@/components/MountHealth';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
@@ -31,21 +34,15 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
-import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
+import { arrStatusLabel, arrStatusTone, storageStatusLabel, storageStatusTone } from '@/lib/labels';
 import { TONE_TEXT } from '@/lib/tone';
 import { cn, formatUsage } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
 
-const LLM_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const;
-type LlmProvider = (typeof LLM_PROVIDERS)[number];
-const LLM_PROVIDER_LABELS: Record<LlmProvider, string> = {
-  openrouter: 'OpenRouter',
-  openai: 'OpenAI',
-  anthropic: 'Anthropic',
-};
-
-const MODEL_PROVIDERS: { value: Provider; label: string }[] = [
+/** The providers a model can run on. The same list backs the picker and the per-provider
+ * key field, so a new provider is one entry, not three. */
+const PROVIDERS: { value: Provider; label: string }[] = [
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
@@ -92,13 +89,19 @@ function numericFrom(c: Config): NumericDraft {
 }
 
 /**
- * Drops a model whose id was never filled in. "Configure a model" seeds an empty id, and
- * the schema requires a non-empty one. Without this, one unfinished row 400s the entire
- * page's save, taking every unrelated edit with it. Same reasoning as the blank-arr filter
- * below it.
+ * Drops a model whose id was never filled in. Choosing a provider seeds an empty id, and
+ * the schema requires a non-empty one. Without this, picking a provider and walking away
+ * 400s the entire page's save, taking every unrelated edit with it.
  */
 function withoutBlankModel(model: LlmModel | undefined): LlmModel | undefined {
   return !model || model.model.trim() === '' ? undefined : model;
+}
+
+/** An untouched row, the one the "Add instance" button leaves behind. It is dropped on
+ * save; anything with a single field typed into it is a half-finished instance instead,
+ * and gets refused rather than quietly discarded. */
+function isBlankArr(arr: ArrInstance): boolean {
+  return arr.name === '' && arr.baseUrl === '' && arr.apiKey === '';
 }
 
 function parseNumber(text: string): number | undefined {
@@ -117,7 +120,18 @@ export default function ConfigPage() {
   const [saving, setSaving] = useState(false);
   const [storageChecks, setStorageChecks] = useState<StorageCheck[]>([]);
   const [storageError, setStorageError] = useState<string | null>(null);
+  // `null` is "nobody has answered": before the first probe, and after one that failed.
+  // The route is only mounted once an arr client exists, so an install with no working
+  // instance 404s here. That is an absence of data, not a verdict, so the rows say nothing
+  // rather than accusing every instance of being down.
+  const [arrChecks, setArrChecks] = useState<ArrCheck[] | null>(null);
   const { theme, setTheme } = useTheme();
+
+  const loadArrHealth = useCallback(() => {
+    fetchArrHealth()
+      .then((res) => setArrChecks(res.checks))
+      .catch(() => setArrChecks(null));
+  }, []);
 
   const loadStorage = useCallback(() => {
     fetchStorageHealth()
@@ -147,12 +161,13 @@ export default function ConfigPage() {
       .then((c) => {
         loadFormState(c);
         loadStorage();
+        loadArrHealth();
       })
       .catch((err: unknown) => {
         const message = err instanceof ApiError ? err.message : 'Failed to load settings';
         setLoadError(message);
       });
-  }, [loadFormState, loadStorage]);
+  }, [loadFormState, loadStorage, loadArrHealth]);
 
   useEffect(load, [load]);
 
@@ -184,6 +199,15 @@ export default function ConfigPage() {
     setDraft((prev) => (prev?.llm.model ? { ...prev, llm: { ...prev.llm, model: { ...prev.llm.model, ...next } } } : prev));
   }
 
+  /** Choosing a provider from nothing seeds an empty model id: the card only asks for a
+   * model once it knows where the model lives. Switching provider on a configured model
+   * keeps the id that was typed, since it is the operator's to rewrite, not ours to clear. */
+  function selectProvider(provider: Provider): void {
+    setDraft((prev) =>
+      prev ? { ...prev, llm: { ...prev.llm, model: { provider, model: prev.llm.model?.model ?? '' } } } : prev,
+    );
+  }
+
   async function handleSave(): Promise<void> {
     if (!draft || !numeric || !baseline) return;
 
@@ -201,12 +225,30 @@ export default function ConfigPage() {
       return;
     }
 
-    // Keys are sent exactly as shown: the config PUT is the whole document, so a field
-    // the operator cleared is a key they deleted. Nothing is merged back server-side.
+    const arrs = draft.arrs.map((a) => ({
+      ...a,
+      name: a.name.trim(),
+      baseUrl: a.baseUrl.trim(),
+      apiKey: a.apiKey.trim(),
+    }));
+    // A half-filled instance is a mistake, not a decision: refuse the save and name the
+    // row, rather than dropping the operator's typing on the floor the way the blank one is.
+    const halfFilled = arrs.findIndex((a) => !isBlankArr(a) && (!a.name || !a.baseUrl || !a.apiKey));
+    if (halfFilled !== -1) {
+      const which = arrs[halfFilled].name || `Instance ${halfFilled + 1}`;
+      const message = `${which} needs a name, a base URL and an API key.`;
+      setSaveError(message);
+      toast.error(message);
+      return;
+    }
+
+    // Keys go up as typed, minus the whitespace a paste drags in. The config PUT is the
+    // whole document, so a field left empty is a key the operator deleted. Nothing is
+    // merged back server-side.
     const keys: Config['llm']['keys'] = {};
-    for (const provider of LLM_PROVIDERS) {
-      const typed = draft.llm.keys[provider];
-      if (typed !== undefined && typed !== '') keys[provider] = typed;
+    for (const { value: provider } of PROVIDERS) {
+      const typed = draft.llm.keys[provider]?.trim();
+      if (typed) keys[provider] = typed;
     }
 
     const payload: Config = {
@@ -215,9 +257,7 @@ export default function ConfigPage() {
       ingest: baseline.ingest,
       pathMappings: baseline.pathMappings,
       server: { ...draft.server, publicUrl: draft.server.publicUrl.trim() },
-      arrs: draft.arrs
-        .map((a) => ({ ...a, name: a.name.trim(), baseUrl: a.baseUrl.trim() }))
-        .filter((a) => a.name.length > 0 && a.baseUrl.length > 0),
+      arrs: arrs.filter((a) => !isBlankArr(a)),
       picking: {
         prefer: draft.picking.prefer,
         avoid: draft.picking.avoid,
@@ -238,6 +278,7 @@ export default function ConfigPage() {
       toast.success('Settings saved');
       loadFormState(await fetchConfig());
       loadStorage();
+      loadArrHealth();
     } catch (err) {
       if (err instanceof ApiError) {
         setSaveError(err.message);
@@ -269,6 +310,7 @@ export default function ConfigPage() {
     );
   }
 
+  const model = draft.llm.model;
 
   return (
     <div className="space-y-6 pb-24">
@@ -309,6 +351,9 @@ export default function ConfigPage() {
               The Sonarr and Radarr instances Warrden talks to. Public URL is the address those apps use to reach this
               container for webhooks.
             </CardDescription>
+            <CardAction>
+              <ArrHealth checks={arrChecks ?? []} />
+            </CardAction>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -326,72 +371,92 @@ export default function ConfigPage() {
             </div>
 
             <div className="space-y-3">
-              {draft.arrs.map((arr, i) => (
-                <div key={i} className="grid gap-3 border-t pt-3 lg:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Name</Label>
-                    <Input
-                      placeholder="sonarr"
-                      value={arr.name}
-                      onChange={(e) =>
-                        patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, name: e.target.value } : a)) })
-                      }
-                    />
+              {draft.arrs.map((arr, i) => {
+                // Matched by name, the only identity an instance has. A row that was just
+                // typed, or renamed since the last save, matches nothing; with no probe
+                // answered at all there is nothing to say about any of them.
+                const check = arrChecks?.find((c) => c.name === arr.name.trim());
+                const tone = check ? arrStatusTone(check.status) : 'neutral';
+                const status = check ? arrStatusLabel(check.status) : arrChecks ? 'Not saved yet' : '';
+                return (
+                  <div key={i} className="space-y-2 border-t pt-3">
+                    <div className="flex items-center gap-2">
+                      <StatusDot tone={tone} />
+                      <span className={cn('text-xs font-medium', check ? TONE_TEXT[tone] : 'text-muted-foreground')}>
+                        {status}
+                      </span>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-[1fr_9rem_1.5fr_1.5fr_auto]">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Name</Label>
+                        <Input
+                          placeholder="sonarr"
+                          value={arr.name}
+                          onChange={(e) =>
+                            patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, name: e.target.value } : a)) })
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Type</Label>
+                        <Select
+                          value={arr.kind}
+                          onValueChange={(v) =>
+                            v && patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, kind: v as ArrKind } : a)) })
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="sonarr">Sonarr</SelectItem>
+                            <SelectItem value="radarr">Radarr</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Base URL</Label>
+                        <Input
+                          placeholder="http://sonarr:8989"
+                          value={arr.baseUrl}
+                          onChange={(e) =>
+                            patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, baseUrl: e.target.value } : a)) })
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">API key</Label>
+                        <Input
+                          className="font-mono"
+                          value={arr.apiKey}
+                          onChange={(e) =>
+                            patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, apiKey: e.target.value } : a)) })
+                          }
+                        />
+                      </div>
+                      <div className="flex items-end">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Remove ${arr.name || 'instance'}`}
+                          onClick={() => patch({ arrs: draft.arrs.filter((_, j) => j !== i) })}
+                        >
+                          <Trash2 />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Type</Label>
-                    <Select
-                      value={arr.kind}
-                      onValueChange={(v) =>
-                        v && patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, kind: v as ArrKind } : a)) })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="sonarr">Sonarr</SelectItem>
-                        <SelectItem value="radarr">Radarr</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Base URL</Label>
-                    <Input
-                      placeholder="http://sonarr:8989"
-                      value={arr.baseUrl}
-                      onChange={(e) =>
-                        patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, baseUrl: e.target.value } : a)) })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">API key</Label>
-                    <Input
-                      type="password"
-                      autoComplete="new-password"
-                      value={arr.apiKey}
-                      onChange={(e) =>
-                        patch({ arrs: draft.arrs.map((a, j) => (j === i ? { ...a, apiKey: e.target.value } : a)) })
-                      }
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={`Remove ${arr.name || 'instance'}`}
-                      onClick={() => patch({ arrs: draft.arrs.filter((_, j) => j !== i) })}
-                    >
-                      <Trash2 />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-              <Button variant="outline" size="sm" onClick={() => patch({ arrs: [...draft.arrs, { ...EMPTY_ARR }] })}>
-                <Plus />
-                Add instance
-              </Button>
+                );
+              })}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => patch({ arrs: [...draft.arrs, { ...EMPTY_ARR }] })}>
+                  <Plus />
+                  Add instance
+                </Button>
+                <Button variant="outline" size="sm" onClick={loadArrHealth}>
+                  Re-check now
+                </Button>
+              </div>
             </div>
 
             <NumberField
@@ -496,8 +561,8 @@ export default function ConfigPage() {
           <CardHeader>
             <CardTitle className="text-2xl">Release picking</CardTitle>
             <CardDescription>
-              Which torrent Warrden grabs when a series or movie is added. Preferences are written in plain language
-              and handed to the picker as policy — they are not hard filters.
+              Which torrent Warrden grabs when a series or movie is added. Both lists are written in plain language and
+              handed to the picker as policy it weighs, not as hard filters.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -506,7 +571,7 @@ export default function ConfigPage() {
               <TagInput
                 values={draft.picking.prefer}
                 onChange={(prefer) => patch({ picking: { ...draft.picking, prefer } })}
-                placeholder="e.g. 1080p — Enter to add"
+                placeholder="e.g. 1080p remux — Enter to add"
               />
             </div>
             <div className="space-y-2">
@@ -514,7 +579,7 @@ export default function ConfigPage() {
               <TagInput
                 values={draft.picking.avoid}
                 onChange={(avoid) => patch({ picking: { ...draft.picking, avoid } })}
-                placeholder="e.g. HDTV — Enter to add"
+                placeholder="e.g. HEVC re-encodes — Enter to add"
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -572,91 +637,72 @@ export default function ConfigPage() {
           </CardContent>
         </Card>
 
-        {/* AI models */}
+        {/* AI model: provider, model id and that provider's key in one place */}
         <Card id="models" className="scroll-mt-20">
           <CardHeader>
             <CardTitle className="text-2xl">AI model</CardTitle>
             <CardDescription>
-              The one model every AI task runs on: release picking, subtitle search, archive mapping, and the rest.
+              The one model every AI task runs on: release picking, subtitle search, archive mapping, and the rest. A
+              failing call is retried once before the task gives up.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {draft.llm.model ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Provider</Label>
-                  <Select
-                    value={draft.llm.model.provider}
-                    onValueChange={(v) => v && patchModel({ provider: v as Provider })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MODEL_PROVIDERS.map((p) => (
-                        <SelectItem key={p.value} value={p.value}>
-                          {p.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Model</Label>
-                  <Input
-                    value={draft.llm.model.model}
-                    placeholder="e.g. sonnet"
-                    onChange={(e) => patchModel({ model: e.target.value })}
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <Button variant="ghost" size="sm" onClick={() => patch({ llm: { ...draft.llm, model: undefined } })}>
-                    <Trash2 />
-                    Clear the model
-                  </Button>
-                </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Provider</Label>
+                <Select value={model?.provider ?? ''} onValueChange={(v) => v && selectProvider(v as Provider)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Choose a provider" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PROVIDERS.map((p) => (
+                      <SelectItem key={p.value} value={p.value}>
+                        {p.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-            ) : (
-              <div className="space-y-3">
-                <p className="text-sm text-muted-foreground">
+              {model ? (
+                <>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Model</Label>
+                    <Input
+                      value={model.model}
+                      placeholder="e.g. sonnet"
+                      onChange={(e) => patchModel({ model: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label className="text-xs" htmlFor="llm-key">
+                      API key
+                    </Label>
+                    <Input
+                      id="llm-key"
+                      className="font-mono"
+                      value={draft.llm.keys[model.provider] ?? ''}
+                      onChange={(e) =>
+                        patch({ llm: { ...draft.llm, keys: { ...draft.llm.keys, [model.provider]: e.target.value } } })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Stored per provider — switching provider keeps the other keys. Clear the field to delete the
+                      stored key.
+                    </p>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Button variant="ghost" size="sm" onClick={() => patch({ llm: { ...draft.llm, model: undefined } })}>
+                      <Trash2 />
+                      Clear the model
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <p className="self-center text-sm text-muted-foreground">
                   No model configured. Every AI task stays off until one is set.
                 </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => patch({ llm: { ...draft.llm, model: { provider: 'openrouter', model: '' } } })}
-                >
-                  <Plus />
-                  Configure a model
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* API keys */}
-        <Card id="keys" className="scroll-mt-20">
-          <CardHeader>
-            <CardTitle className="text-2xl">API keys</CardTitle>
-            <CardDescription>
-              A key is saved exactly as it stands here — clear the box and save to delete the stored one.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-3">
-            {LLM_PROVIDERS.map((provider) => (
-              <div key={provider} className="space-y-2">
-                <Label htmlFor={`key-${provider}`}>{LLM_PROVIDER_LABELS[provider]}</Label>
-                <Input
-                  id={`key-${provider}`}
-                  type="password"
-                  autoComplete="new-password"
-                  value={draft.llm.keys[provider] ?? ''}
-                  onChange={(e) =>
-                    patch({ llm: { ...draft.llm, keys: { ...draft.llm.keys, [provider]: e.target.value } } })
-                  }
-                />
-              </div>
-            ))}
+              )}
+            </div>
           </CardContent>
         </Card>
 

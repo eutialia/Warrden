@@ -2,6 +2,7 @@ import { Captions, FolderInput, Radar, type LucideIcon } from 'lucide-react';
 import type {
   AccessTier,
   AcquireStatus,
+  ArrCheck,
   JobStatus,
   ManagedObjectKind,
   StorageCheckStatus,
@@ -193,6 +194,21 @@ export function storageStatusTone(status: StorageCheckStatus): Tone {
     default:
       return 'warning';
   }
+}
+
+export function arrStatusLabel(status: ArrCheck['status']): string {
+  switch (status) {
+    case 'ok':
+      return 'Connected';
+    case 'unauthorized':
+      return 'Unauthorized';
+    default:
+      return 'Unreachable';
+  }
+}
+
+export function arrStatusTone(status: ArrCheck['status']): Tone {
+  return status === 'ok' ? 'success' : 'danger';
 }
 
 /** Attention kind → short category chip (message body already holds the full story). */
