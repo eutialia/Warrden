@@ -18,7 +18,8 @@ describe('config store', () => {
   it('round-trips saved config', () => {
     const dir = tmp();
     const cfg = loadConfig(dir);
-    cfg.picking.tags = ['CHS subs', 'prefer dual audio'];
+    cfg.picking.prefer = ['CHS subs', 'dual audio'];
+    cfg.picking.avoid = ['HEVC re-encodes'];
     cfg.arrs.push({ name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:8989', apiKey: 'k' });
     cfg.ingest.mountMarkers.push('/mnt/nas/.mounted');
     cfg.ingest.downloadRoots.push('/data/downloads');
@@ -38,7 +39,8 @@ describe('config store', () => {
 
     cfgA.arrs.push({ name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:8989', apiKey: 'k' });
     cfgA.pathMappings.push({ from: '/a', to: '/b' });
-    cfgA.picking.tags.push('CHS subs');
+    cfgA.picking.prefer.push('CHS subs');
+    cfgA.picking.avoid.push('HEVC re-encodes');
     cfgA.subtitle.sites.push({ baseUrl: 'https://acg.rip' });
     cfgA.llm.keys.openrouter = 'k';
 
@@ -46,8 +48,10 @@ describe('config store', () => {
     expect(cfgB.arrs).toEqual([]);
     expect(cfgA.pathMappings).not.toBe(cfgB.pathMappings);
     expect(cfgB.pathMappings).toEqual([]);
-    expect(cfgA.picking.tags).not.toBe(cfgB.picking.tags);
-    expect(cfgB.picking.tags).toEqual([]);
+    expect(cfgA.picking.prefer).not.toBe(cfgB.picking.prefer);
+    expect(cfgB.picking.prefer).toEqual([]);
+    expect(cfgA.picking.avoid).not.toBe(cfgB.picking.avoid);
+    expect(cfgB.picking.avoid).toEqual([]);
     expect(cfgA.subtitle.sites).not.toBe(cfgB.subtitle.sites);
     expect(cfgB.subtitle.sites).toEqual([]);
     expect(cfgA.llm.keys).not.toBe(cfgB.llm.keys);
@@ -87,6 +91,13 @@ describe('config store', () => {
     // unknown keys, so they degrade to "no model configured". No migration code.
     const cfg = ConfigSchema.parse({ llm: { activeProfile: 'prod', profiles: { prod: { 'release-pick': { provider: 'openai', model: 'x' } } } } });
     expect(cfg.llm).toEqual({ keys: {} });
+  });
+
+  it('drops the legacy `picking.tags` list rather than failing to load', () => {
+    // Same unknown-key stripping as the `profiles` case above: a config.json from before
+    // the Prefer/Avoid split loses its tags entirely, and the operator re-enters them.
+    const cfg = ConfigSchema.parse({ picking: { tags: ['CHS subs'] } });
+    expect(cfg.picking).toEqual({ prefer: [], avoid: [], seederFloor: 3, minSizeMB: 50, maxSizeMB: 60000 });
   });
 
   it.each([
@@ -221,10 +232,10 @@ describe('config store', () => {
     { scenario: 'server.port at the minimum valid TCP port (1)', overrides: { server: { port: 1, publicUrl: 'http://x:0' } } },
     { scenario: 'server.port at the maximum valid TCP port (65535)', overrides: { server: { port: 65535, publicUrl: 'http://x:0' } } },
     { scenario: 'reconcileIntervalMinutes at its minimum (1)', overrides: { reconcileIntervalMinutes: 1 } },
-    { scenario: 'picking.seederFloor at its minimum (0)', overrides: { picking: { seederFloor: 0, minSizeMB: 50, maxSizeMB: 60000, tags: [] } } },
+    { scenario: 'picking.seederFloor at its minimum (0)', overrides: { picking: { seederFloor: 0, minSizeMB: 50, maxSizeMB: 60000, prefer: [], avoid: [] } } },
     {
       scenario: 'picking.minSizeMB exactly equal to picking.maxSizeMB (a zero-width but valid window)',
-      overrides: { picking: { seederFloor: 3, minSizeMB: 100, maxSizeMB: 100, tags: [] } },
+      overrides: { picking: { seederFloor: 3, minSizeMB: 100, maxSizeMB: 100, prefer: [], avoid: [] } },
     },
   ])('accepts the boundary value: $scenario', ({ overrides }) => {
     expect(() => ConfigSchema.parse(overrides)).not.toThrow();

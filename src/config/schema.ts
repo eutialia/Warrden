@@ -47,7 +47,8 @@ export const ConfigSchema = z
     pathMappings: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) })).default(() => []),
     picking: z
       .object({
-        tags: z.array(z.string()).default(() => []),
+        prefer: z.array(z.string()).default(() => []),
+        avoid: z.array(z.string()).default(() => []),
         seederFloor: z.number().int().min(0).default(3),
         minSizeMB: z.number().min(0).default(50),
         maxSizeMB: z.number().min(0).default(60000),

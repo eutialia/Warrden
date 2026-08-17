@@ -80,7 +80,8 @@ function renderCandidateLine(index: number, c: ReleaseCandidate): string {
 export async function pickRelease(input: {
   llm: StructuredGenerator;
   candidates: ReleaseCandidate[];
-  tags: string[];
+  prefer: string[];
+  avoid: string[];
   title: string;
   kind: 'series' | 'movie';
   seasonNumber?: number;

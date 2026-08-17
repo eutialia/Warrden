@@ -269,7 +269,8 @@ async function attempt(
   const pick = await pickRelease({
     llm: ctx.llm,
     candidates: kept,
-    tags: ctx.config.picking.tags,
+    prefer: ctx.config.picking.prefer,
+    avoid: ctx.config.picking.avoid,
     title: input.title,
     kind: input.kind,
     seasonNumber: input.seasonNumber,
@@ -314,7 +315,7 @@ function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string
       kind: 'acquire.no-candidates',
       level: 'attention',
       jobId: job.id,
-      message: `No usable releases found for "${label}" after filtering (seeders, size, tags)`,
+      message: `No usable releases found for "${label}" after filtering (seeders, size)`,
       data: targetEventData(job, { ...extra, title: label }),
     });
     return;

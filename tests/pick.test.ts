@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { pickRelease } from '../src/pipelines/acquire/pick.js';
 import { candidate, FakeGenerator, pickResponse } from './helpers.js';
 
-const base = { tags: ['prefer CHS'], title: 'Frieren', kind: 'series' as const, seasonNumber: 1 };
+const base = { prefer: ['CHS subs'], avoid: ['CAMRip'], title: 'Frieren', kind: 'series' as const, seasonNumber: 1 };
 
 describe('pickRelease', () => {
   it('renders a numbered candidate list in the prompt and resolves the LLM\'s chosen number back to that candidate\'s real guid', async () => {
@@ -20,11 +20,12 @@ describe('pickRelease', () => {
     // The prompt never contains a guid for the LLM to (fail to) copy back.
     expect(llm.calls[0].prompt).not.toContain('g1');
     expect(llm.calls[0].prompt).not.toContain('g2');
-    // The policy prompt (system + the caller's freeform tags) actually made it into the
-    // LLM call, not just the candidate listing.
+    // The policy prompt (system + both of the caller's freeform preference lists) actually
+    // made it into the LLM call, not just the candidate listing.
     expect(llm.calls[0].system.length).toBeGreaterThan(0);
     expect(llm.calls[0].system).toContain('number');
-    expect(llm.calls[0].prompt).toContain('CHS');
+    expect(llm.calls[0].prompt).toContain('Prefer:\n- CHS subs');
+    expect(llm.calls[0].prompt).toContain('Avoid:\n- CAMRip');
   });
   it('forwards a hint through to the policy prompt', async () => {
     const llm = new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: null, confidence: 'high', reasoning: 'ok' })]);
