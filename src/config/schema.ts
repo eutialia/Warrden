@@ -114,7 +114,12 @@ export const ConfigSchema = z
       .object({
         // The one model every call-site runs on. Optional: a fresh install has no provider
         // configured, and `resolveModel` turns that into a clear error at the first call.
-        model: LlmModelSchema.optional(),
+        // `.catch(undefined)` degrades rather than rejects: a config.json carrying a value
+        // this schema no longer knows (a dropped provider like `claude-code`, a blank id)
+        // would otherwise fail `loadConfig` at boot, and a server that won't start can't
+        // serve the settings UI that would fix it. Degrading lands on that same documented
+        // unset state — AI features off, editable from the UI.
+        model: LlmModelSchema.optional().catch(undefined),
         keys: z
           .object({
             openrouter: z.string().min(1).optional(),

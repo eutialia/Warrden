@@ -63,8 +63,23 @@ describe('config store', () => {
     expect(loadConfig(dir).llm.model).toEqual(cfg.llm.model);
   });
 
-  it('rejects an llm.model with a blank model id', () => {
-    expect(ConfigSchema.safeParse({ llm: { model: { provider: 'openrouter', model: '' } } }).success).toBe(false);
+  it.each([
+    { scenario: 'a blank model id', model: { provider: 'openrouter', model: '' } },
+    { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
+  ])('degrades an unusable llm.model to unset rather than failing to load: $scenario', ({ model }) => {
+    // `.catch(undefined)` on the field: a config.json written by an older build must never
+    // stop the server from booting, because the settings UI that would fix it is served by
+    // that same server. Unset is the documented "no model configured" state.
+    expect(ConfigSchema.parse({ llm: { model } }).llm.model).toBeUndefined();
+  });
+
+  it('drops the legacy `fallback` model rather than failing to load', () => {
+    // Same shape as the `profiles` case below: an unknown key is stripped, not an error,
+    // so a config still carrying the removed fallback model keeps its primary model.
+    const cfg = ConfigSchema.parse({
+      llm: { model: { provider: 'anthropic', model: 'x', fallback: { provider: 'openai', model: 'y' } } },
+    });
+    expect(cfg.llm.model).toEqual({ provider: 'anthropic', model: 'x' });
   });
 
   it('drops a legacy per-callsite `profiles` block rather than failing to load', () => {
