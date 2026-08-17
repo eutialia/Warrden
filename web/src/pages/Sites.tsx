@@ -142,20 +142,19 @@ export default function Sites() {
 
   useEffect(refetch, [refetch]);
 
-  /** Writes a whole config back. Secrets round-trip as the redaction sentinel the
-   * API hands us, so re-sending the fetched object never rotates a stored key.
-   *
-   * The write is built on a fresh read rather than on this page's copy, which can be up
-   * to a heartbeat old: `PUT /api/config` replaces the whole document, so a stale copy
-   * would quietly undo anything saved from Settings in the meantime. Mounts and path
-   * mappings are taken from that fresh read too — they are fixed outside the UI, and no
-   * page may rewrite them (the same guard Settings states in its own save). */
+  /** Writes a whole config back, but this page only owns `subtitle`. Everything else is
+   * rebased on a fresh read rather than on this page's copy, which can be up to a
+   * heartbeat old: `PUT /api/config` replaces the whole document and the body is the
+   * whole truth (API keys included, in plain text), so sending our stale copy would
+   * quietly undo anything saved from Settings in the meantime — up to reverting a key
+   * rotated a minute ago. Mounts and path mappings ride along in `current` for the same
+   * reason: they are fixed outside the UI and no page may rewrite them. */
   const persist = useCallback(
     async (next: Config, successMsg: string): Promise<boolean> => {
       setSaving(true);
       try {
         const current = await fetchConfig();
-        await saveConfig({ ...next, ingest: current.ingest, pathMappings: current.pathMappings });
+        await saveConfig({ ...current, subtitle: next.subtitle });
         toast.success(successMsg);
         refetch();
         return true;
