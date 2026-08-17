@@ -88,15 +88,6 @@ function numericFrom(c: Config): NumericDraft {
   };
 }
 
-/**
- * Drops a model whose id was never filled in. Choosing a provider seeds an empty id, and
- * the schema requires a non-empty one. Without this, picking a provider and walking away
- * 400s the entire page's save, taking every unrelated edit with it.
- */
-function withoutBlankModel(model: LlmModel | undefined): LlmModel | undefined {
-  return !model || model.model.trim() === '' ? undefined : model;
-}
-
 /** An untouched row, the one the "Add instance" button leaves behind. It is dropped on
  * save; anything with a single field typed into it is a half-finished instance instead,
  * and gets refused rather than quietly discarded. */
@@ -210,7 +201,7 @@ export default function ConfigPage() {
   }
 
   async function handleSave(): Promise<void> {
-    if (!draft || !numeric || !baseline) return;
+    if (!draft || !numeric) return;
 
     const parsed = {
       seederFloor: parseNumber(numeric.seederFloor),
@@ -243,6 +234,16 @@ export default function ConfigPage() {
       return;
     }
 
+    // A provider with no model id is an unfinished choice, not a decision to run without a
+    // model — the same rule as the half-filled instance above. Dropping it silently sent a
+    // green toast while the card snapped back to empty. "Clear the model" is the way out.
+    if (draft.llm.model && draft.llm.model.model.trim() === '') {
+      const message = 'AI model needs a model id. Fill it in or clear the model.';
+      setSaveError(message);
+      toast.error(message);
+      return;
+    }
+
     // Keys go up as typed, minus the whitespace a paste drags in. The config PUT is the
     // whole document, so a field left empty is a key the operator deleted. Nothing is
     // merged back server-side.
@@ -252,29 +253,32 @@ export default function ConfigPage() {
       if (typed) keys[provider] = typed;
     }
 
-    const payload: Config = {
-      ...draft,
-      // Mounts and path mappings are fixed outside the UI — never let a save rewrite them.
-      ingest: baseline.ingest,
-      pathMappings: baseline.pathMappings,
-      server: { ...draft.server, publicUrl: draft.server.publicUrl.trim() },
-      arrs: arrs.filter((a) => !isBlankArr(a)),
-      picking: {
-        prefer: draft.picking.prefer,
-        avoid: draft.picking.avoid,
-        seederFloor: parsed.seederFloor!,
-        minSizeMB: parsed.minSizeMB!,
-        maxSizeMB: parsed.maxSizeMB!,
-      },
-      browser: { stepBudget: parsed.stepBudget!, siteCooldownSeconds: parsed.siteCooldownSeconds! },
-      llm: { keys, model: withoutBlankModel(draft.llm.model) },
-      reconcileIntervalMinutes: parsed.reconcileIntervalMinutes!,
-      eventRetentionDays: draft.eventRetentionDays,
-    };
-
     setSaving(true);
     setSaveError(null);
     try {
+      // The PUT is the whole document, but this page only owns part of it. Rebasing on a
+      // fresh read means a save here can't revert what another page (Subtitle sources) wrote
+      // since this one mounted — mounts and path mappings, which no page edits, ride along
+      // the same way.
+      const current = await fetchConfig();
+      const payload: Config = {
+        ...current,
+        server: { ...current.server, publicUrl: draft.server.publicUrl.trim() },
+        arrs: arrs.filter((a) => !isBlankArr(a)),
+        picking: {
+          prefer: draft.picking.prefer,
+          avoid: draft.picking.avoid,
+          seederFloor: parsed.seederFloor!,
+          minSizeMB: parsed.minSizeMB!,
+          maxSizeMB: parsed.maxSizeMB!,
+        },
+        browser: { stepBudget: parsed.stepBudget!, siteCooldownSeconds: parsed.siteCooldownSeconds! },
+        llm: { keys, model: draft.llm.model },
+        reconcileIntervalMinutes: parsed.reconcileIntervalMinutes!,
+        eventRetentionDays: draft.eventRetentionDays,
+        debug: draft.debug,
+      };
+
       await saveConfig(payload);
       toast.success('Settings saved');
       loadFormState(await fetchConfig());
