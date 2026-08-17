@@ -97,7 +97,10 @@ describe('dashboard api', () => {
       ctx.config.llm.keys.openrouter = 'sk-secret';
       const app = createApp(ctx);
 
-      const got: any = await (await app.request('/api/config')).json();
+      const getRes = await app.request('/api/config');
+      // Verbatim secrets in the body mean no cache anywhere may keep the response.
+      expect(getRes.headers.get('cache-control')).toBe('no-store');
+      const got: any = await getRes.json();
       expect(got.llm.keys.openrouter).toBe('sk-secret');
       expect(got.arrs[0].apiKey).toBe('test-api-key');
 

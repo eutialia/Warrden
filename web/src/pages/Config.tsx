@@ -196,7 +196,7 @@ export default function ConfigPage() {
   }
 
   async function handleSave(): Promise<void> {
-    if (!draft || !numeric) return;
+    if (!draft || !numeric || !baseline) return;
 
     const parsed = {
       seederFloor: parseNumber(numeric.seederFloor),
@@ -239,15 +239,6 @@ export default function ConfigPage() {
       return;
     }
 
-    // Keys go up as typed, minus the whitespace a paste drags in. The config PUT is the
-    // whole document, so a field left empty is a key the operator deleted. Nothing is
-    // merged back server-side.
-    const keys: Config['llm']['keys'] = {};
-    for (const { value: provider } of PROVIDERS) {
-      const typed = draft.llm.keys[provider]?.trim();
-      if (typed) keys[provider] = typed;
-    }
-
     setSaving(true);
     setSaveError(null);
     try {
@@ -256,10 +247,27 @@ export default function ConfigPage() {
       // since this one mounted. Mounts and path mappings, which no page edits, ride along
       // the same way.
       const current = await fetchConfig();
+      // A secret field untouched since mount belongs to the server: take the freshly read
+      // value, so a long-open tab can't revert a key rotated from elsewhere. An edited
+      // field is the operator's decision and goes up as typed, minus pasted whitespace;
+      // an llm key field left empty is a key the operator deleted.
+      const keys: Config['llm']['keys'] = {};
+      for (const { value: provider } of PROVIDERS) {
+        const untouched = draft.llm.keys[provider] === baseline.llm.keys[provider];
+        const chosen = (untouched ? current.llm.keys[provider] : draft.llm.keys[provider])?.trim();
+        if (chosen) keys[provider] = chosen;
+      }
+      const savedArrs = arrs
+        .filter((a) => !isBlankArr(a))
+        .map((a) => {
+          const base = baseline.arrs.find((b) => b.name === a.name);
+          const live = current.arrs.find((c) => c.name === a.name);
+          return base && live && a.apiKey === base.apiKey ? { ...a, apiKey: live.apiKey } : a;
+        });
       const payload: Config = {
         ...current,
         server: { ...current.server, publicUrl: draft.server.publicUrl.trim() },
-        arrs: arrs.filter((a) => !isBlankArr(a)),
+        arrs: savedArrs,
         picking: {
           prefer: draft.picking.prefer,
           avoid: draft.picking.avoid,

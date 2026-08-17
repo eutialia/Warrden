@@ -850,6 +850,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // the config file anyway, and hiding a key on GET only works if the server merges it
     // back in on PUT, which made a rename indistinguishable from a lost credential.
     app.get('/api/config', (c) => {
+      // The response carries those secrets, so no intermediary or browser cache may keep it.
+      c.header('Cache-Control', 'no-store');
       return c.json(requireConfig(ctx));
     });
 
