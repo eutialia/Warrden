@@ -1,6 +1,7 @@
 import type { ArrInstance } from '../config/schema.js';
 import type {
   ArrApi,
+  ArrPingStatus,
   EpisodeFileResource,
   EpisodeResource,
   HistoryRecord,
@@ -42,6 +43,10 @@ const SEARCH_TIMEOUT_MS = 180_000;
 // /history/movie, which take the enum by name) — 3 = downloadFolderImported on both
 // Sonarr and Radarr.
 const IMPORT_EVENT_TYPE = 3;
+// A health probe answers a settings page an operator is staring at, so it fails fast
+// instead of inheriting the 30s ceiling pipeline calls get: an instance that hasn't said
+// anything in four seconds is, for the purpose of that indicator, down.
+const PING_TIMEOUT_MS = 4_000;
 
 /**
  * Thin authenticated wrapper around the Sonarr/Radarr v3 HTTP API: every method is a
@@ -55,6 +60,24 @@ export class ArrClient implements ArrApi {
 
   constructor(private readonly inst: ArrInstance) {
     this.baseUrl = inst.baseUrl.replace(/\/+$/, '');
+  }
+
+  /**
+   * `/system/status` is the cheapest authenticated endpoint both Sonarr and Radarr serve,
+   * so a 2xx proves reachability and the api key in one call. The one place in this class
+   * that swallows `ArrApiError` rather than propagating it: the caller is an indicator,
+   * and "down" is a legitimate answer, not an error to report.
+   */
+  async ping(): Promise<ArrPingStatus> {
+    try {
+      await this.request('GET', '/system/status', { timeoutMs: PING_TIMEOUT_MS });
+      return 'ok';
+    } catch (err) {
+      // Anything that isn't an HTTP answer — DNS, refused connection, TLS, the timeout
+      // abort — never reached the instance, which is indistinguishable from it being down.
+      if (!(err instanceof ArrApiError)) return 'unreachable';
+      return err.status === 401 || err.status === 403 ? 'unauthorized' : 'unreachable';
+    }
   }
 
   listSeries(): Promise<SeriesResource[]> {

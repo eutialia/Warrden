@@ -6,6 +6,7 @@ import { vi } from 'vitest';
 import type { MediaStream, MediaTools } from '../src/media/tools.js';
 import type {
   ArrApi,
+  ArrPingStatus,
   EpisodeFileResource,
   EpisodeResource,
   HistoryRecord,
@@ -365,6 +366,7 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     grabbed: [],
     manualImportByScope: seed?.manualImportByScope ? { ...seed.manualImportByScope } : {},
 
+    ping: vi.fn(async (): Promise<ArrPingStatus> => 'ok'),
     async listSeries(): Promise<SeriesResource[]> {
       return client.series.map((s) => ({ ...s, tags: [...s.tags] }));
     },

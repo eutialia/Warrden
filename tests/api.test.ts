@@ -354,6 +354,46 @@ describe('dashboard api', () => {
     });
   });
 
+  describe('GET /api/health/arrs', () => {
+    it('probes every configured instance and reports each one, whatever its own answer is', async () => {
+      const sonarr = fakeArrClient();
+      const radarr = fakeArrClient();
+      // Wired so sonarr's probe can only settle once radarr's has started: a route that
+      // awaited the instances one at a time would deadlock here instead of answering.
+      let releaseSonarr!: () => void;
+      sonarr.ping = vi.fn(() => new Promise<'unauthorized'>((resolve) => (releaseSonarr = () => resolve('unauthorized'))));
+      radarr.ping = vi.fn(async () => {
+        releaseSonarr();
+        return 'unreachable' as const;
+      });
+      const ctx = makeCtx({
+        config: configWithArrs('sonarr', 'radarr'),
+        clients: new Map([
+          ['sonarr', sonarr],
+          ['radarr', radarr],
+        ]),
+      });
+
+      const res = await createApp(ctx).request('/api/health/arrs');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        checks: [
+          { name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:0', status: 'unauthorized' },
+          { name: 'radarr', kind: 'radarr', baseUrl: 'http://radarr:0', status: 'unreachable' },
+        ],
+      });
+      expect(sonarr.ping).toHaveBeenCalledTimes(1);
+      expect(radarr.ping).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns an empty checks array when no arr instance is configured', async () => {
+      const res = await createApp(makeCtx()).request('/api/health/arrs');
+
+      expect(await res.json()).toEqual({ checks: [] });
+    });
+  });
+
   describe('POST /api/acquire', () => {
     it('enqueues a manual acquire job for a known arr instance', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });

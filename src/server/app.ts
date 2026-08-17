@@ -824,6 +824,28 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
     app.get('/api/health/storage', (c) => c.json({ checks: probeStorage() }));
 
+    // Same idea for Settings → Arr instances. Nested guard rather than widening the block
+    // above: `requireClients` documents an invariant about being gated on at mount time,
+    // and only this route in here relies on it.
+    if (ctx.clients) {
+      app.get('/api/health/arrs', async (c) => {
+        const clients = requireClients(ctx);
+        // Concurrent, not sequential: this is one operator-facing page load, and four
+        // dead instances at 4s each would otherwise take 16s to answer.
+        const checks = await Promise.all(
+          requireConfig(ctx).arrs.map(async (arr) => {
+            const client = clients.get(arr.name);
+            // `applyConfig` builds `clients` straight from `config.arrs`, so a configured
+            // instance without one is a desync bug — reporting it as 'unreachable' would
+            // dress that up as an arr problem the operator can't fix.
+            if (!client) throw new Error(`no arr client for configured instance "${arr.name}"`);
+            return { name: arr.name, kind: arr.kind, baseUrl: arr.baseUrl, status: await client.ping() };
+          }),
+        );
+        return c.json({ checks });
+      });
+    }
+
     // Secrets are served as stored: this is a self-hosted dashboard whose operator owns
     // the config file anyway, and hiding a key on GET only works if the server merges it
     // back in on PUT, which made a rename indistinguishable from a lost credential.
