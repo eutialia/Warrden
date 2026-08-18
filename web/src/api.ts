@@ -164,13 +164,48 @@ export interface ArrInstance {
   apiKey: string;
 }
 
-export type Provider = 'openrouter' | 'openai' | 'anthropic';
+export type Provider = 'openrouter';
 
-/** The one model every LLM call-site runs on (`llm.model`). */
+/** Reasoning tiers, cheapest first, with 'none' switching reasoning off outright. Mirrors
+ * `EffortSchema` in `src/config/schema.ts`. */
+export type Effort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** The one model every LLM call-site runs on (`llm.model`). No `effort` means the request
+ * carries no reasoning field at all and the provider's own default stands, which on a
+ * default-on model still means it reasons. */
 export interface LlmModel {
   provider: Provider;
   model: string;
+  effort?: Effort;
 }
+
+/** One OpenRouter model as the picker needs it. Hand-copied from `CatalogModel` in
+ * `src/llm/catalog.ts`. `supportedEfforts` already has the literal "none" filtered out
+ * server-side. An empty array does NOT mean the model cannot reason: it also describes a
+ * model that reasons without offering tiers, which is what `reasoningCapable` disambiguates.
+ * Pricing is USD per token, as a decimal string. */
+export interface CatalogModel {
+  id: string;
+  name: string;
+  supportedEfforts: string[];
+  defaultEffort?: string;
+  /** Reasoning cannot be switched off, so there is no effort-less way to run the model. */
+  mandatoryReasoning: boolean;
+  /** Whether the model reasons at all. Distinguishes a model with no reasoning from one that
+   * reasons but offers no effort tiers, which an empty `supportedEfforts` cannot. */
+  reasoningCapable: boolean;
+  contextLength: number;
+  pricing: { prompt: string; completion: string };
+}
+
+/** `stale` marks a list served from the last good fetch because OpenRouter could not be
+ * reached this time. */
+export interface ModelCatalog {
+  models: CatalogModel[];
+  stale: boolean;
+  fetchedAt: number;
+}
+
 
 export interface SubtitleSite {
   baseUrl: string;
@@ -189,7 +224,7 @@ export interface Config {
   browser: { stepBudget: number; siteCooldownSeconds: number };
   llm: {
     model?: LlmModel;
-    keys: { openrouter?: string; openai?: string; anthropic?: string };
+    keys: { openrouter?: string };
   };
   reconcileIntervalMinutes: number;
   /** Days of event history to keep; 0 keeps everything. */
@@ -323,6 +358,12 @@ export function saveConfig(config: Config): Promise<SaveConfigResponse> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(config),
   });
+}
+
+/** `GET /api/llm/models`: the OpenRouter catalog, cached server-side. 502s when the
+ * upstream fetch fails and there is no cached copy to fall back on. */
+export function fetchLlmModels(): Promise<ModelCatalog> {
+  return fetchJson<ModelCatalog>('/api/llm/models');
 }
 
 export function postAcquire(input: {

@@ -14,10 +14,10 @@ import {
   type ArrKind,
   type Config,
   type LlmModel,
-  type Provider,
   type StorageCheck,
 } from '@/api';
 import { ArrHealth } from '@/components/ArrHealth';
+import { ModelPicker } from '@/components/ModelPicker';
 import { MountHealth } from '@/components/MountHealth';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
@@ -38,14 +38,6 @@ import { TONE_TEXT } from '@/lib/tone';
 import { cn, formatUsage } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
-
-/** The providers a model can run on. The same list backs the picker and the per-provider
- * key field, so a new provider is one entry, not three. */
-const PROVIDERS: { value: Provider; label: string }[] = [
-  { value: 'openrouter', label: 'OpenRouter' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-];
 
 /** Mirrors server `standardMounts` — web has no shared package with the backend. */
 const STANDARD_MOUNT_ROWS = [
@@ -182,17 +174,10 @@ export default function ConfigPage() {
     setDraft((prev) => (prev ? { ...prev, ...next } : prev));
   }
 
-  /** Field-level edit of `llm.model`, upserting: the provider Select is the one control that
-   * renders before a model exists, and choosing from nothing seeds an empty model id because
-   * the card only asks for a model once it knows where the model lives. Switching provider on
-   * a configured model keeps the id that was typed, since it is the operator's to rewrite,
-   * not ours to clear. */
-  function patchModel(next: Partial<LlmModel>): void {
-    setDraft((prev) =>
-      prev
-        ? { ...prev, llm: { ...prev.llm, model: { provider: 'openrouter', model: '', ...prev.llm.model, ...next } } }
-        : prev,
-    );
+  /** Model and reasoning effort are picked together, so `llm.model` is replaced whole
+   * rather than patched field by field. `undefined` clears it. */
+  function setModel(next: LlmModel | undefined): void {
+    setDraft((prev) => (prev ? { ...prev, llm: { ...prev.llm, model: next } } : prev));
   }
 
   async function handleSave(): Promise<void> {
@@ -229,16 +214,6 @@ export default function ConfigPage() {
       return;
     }
 
-    // A provider with no model id is an unfinished choice, not a decision to run without a
-    // model, the same rule as the half-filled instance above. Dropping it silently sent a
-    // green toast while the card snapped back to empty. "Clear the model" is the way out.
-    if (draft.llm.model && draft.llm.model.model.trim() === '') {
-      const message = 'AI model needs a model id. Fill it in or clear the model.';
-      setSaveError(message);
-      toast.error(message);
-      return;
-    }
-
     setSaving(true);
     setSaveError(null);
     try {
@@ -252,11 +227,9 @@ export default function ConfigPage() {
       // field is the operator's decision and goes up as typed, minus pasted whitespace;
       // an llm key field left empty is a key the operator deleted.
       const keys: Config['llm']['keys'] = {};
-      for (const { value: provider } of PROVIDERS) {
-        const untouched = draft.llm.keys[provider] === baseline.llm.keys[provider];
-        const chosen = (untouched ? current.llm.keys[provider] : draft.llm.keys[provider])?.trim();
-        if (chosen) keys[provider] = chosen;
-      }
+      const untouchedKey = draft.llm.keys.openrouter === baseline.llm.keys.openrouter;
+      const openrouter = (untouchedKey ? current.llm.keys.openrouter : draft.llm.keys.openrouter)?.trim();
+      if (openrouter) keys.openrouter = openrouter;
       const savedArrs = arrs
         .filter((a) => !isBlankArr(a))
         .map((a) => {
@@ -644,68 +617,41 @@ export default function ConfigPage() {
           </CardContent>
         </Card>
 
-        {/* AI model: provider, model id and that provider's key in one place */}
+        {/* AI model: the OpenRouter key and the model it runs, in one place */}
         <Card id="models" className="scroll-mt-20">
           <CardHeader>
             <CardTitle className="text-2xl">AI model</CardTitle>
             <CardDescription>
-              The one model every AI task runs on: release picking, subtitle search, archive mapping, and the rest. A
-              failing call is retried once before the task gives up.
+              The one model every AI task runs on, through OpenRouter: release picking, subtitle search, archive
+              mapping, and the rest. A failing call is retried once before the task gives up.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label className="text-xs">Provider</Label>
-                <Select value={model?.provider ?? ''} onValueChange={(v) => v && patchModel({ provider: v as Provider })}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Choose a provider" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PROVIDERS.map((p) => (
-                      <SelectItem key={p.value} value={p.value}>
-                        {p.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+            <div className="space-y-3">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs" htmlFor="llm-key">
+                    OpenRouter API key
+                  </Label>
+                  <Input
+                    id="llm-key"
+                    className="font-mono"
+                    value={draft.llm.keys.openrouter ?? ''}
+                    onChange={(e) => patch({ llm: { ...draft.llm, keys: { openrouter: e.target.value } } })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Needed to list models as well as to run them. Clear the field to delete the stored key.
+                  </p>
+                </div>
+                <ModelPicker value={model} onChange={setModel} />
               </div>
               {model ? (
-                <>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Model</Label>
-                    <Input
-                      value={model.model}
-                      placeholder="e.g. sonnet"
-                      onChange={(e) => patchModel({ model: e.target.value })}
-                    />
-                  </div>
-                  <div className="space-y-1.5 sm:col-span-2">
-                    <Label className="text-xs" htmlFor="llm-key">
-                      API key
-                    </Label>
-                    <Input
-                      id="llm-key"
-                      className="font-mono"
-                      value={draft.llm.keys[model.provider] ?? ''}
-                      onChange={(e) =>
-                        patch({ llm: { ...draft.llm, keys: { ...draft.llm.keys, [model.provider]: e.target.value } } })
-                      }
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Stored per provider: switching provider keeps the other keys. Clear the field to delete the
-                      stored key.
-                    </p>
-                  </div>
-                  <div className="sm:col-span-2">
-                    <Button variant="ghost" size="sm" onClick={() => patch({ llm: { ...draft.llm, model: undefined } })}>
-                      <Trash2 />
-                      Clear the model
-                    </Button>
-                  </div>
-                </>
+                <Button variant="ghost" size="sm" onClick={() => setModel(undefined)}>
+                  <Trash2 />
+                  Clear the model
+                </Button>
               ) : (
-                <p className="self-center text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   No model configured. Every AI task stays off until one is set.
                 </p>
               )}
