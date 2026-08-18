@@ -70,6 +70,7 @@ describe('config store', () => {
   it.each([
     { scenario: 'a blank model id', model: { provider: 'openrouter', model: '' } },
     { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
+    { scenario: 'a provider this build dropped for OpenRouter-only', model: { provider: 'openai', model: 'gpt-5' } },
   ])('degrades an unusable llm.model to unset at boot rather than failing to load: $scenario', ({ model }) => {
     // A config.json written by an older build must never stop the server from booting,
     // because the settings UI that would fix it is served by that same server. Unset is the
@@ -83,6 +84,7 @@ describe('config store', () => {
   it.each([
     { scenario: 'a blank model id', model: { provider: 'openrouter', model: '' } },
     { scenario: 'a provider this build no longer supports', model: { provider: 'claude-code', model: 'opus' } },
+    { scenario: 'a provider this build dropped for OpenRouter-only', model: { provider: 'openai', model: 'gpt-5' } },
   ])('rejects that same unusable llm.model everywhere except boot: $scenario', ({ model }) => {
     // The boot tolerance above is for a file already on disk. A caller handing us one now
     // (a save, a PUT) gets told, rather than watching its model vanish into "unset".
@@ -90,19 +92,46 @@ describe('config store', () => {
     expect(() => saveConfig(tmp(), { ...ConfigSchema.parse({}), llm: { keys: {}, model: model as never } })).toThrow(ConfigError);
   });
 
+  it.each(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const)(
+    'keeps llm.model.effort "%s" through a round-trip',
+    (effort) => {
+      const dir = tmp();
+      const cfg = loadConfig(dir);
+      cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort };
+      saveConfig(dir, cfg);
+      expect(loadConfig(dir).llm.model).toEqual({
+        provider: 'openrouter',
+        model: 'deepseek/deepseek-v4-flash-0731',
+        effort,
+      });
+    },
+  );
+
+  it('parses a model with no effort, so config.json files written before it existed stay valid', () => {
+    const cfg = ConfigSchema.parse({ llm: { model: { provider: 'openrouter', model: 'x' } } });
+    expect(cfg.llm.model).toEqual({ provider: 'openrouter', model: 'x' });
+    expect(cfg.llm.model?.effort).toBeUndefined();
+  });
+
+  it('rejects an effort level outside the six OpenRouter accepts', () => {
+    expect(ConfigSchema.safeParse({ llm: { model: { provider: 'openrouter', model: 'x', effort: 'ultra' } } }).success).toBe(
+      false,
+    );
+  });
+
   it('drops the legacy `fallback` model rather than failing to load', () => {
     // Same shape as the `profiles` case below: an unknown key is stripped, not an error,
     // so a config still carrying the removed fallback model keeps its primary model.
     const cfg = ConfigSchema.parse({
-      llm: { model: { provider: 'anthropic', model: 'x', fallback: { provider: 'openai', model: 'y' } } },
+      llm: { model: { provider: 'openrouter', model: 'x', fallback: { provider: 'openrouter', model: 'y' } } },
     });
-    expect(cfg.llm.model).toEqual({ provider: 'anthropic', model: 'x' });
+    expect(cfg.llm.model).toEqual({ provider: 'openrouter', model: 'x' });
   });
 
   it('drops a legacy per-callsite `profiles` block rather than failing to load', () => {
     // Old config.json files carried `llm.activeProfile` / `llm.profiles`. Zod strips
     // unknown keys, so they degrade to "no model configured". No migration code.
-    const cfg = ConfigSchema.parse({ llm: { activeProfile: 'prod', profiles: { prod: { 'release-pick': { provider: 'openai', model: 'x' } } } } });
+    const cfg = ConfigSchema.parse({ llm: { activeProfile: 'prod', profiles: { prod: { 'release-pick': { provider: 'openrouter', model: 'x' } } } } });
     expect(cfg.llm).toEqual({ keys: {} });
   });
 

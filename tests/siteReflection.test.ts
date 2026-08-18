@@ -52,7 +52,7 @@ function reflection(overrides?: Partial<{ verdict: SiteVerdict; reason: string; 
  * generates anything. */
 function reflectCtx(overrides?: Partial<AppContext>): AppContext {
   const ctx = makeCtx(overrides);
-  ctx.config.llm.model = { provider: 'openai', model: 'test-model' };
+  ctx.config.llm.model = { provider: 'openrouter', model: 'test-model' };
   return ctx;
 }
 

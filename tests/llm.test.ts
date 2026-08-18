@@ -1,3 +1,4 @@
+import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { Config } from '../src/config/schema.js';
@@ -90,7 +91,7 @@ describe('withRetry', () => {
  * the mocked `generateObject`. */
 function keyedConfig(): Config {
   const cfg = baseConfig();
-  cfg.llm.keys.anthropic = 'test-key';
+  cfg.llm.keys.openrouter = 'test-key';
   return cfg;
 }
 
@@ -106,25 +107,22 @@ describe('AiSdkGenerator', () => {
     expect(generateObjectMock).not.toHaveBeenCalled();
   });
 
-  it.each(['openrouter', 'openai', 'anthropic'] as const)(
-    'throws LlmError without calling generateObject when the %s API key is missing',
-    async (provider) => {
-      generateObjectMock.mockReset();
-      const cfg = baseConfig();
-      cfg.llm.model = { provider, model: 'some-model' };
-      const generator = new AiSdkGenerator(() => cfg);
-      await expect(
-        generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
-      ).rejects.toThrow(/Missing API key/);
-      expect(generateObjectMock).not.toHaveBeenCalled();
-    },
-  );
+  it('throws LlmError without calling generateObject when the openrouter API key is missing', async () => {
+    generateObjectMock.mockReset();
+    const cfg = baseConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'some-model' };
+    const generator = new AiSdkGenerator(() => cfg);
+    await expect(
+      generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' }),
+    ).rejects.toThrow(/Missing API key/);
+    expect(generateObjectMock).not.toHaveBeenCalled();
+  });
 
   it('calls generateObject once when the first attempt succeeds', async () => {
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({ object: { ok: true } });
     const cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
     const generator = new AiSdkGenerator(() => cfg);
     const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
     expect(result).toEqual({ ok: true });
@@ -135,7 +133,7 @@ describe('AiSdkGenerator', () => {
     generateObjectMock.mockReset();
     generateObjectMock.mockRejectedValueOnce(new Error('rate limited')).mockResolvedValue({ object: { ok: true } });
     const cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
     const generator = new AiSdkGenerator(() => cfg);
     const result = await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
     expect(result).toEqual({ ok: true });
@@ -152,7 +150,7 @@ describe('AiSdkGenerator', () => {
     const last = new Error('down');
     generateObjectMock.mockRejectedValueOnce(first).mockRejectedValueOnce(last);
     const cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
     const generator = new AiSdkGenerator(() => cfg);
     expect.assertions(5);
     try {
@@ -170,7 +168,7 @@ describe('AiSdkGenerator', () => {
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({ object: { ok: true } });
     let cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'first-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'first-model' };
     const generator = new AiSdkGenerator(() => cfg);
 
     await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
@@ -179,11 +177,103 @@ describe('AiSdkGenerator', () => {
     // mutating the same object in place would pass even against a captured-at-construction
     // snapshot, and so would prove nothing.
     cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'second-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'second-model' };
     await generator.generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
 
     const modelIds = generateObjectMock.mock.calls.map(([opts]) => (opts as { model: { modelId: string } }).model.modelId);
     expect(modelIds).toEqual(['first-model', 'second-model']);
+  });
+});
+
+/** The recorded generateObject call: the OpenRouter chat model keeps the settings it was
+ * built with on the instance, so what will end up in the request body is inspectable here
+ * without a network round trip. */
+function recordedCall(index = 0): {
+  settings: { extraBody?: { reasoning?: { effort?: string; enabled?: boolean } } };
+  providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
+} {
+  const [opts] = generateObjectMock.mock.calls[index] as [
+    {
+      model: { settings: { extraBody?: { reasoning?: { effort?: string; enabled?: boolean } } } };
+      providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
+    },
+  ];
+  return { settings: opts.model.settings, providerOptions: opts.providerOptions };
+}
+
+describe('AiSdkGenerator reasoning effort', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  async function generateWith(model: Config['llm']['model'], promptCache = false): Promise<void> {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({ object: { ok: true } });
+    const cfg = keyedConfig();
+    cfg.llm.model = model;
+    await new AiSdkGenerator(() => cfg).generate({
+      callsite: 'site-search',
+      schema,
+      system: 's',
+      prompt: 'p',
+      promptCache,
+    });
+  }
+
+  // `max` is the one that matters most: the provider package's typed reasoning option omits
+  // it, while the live API accepts it, which is why effort goes through extraBody.
+  it.each(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const)(
+    'sends effort "%s" through unchanged as an extraBody reasoning field',
+    async (effort) => {
+      await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort });
+      expect(recordedCall().settings.extraBody).toEqual({ reasoning: { effort } });
+    },
+  );
+
+  it('sends no reasoning key at all when no effort is configured', async () => {
+    await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731' });
+    expect(recordedCall().settings.extraBody).toBeUndefined();
+  });
+
+  // Omitting the field leaves a default-on model thinking, so 'none' has to say so out loud.
+  it('sends reasoning enabled false for effort "none"', async () => {
+    await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort: 'none' });
+    expect(recordedCall().settings.extraBody).toEqual({ reasoning: { enabled: false } });
+  });
+
+  it('keeps the prompt-cache options and the reasoning body together on one call', async () => {
+    await generateWith({ provider: 'openrouter', model: 'anthropic/claude-opus-5', effort: 'max' }, true);
+    const call = recordedCall();
+    expect(call.settings.extraBody).toEqual({ reasoning: { effort: 'max' } });
+    expect(call.providerOptions).toEqual({ openrouter: { cacheControl: { type: 'ephemeral' } } });
+  });
+});
+
+describe('OpenRouter request body', () => {
+  it('carries reasoning from extraBody and cache_control from call providerOptions in the same body', async () => {
+    // Pins the escape hatch this build relies on: extraBody is merged into the request body
+    // verbatim, and call-level providerOptions are merged on top of it rather than replacing
+    // it. A provider upgrade that changes either merge order breaks here, not in production.
+    let body: Record<string, unknown> = {};
+    const fetchStub: typeof fetch = async (_url, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          id: 'resp_1',
+          choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'hi' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const model = createOpenRouter({ apiKey: 'k', fetch: fetchStub })('deepseek/deepseek-v4-flash-0731', {
+      extraBody: { reasoning: { effort: 'max' } },
+    });
+    await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'p' }] }],
+      providerOptions: { openrouter: { cacheControl: { type: 'ephemeral' } } },
+    });
+
+    expect(body.reasoning).toEqual({ effort: 'max' });
+    expect(body.cache_control).toEqual({ type: 'ephemeral' });
   });
 });
 
@@ -192,7 +282,7 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
     const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock
       .mockRejectedValueOnce(new Error('rate limited'))
@@ -230,7 +320,7 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
     const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockRejectedValue(new Error('down'));
 
@@ -253,7 +343,7 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockReset();
     const db = freshDb();
     const cfg = keyedConfig();
-    cfg.llm.model = { provider: 'anthropic', model: 'primary-model' };
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
     const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
     generateObjectMock.mockResolvedValueOnce({ object: { pick: 'a' } });
     await gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p' });

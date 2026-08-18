@@ -1,13 +1,11 @@
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
 import { generateObject } from 'ai';
 import type { z } from 'zod';
-import type { Config, Provider } from '../config/schema.js';
+import type { Config, Effort, Provider } from '../config/schema.js';
 import { NOOP_HANDLE, NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
-import { planPromptCache } from './promptCache.js';
+import { type PromptCachePlan, planPromptCache } from './promptCache.js';
 
 export interface GenerateOpts<T> {
   callsite: string; // e.g. 'release-pick'
@@ -15,9 +13,8 @@ export interface GenerateOpts<T> {
   system: string;
   prompt: string;
   /**
-   * Opt into provider-aware prompt caching for multi-step loops (site-search) where the
-   * system prefix is stable and the user half grows. Wiring differs by provider (see
-   * `planPromptCache`) — not "Anthropic-only, ignore elsewhere".
+   * Opt into prompt caching for multi-step loops (site-search) where the system prefix is
+   * stable and the user half grows. See `planPromptCache` for what that means per route.
    */
   promptCache?: boolean;
   /** Opt into tracing this call: written under `jobId`, nested under `parentSeq` if given. */
@@ -43,6 +40,7 @@ export class LlmError extends Error {
 export interface ModelRef {
   provider: Provider;
   model: string;
+  effort?: Effort;
 }
 
 /**
@@ -90,31 +88,59 @@ export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Builds the AI SDK language model for a resolved provider/model, keyed from `cfg.llm.keys`. */
+/**
+ * Builds the AI SDK language model for a resolved model, keyed from `cfg.llm.keys`.
+ *
+ * Reasoning effort rides on `extraBody` rather than the provider's typed
+ * `providerOptions.openrouter.reasoning`: that type omits `'max'`, which the live API accepts
+ * on 40+ models. `extraBody` is merged into the request body verbatim (and before call-level
+ * providerOptions), so prompt-cache options set per call survive alongside it.
+ */
 function createModel(cfg: Config, ref: ModelRef, callsite: string): LanguageModel {
-  switch (ref.provider) {
-    case 'openrouter':
-      return createOpenRouter({ apiKey: requireKey(cfg, 'openrouter', callsite) })(ref.model);
-    case 'openai':
-      return createOpenAI({ apiKey: requireKey(cfg, 'openai', callsite) })(ref.model);
-    case 'anthropic':
-      return createAnthropic({ apiKey: requireKey(cfg, 'anthropic', callsite) })(ref.model);
-    default: {
-      // Exhaustiveness check: fails to compile if `Provider` grows a case not handled above.
-      const unreachable: never = ref.provider;
-      throw new LlmError(`Unknown LLM provider "${String(unreachable)}"`, callsite);
-    }
+  const apiKey = cfg.llm.keys.openrouter;
+  if (!apiKey) {
+    // Keys come from `cfg.llm.keys` only (not the provider SDK's own env-var fallback) so
+    // config.json stays the single source of truth for credentials.
+    throw new LlmError('Missing API key for provider "openrouter" (llm.keys.openrouter)', callsite);
   }
+  return createOpenRouter({ apiKey })(ref.model, reasoningSettings(ref.effort));
 }
 
-// Keys come from `cfg.llm.keys` only (not provider SDKs' own env-var fallback) so config.json
-// stays the single source of truth for credentials.
-function requireKey(cfg: Config, provider: 'openrouter' | 'openai' | 'anthropic', callsite: string): string {
-  const key = cfg.llm.keys[provider];
-  if (!key) {
-    throw new LlmError(`Missing API key for provider "${provider}" (llm.keys.${provider})`, callsite);
-  }
-  return key;
+/**
+ * Omitting `reasoning` is not the same as switching reasoning off: a model whose reasoning is
+ * enabled by default still thinks (and bills for it) when the field is absent, so 'none' has
+ * to send the explicit `enabled: false` toggle instead.
+ */
+function reasoningSettings(effort?: Effort): { extraBody?: { reasoning: Record<string, unknown> } } {
+  if (effort === undefined) return {};
+  if (effort === 'none') return { extraBody: { reasoning: { enabled: false } } };
+  return { extraBody: { reasoning: { effort } } };
+}
+
+/**
+ * The `generateObject` options for one call, model aside.
+ *
+ * The system half rides on `instructions`, not a `role: 'system'` entry in `messages`: AI SDK
+ * v7 validates the prompt client-side and rejects that shape before any request is sent.
+ * `instructions` still takes a full `SystemModelMessage`, so the prompt-cache breakpoint that
+ * used to hang off the system message survives the move.
+ *
+ * Extracted from `attemptOnce` so a test can hand the real SDK the exact shape production
+ * sends. Tests that mock `generateObject` skip that validation entirely and would pass on a
+ * prompt the SDK refuses.
+ */
+export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCachePlan) {
+  return {
+    schema: opts.schema,
+    instructions: cache.systemProviderOptions
+      ? { role: 'system' as const, content: opts.system, providerOptions: cache.systemProviderOptions }
+      : opts.system,
+    messages: [{ role: 'user' as const, content: opts.prompt }],
+    ...(cache.callProviderOptions ? { providerOptions: cache.callProviderOptions } : {}),
+    // Our own `withRetry` owns the retry count; the AI SDK's default internal retries would
+    // otherwise multiply each attempt into up to 3 provider calls of its own.
+    maxRetries: 0,
+  };
 }
 
 /** `StructuredGenerator` backed by the Vercel AI SDK, running every call-site on the one
@@ -166,30 +192,8 @@ export class AiSdkGenerator implements StructuredGenerator {
       : NOOP_HANDLE;
     try {
       const model = createModel(this.getCfg(), ref, opts.callsite);
-      const cache = planPromptCache(opts.promptCache === true, ref.provider, `warrden:${opts.callsite}`);
-      // System-as-message: stable prefix for automatic caches (OpenAI/etc.) and a place
-      // to hang explicit breakpoints (Anthropic / OpenRouter→Claude). User half varies.
-      const result = await generateObject({
-        model,
-        schema: opts.schema,
-        messages: [
-          {
-            role: 'system',
-            content: opts.system,
-            ...(cache.systemProviderOptions
-              ? { providerOptions: cache.systemProviderOptions }
-              : {}),
-          },
-          { role: 'user', content: opts.prompt },
-        ],
-        ...(cache.callProviderOptions
-          ? { providerOptions: cache.callProviderOptions }
-          : {}),
-        // Our own `withRetry` owns the retry count; the AI SDK's default internal
-        // retries would otherwise multiply each attempt into up to 3 provider calls
-        // of its own.
-        maxRetries: 0,
-      });
+      const cache = planPromptCache(opts.promptCache === true);
+      const result = await generateObject({ model, ...buildGenerateOptions(opts, cache) });
       attempt.end('ok', () => ({
         provider: ref.provider,
         model: ref.model,

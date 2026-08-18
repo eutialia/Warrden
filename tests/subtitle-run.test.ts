@@ -503,7 +503,7 @@ describe('runSubtitleJob', () => {
         { name: 'b', baseUrl: 'https://b.test' },
       ],
     });
-    fx.ctx.config.llm.model = { provider: 'openai', model: 'test-model' };
+    fx.ctx.config.llm.model = { provider: 'openrouter', model: 'test-model' };
     // Only site b's reflection reaches the model — site a's fails before any generate call.
     fx.ctx.llm = new FakeGenerator([{ verdict: 'usable', reason: 'ok', ops: [] }]);
     // A directory sitting where site a's notes file belongs: loadKnowledge's readFileSync

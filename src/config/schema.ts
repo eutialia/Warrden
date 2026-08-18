@@ -1,9 +1,15 @@
 import { z } from 'zod';
 
-const ProviderSchema = z.enum(['openrouter', 'openai', 'anthropic']);
+const ProviderSchema = z.enum(['openrouter']);
+// Optional on a model: not every model accepts every level, and leaving it unset means the
+// request carries no reasoning field at all, so the model's own default stands. That default
+// is not "no thinking" on models that reason by default, which is what 'none' is for: it
+// sends an explicit off switch rather than omitting the field.
+const EffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const LlmModelSchema = z.object({
   provider: ProviderSchema,
   model: z.string().min(1),
+  effort: EffortSchema.optional(),
 });
 const ArrInstanceSchema = z.object({
   name: z.string().min(1),
@@ -24,8 +30,6 @@ export type SubtitleSiteConfig = z.infer<typeof SubtitleSiteSchema>;
 const LlmKeysSchema = z
   .object({
     openrouter: z.string().min(1).optional(),
-    openai: z.string().min(1).optional(),
-    anthropic: z.string().min(1).optional(),
   })
   .default(() => ({}));
 // The one model every call-site runs on. Optional: a fresh install has no provider
@@ -152,3 +156,4 @@ export const BootConfigSchema = ConfigSchema.safeExtend({
 export type Config = z.infer<typeof ConfigSchema>;
 export type ArrInstance = z.infer<typeof ArrInstanceSchema>;
 export type Provider = z.infer<typeof ProviderSchema>;
+export type Effort = z.infer<typeof EffortSchema>;

@@ -18,7 +18,8 @@ import { synthesizePolicyPrompt } from './policy.js';
 // The pick-only fields are nullable instead; the superRefine enforces the pairing.
 // `.nullable()` WITHOUT `.default()` on the three pick-only fields, deliberately: `.default()`
 // drops a field from the JSON-schema `required` array and adds a `default` keyword, which
-// OpenAI's json_schema strict mode (the default under @ai-sdk/openai) rejects outright — and
+// OpenAI-family json_schema strict mode rejects outright (OpenRouter forwards the schema to
+// the upstream route, so this still bites on those models), and
 // even where it's accepted, it stops telling the provider the field is mandatory once it
 // commits to `decision: "pick"`. Staying `required` (just nullable) keeps the shape valid for
 // strict-mode providers and keeps the schema honest; `superRefine` below still enforces the

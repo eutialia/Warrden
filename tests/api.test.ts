@@ -270,8 +270,6 @@ describe('dashboard api', () => {
           },
         });
         ctx.config.llm.keys.openrouter = 'sk-or-secret';
-        ctx.config.llm.keys.anthropic = 'sk-an-secret';
-        // openai is intentionally left unset
         return ctx;
       }
 
@@ -287,35 +285,35 @@ describe('dashboard api', () => {
           },
         },
         {
-          label: 'omitting one stored key deletes just that one',
+          label: 'omitting the stored llm key deletes it without touching the arr keys',
           mutate: (body: any) => {
             delete body.llm.keys.openrouter;
           },
           expectedStatus: 200,
           verify: (ctx: AppContext) => {
             expect(ctx.config.llm.keys.openrouter).toBeUndefined();
-            expect(ctx.config.llm.keys.anthropic).toBe('sk-an-secret');
+            expect(ctx.config.arrs.map((a) => a.apiKey)).toEqual(['sonarr-key', 'radarr-key']);
           },
         },
         {
-          label: 'rotating one key leaves the others alone',
+          label: 'rotating the llm key leaves the arr keys alone',
           mutate: (body: any) => {
             body.llm.keys.openrouter = 'sk-or-rotated';
           },
           expectedStatus: 200,
           verify: (ctx: AppContext) => {
             expect(ctx.config.llm.keys.openrouter).toBe('sk-or-rotated');
-            expect(ctx.config.llm.keys.anthropic).toBe('sk-an-secret');
+            expect(ctx.config.arrs.map((a) => a.apiKey)).toEqual(['sonarr-key', 'radarr-key']);
           },
         },
         {
-          label: 'a key that was never set stays unset through a round trip',
+          label: 'a stored key survives a verbatim round trip, so GET output is safe to PUT back',
           mutate: () => {
             /* no-op: PUT the GET response back verbatim */
           },
           expectedStatus: 200,
           verify: (ctx: AppContext) => {
-            expect(ctx.config.llm.keys.openai).toBeUndefined();
+            expect(ctx.config.llm.keys.openrouter).toBe('sk-or-secret');
           },
         },
         {
