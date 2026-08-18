@@ -38,11 +38,12 @@ ENV WARRDEN_DATA_DIR=/data
 # the per-user cache dir, so the `node` runtime user can find them at launch.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+# Split from the build outputs below on purpose. A COPY's cache key is the content it
+# copies, so these two only change when the dependency tree does, which keeps the expensive
+# tool install underneath them cached across ordinary source edits. Putting the build
+# outputs here too would invalidate that layer on every commit.
 COPY --from=builder --chown=node:node /app/package.json ./package.json
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
-COPY --from=builder --chown=node:node /app/dist ./dist
-COPY --from=builder --chown=node:node /app/web/dist ./web/dist
-COPY --from=builder --chown=node:node /app/seeds ./seeds
 
 # Media tools for the subtitle pipeline, which shells out to these at runtime
 # (src/media/tools.ts): ffmpeg/ffprobe (probing + embedded-track extraction) and the
@@ -82,6 +83,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Storage health panel would lie. Docker creates the mount point when you bind-mount:
 #   -v host/Series:/tv  -v host/Anime:/anime  -v host/Movies:/movies  -v host/Downloads:/downloads
 RUN mkdir -p /data && chown node:node /data
+
+# Last, so a source-only rebuild redoes just these three layers. `npx playwright` above
+# needs node_modules already present to resolve the pinned version rather than fetching a
+# fresh one from the registry, which is why the dependency copies stay above it.
+COPY --from=builder --chown=node:node /app/dist ./dist
+COPY --from=builder --chown=node:node /app/web/dist ./web/dist
+COPY --from=builder --chown=node:node /app/seeds ./seeds
+
 USER node
 
 VOLUME /data
