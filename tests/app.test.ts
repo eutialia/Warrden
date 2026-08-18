@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
@@ -959,6 +959,63 @@ describe('app', () => {
       ctx.config.debug.enabled = true;
       const res = (await (await createApp(ctx).request('/api/overview')).json()) as { debugEnabled: boolean };
       expect(res.debugEnabled).toBe(true);
+    });
+  });
+
+  describe('GET /api/llm/models', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('returns the projected catalog shape', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>(async () =>
+          new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: 'openai/gpt-5',
+                  name: 'GPT-5',
+                  context_length: 128_000,
+                  pricing: { prompt: '0.000001', completion: '0.000002' },
+                  top_provider: { context_length: 128_000 },
+                  reasoning: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        ),
+      );
+      const res = await createApp(makeCtx()).request('/api/llm/models');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { models: unknown[]; stale: boolean; fetchedAt: number };
+      expect(body.stale).toBe(false);
+      expect(typeof body.fetchedAt).toBe('number');
+      expect(body.models).toEqual([
+        {
+          id: 'openai/gpt-5',
+          name: 'GPT-5',
+          supportedEfforts: [],
+          mandatoryReasoning: false,
+          reasoningCapable: false,
+          contextLength: 128_000,
+          pricing: { prompt: '0.000001', completion: '0.000002' },
+        },
+      ]);
+    });
+
+    it('404s when ctx.config is absent', async () => {
+      const res = await createApp({}).request('/api/llm/models');
+      expect(res.status).toBe(404);
+    });
+
+    it('responds 502 with the upstream error when the fetch fails and nothing is cached', async () => {
+      vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response('down', { status: 500 })));
+      const res = await createApp(makeCtx()).request('/api/llm/models');
+      expect(res.status).toBe(502);
+      expect((await res.json()) as { error: string }).toMatchObject({ error: expect.any(String) });
     });
   });
 });

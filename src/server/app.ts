@@ -33,8 +33,10 @@ import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '
 import { SubtitleRuns } from '../db/subtitleRuns.js';
 import { TraceEntries } from '../db/traceEntries.js';
 import type { TargetKind } from '../jobs/queue.js';
+import { ModelCatalog } from '../llm/catalog.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
+import { errorMessage } from '../util/errors.js';
 import { cachedStorage, probeStorage } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
@@ -713,6 +715,22 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     app.get('/api/overview', (c) =>
       c.json({ ...overview.counts(), storage: cachedStorage(), debugEnabled: ctx.config?.debug.enabled ?? false }),
     );
+  }
+
+  if (ctx.config) {
+    // One catalog per `createApp()` call (like `attentionItems`/`managedObjects` below),
+    // not per request, since its whole point is an in-memory cache that survives across
+    // requests to this app instance. `requireConfig(ctx)` (not a value captured here) so
+    // a key added via `PUT /api/config` is picked up on the very next fetch.
+    const catalog = new ModelCatalog(() => requireConfig(ctx));
+
+    app.get('/api/llm/models', async (c) => {
+      try {
+        return c.json(await catalog.list());
+      } catch (err) {
+        return c.json({ error: errorMessage(err) }, 502);
+      }
+    });
   }
 
   if (ctx.config && ctx.dataDir) {
