@@ -82,6 +82,36 @@
     --color-background: var(--background);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
+    /* Motion. One decelerating curve for every surface that opens. A panel should
+       arrive quickly and settle slowly; a linear or symmetric ease reads as mechanical,
+       which is the difference between a sheet that feels thrown and one that feels
+       placed. Opening is slower than closing on purpose: arriving is the part worth
+       watching, leaving is not. */
+    --ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
+    --animate-reveal: reveal 240ms var(--ease-panel);
+    --animate-conceal: conceal 180ms var(--ease-panel);
+
+    @keyframes reveal {
+        from {
+            height: 0;
+            opacity: 0;
+        }
+        to {
+            height: var(--collapsible-panel-height);
+            opacity: 1;
+        }
+    }
+    @keyframes conceal {
+        from {
+            height: var(--collapsible-panel-height);
+            opacity: 1;
+        }
+        to {
+            height: 0;
+            opacity: 0;
+        }
+    }
+
     --radius-lg: var(--radius);
     --radius-xl: calc(var(--radius) * 1.4);
     --radius-2xl: calc(var(--radius) * 1.8);
