@@ -108,6 +108,20 @@ export function acquireOutcomeTone(outcome: AcquireStatus): Tone {
   return outcome === 'grabbed' ? 'success' : 'warning';
 }
 
+/** Pack / multi / single as short sentence-case copy for release facts. */
+export function releaseShapeLabel(shape: 'pack' | 'multi' | 'single' | null | undefined): string {
+  switch (shape) {
+    case 'pack':
+      return 'Season pack';
+    case 'multi':
+      return 'Multi-episode';
+    case 'single':
+      return 'Single episode';
+    default:
+      return '—';
+  }
+}
+
 export function targetKindLabel(kind: TargetKind): string {
   return kind === 'movie' ? 'Movie' : 'Series';
 }

@@ -1,14 +1,21 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowLeft, FileCheck2 } from 'lucide-react';
+import { ArrowLeft, Bug, FileCheck2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   apiErrorMessage,
   fetchJob,
   postAcquire,
+  type AcquireRecordDetail,
+  type AttentionItem,
+  type Job,
   type JobDetailResponse,
+  type JobStatus,
+  type PickedRelease,
+  type PlacedFile,
   type PlacedFileKind,
+  type RelatedJob,
   type SubtitleRunRow,
   type TranscriptEntry,
 } from '@/api';
@@ -25,12 +32,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { jobDuration, jobTitle } from '@/lib/jobs';
-import { acquireOutcomeLabel, subtitleRunLabel, subtitleRunTone, targetKindLabel } from '@/lib/labels';
+import {
+  acquireOutcomeLabel,
+  pipelineLabel,
+  releaseShapeLabel,
+  siteLabel,
+  subtitleRunLabel,
+  subtitleRunTone,
+  targetKindLabel,
+} from '@/lib/labels';
 import { TONE_SOLID, TONE_TEXT } from '@/lib/tone';
-import { cn, formatRelativeTime } from '@/lib/utils';
+import { cn, formatRelativeTime, formatReleaseSize } from '@/lib/utils';
 
-// Same idea as ManagedObjects.tsx's own `KIND_LABEL` — a raw `PlacedFileKind` reads fine
-// in a log line but not as dashboard copy.
 const PLACED_FILE_KIND_LABEL: Record<PlacedFileKind, string> = {
   audio: 'Audio',
   subtitle: 'Subtitle',
@@ -157,6 +170,11 @@ export default function JobDetail() {
     }
   }
 
+  const sortedAcquireRecords = useMemo(
+    () => (data ? sortAcquireRecords(data.acquireRecords) : []),
+    [data],
+  );
+
   if (error) {
     return (
       <div className="space-y-4">
@@ -176,8 +194,11 @@ export default function JobDetail() {
     );
   }
 
-  const { job, acquireRecord, acquireOutcome, placedFiles, subtitleRuns } = data;
-  const candidateCount = candidatesConsidered(acquireRecord?.candidates_json);
+  const { job, acquireOutcome, relatedJobs, attention, placedFiles, subtitleRuns } = data;
+  const source = payloadString(job.payload.source);
+  const hint = payloadString(job.payload.hint);
+  const showError = Boolean(job.error) && (job.status === 'failed' || job.status === 'running');
+  const showFinished = job.status === 'done' || job.status === 'failed';
 
   return (
     // The back link sits above the stack, not inside it: as a section it would put a
@@ -186,118 +207,321 @@ export default function JobDetail() {
       <BackLink />
 
       <SectionStack>
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex flex-wrap items-center gap-2 text-xl">
-            <span>{jobTitle(job)}</span>
-            <PipelineBadge pipeline={job.pipeline} />
-            <StatusBadge status={job.status} />
-            <AcquireOutcomeBadge outcome={acquireOutcome} />
-          </CardTitle>
-          {job.pipeline === 'acquire' && (
-            <CardAction>
-              <Button variant="outline" size="sm" disabled={repicking} onClick={() => void handleRepick()}>
-                {repicking ? 'Queuing…' : 'Pick a different release'}
-              </Button>
-            </CardAction>
-          )}
-        </CardHeader>
-        <CardContent>
-          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-            <Fact label="Instance">{job.arr_instance}</Fact>
-            <Fact label="Target">{targetKindLabel(job.target_kind)}</Fact>
-            <Fact label="Job">#{job.id}</Fact>
-            <Fact label="Attempts">{job.attempts}</Fact>
-            <Fact label="Started">
-              <Tooltip>
-                <TooltipTrigger render={<span>{formatRelativeTime(job.created_at)}</span>} />
-                <TooltipContent>{new Date(job.created_at).toLocaleString()}</TooltipContent>
-              </Tooltip>
-            </Fact>
-            <Fact label="Took">{jobDuration(job) ?? '—'}</Fact>
-          </dl>
-          {job.error && (
-            <p className="mt-4 rounded-lg border border-destructive-border bg-destructive-muted p-3 text-sm text-destructive-foreground">
-              {job.error}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {job.pipeline === 'acquire' ? (
         <Card>
           <CardHeader>
-            <CardTitle>Release pick</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {!acquireRecord && <p className="text-sm text-muted-foreground">No pick record for this job yet.</p>}
-            {acquireRecord && (
-              <>
-                <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-                  <Fact label="Outcome">
-                    {acquireRecord.status ? acquireOutcomeLabel(acquireRecord.status) : '—'}
-                  </Fact>
-                  <Fact label="Candidates considered">{candidateCount ?? '—'}</Fact>
-                  <Fact label="Release group">{acquireRecord.release_group ?? '—'}</Fact>
-                </dl>
-                <div>
-                  <p className="mb-2 text-xs text-muted-foreground">Why this release</p>
-                  <p className="border-l pl-3 text-sm leading-relaxed whitespace-pre-wrap">
-                    {acquireRecord.reasoning ?? 'No reasoning recorded.'}
-                  </p>
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        // Ingest and subtitle both place library sidecars; acquire does not.
-        <Card>
-          <CardHeader>
-            <CardTitle>Files placed</CardTitle>
-            {placedFiles.length > 0 && (
+            <CardTitle className="flex flex-wrap items-center gap-2 text-xl">
+              <span>{jobTitle(job)}</span>
+              <PipelineBadge pipeline={job.pipeline} />
+              <StatusBadge status={job.status} />
+              <AcquireOutcomeBadge outcome={acquireOutcome} />
+            </CardTitle>
+            {job.pipeline === 'acquire' && (
               <CardAction>
-                <Badge variant="outline" className="text-muted-foreground">
-                  {placedFiles.length}
-                </Badge>
+                <Button variant="outline" size="sm" disabled={repicking} onClick={() => void handleRepick()}>
+                  {repicking ? 'Queuing…' : 'Pick a different release'}
+                </Button>
               </CardAction>
             )}
           </CardHeader>
-          <CardContent className="space-y-2">
-            {placedFiles.length === 0 && (
-              <p className="text-sm text-muted-foreground">No files placed for this job.</p>
-            )}
-            {placedFiles.map((f) => (
-              <div key={f.id} className="space-y-1.5 border-t pt-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <FileCheck2 className="size-4 text-muted-foreground" />
-                  <Badge variant="outline" className="text-muted-foreground">
-                    {PLACED_FILE_KIND_LABEL[f.kind]}
-                  </Badge>
-                  {typeof f.data.matchedBy === 'string' && <ToneBadge tone="neutral">{f.data.matchedBy}</ToneBadge>}
-                </div>
-                <code className="block text-xs break-all">{f.placed_path}</code>
-                <code className="block text-xs break-all text-muted-foreground">from {f.source_path}</code>
+          <CardContent>
+            <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+              <Fact label="Instance">{job.arr_instance}</Fact>
+              <Fact label="Target">{targetKindLabel(job.target_kind)}</Fact>
+              <Fact label="Job">#{job.id}</Fact>
+              <Fact label="Attempts">{job.attempts}</Fact>
+              <Fact label="Started">
+                <Tooltip>
+                  <TooltipTrigger render={<span>{formatRelativeTime(job.created_at)}</span>} />
+                  <TooltipContent>{new Date(job.created_at).toLocaleString()}</TooltipContent>
+                </Tooltip>
+              </Fact>
+              <Fact label="Took">{jobDuration(job) ?? '—'}</Fact>
+              <Fact label="Finished">
+                {showFinished ? (
+                  <Tooltip>
+                    <TooltipTrigger render={<span>{formatRelativeTime(job.updated_at)}</span>} />
+                    <TooltipContent>{new Date(job.updated_at).toLocaleString()}</TooltipContent>
+                  </Tooltip>
+                ) : (
+                  '—'
+                )}
+              </Fact>
+              {source && <Fact label="Source">{source}</Fact>}
+            </dl>
+            {hint && (
+              <div className="mt-4">
+                <p className="mb-2 text-xs text-muted-foreground">Hint</p>
+                <p className="border-l pl-3 text-sm leading-relaxed whitespace-pre-wrap">{hint}</p>
               </div>
-            ))}
+            )}
+            {showError && job.error && (
+              <p className="mt-4 rounded-lg border border-destructive-border bg-destructive-muted p-3 text-sm text-destructive-foreground">
+                {job.error}
+              </p>
+            )}
+            <div className="mt-4">
+              <Button variant="ghost" size="sm" className="-ml-2" render={<Link to={`/debug/${job.id}`} />}>
+                <Bug />
+                Debug trace
+              </Button>
+            </div>
           </CardContent>
         </Card>
-      )}
 
-      {subtitleRuns && subtitleRuns.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Subtitle site runs</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {subtitleRuns.map((run) => (
-              <SubtitleRunCard key={run.id} run={run} />
-            ))}
-          </CardContent>
-        </Card>
-      )}
+        {relatedJobs.length > 0 && <RelatedJobsCard jobs={relatedJobs} />}
+
+        {attention.length > 0 && <AttentionCard items={attention} />}
+
+        {job.pipeline === 'acquire' ? (
+          sortedAcquireRecords.length === 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Release pick</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">No pick record for this job yet.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            sortedAcquireRecords.map((record) => <ReleasePickCard key={record.id} record={record} />)
+          )
+        ) : (
+          <PlacedFilesCard job={job} placedFiles={placedFiles} />
+        )}
+
+        {job.pipeline === 'subtitle' && <SubtitleRunsCard runs={subtitleRuns ?? []} />}
       </SectionStack>
     </div>
+  );
+}
+
+function RelatedJobsCard({ jobs }: { jobs: RelatedJob[] }): ReactNode {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Related jobs</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {jobs.map((sibling) => (
+          <Link
+            key={sibling.id}
+            to={`/jobs/${sibling.id}`}
+            className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-muted/50"
+          >
+            <span className="font-medium">{pipelineLabel(sibling.pipeline)}</span>
+            <StatusBadge status={sibling.status} />
+            {sibling.acquireOutcome && <AcquireOutcomeBadge outcome={sibling.acquireOutcome} />}
+            <span className="ml-auto text-xs text-muted-foreground">#{sibling.id}</span>
+          </Link>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function AttentionCard({ items }: { items: AttentionItem[] }): ReactNode {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Open attention</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {items.map((item) => (
+          <Link
+            key={item.id}
+            to="/attention"
+            className="block rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-muted/50"
+          >
+            {item.message}
+          </Link>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReleasePickCard({ record }: { record: AcquireRecordDetail }): ReactNode {
+  const picked = record.picked;
+  const { kept, dropped } = parseCandidates(record.candidates_json);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center gap-2">
+          <span>Release pick</span>
+          {picked?.forceGrab && <ToneBadge tone="warning">Force grab</ToneBadge>}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <Fact label="Outcome">{record.status ? acquireOutcomeLabel(record.status) : '—'}</Fact>
+          {record.release_group && <Fact label="Release group">{record.release_group}</Fact>}
+          {record.source && <Fact label="Source">{record.source}</Fact>}
+        </dl>
+
+        {picked ? (
+          <PickedHero picked={picked} />
+        ) : (
+          record.status === 'grabbed' &&
+          record.release_group && (
+            <p className="text-sm text-muted-foreground">
+              Grabbed without a resolved title. Release group {record.release_group}.
+            </p>
+          )
+        )}
+
+        <div>
+          <p className="mb-2 text-xs text-muted-foreground">Why this release</p>
+          <p className="border-l pl-3 text-sm leading-relaxed whitespace-pre-wrap">
+            {record.reasoning ?? 'No reasoning recorded.'}
+          </p>
+        </div>
+
+        {(kept.length > 0 || dropped.length > 0) && (
+          <div className="space-y-4 border-t pt-4">
+            {kept.length > 0 && (
+              <div>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Kept · {kept.length}
+                </p>
+                <ul className="space-y-1">
+                  {kept.map((c) => {
+                    const isPicked = record.picked_guid !== null && c.guid === record.picked_guid;
+                    return (
+                      <li
+                        key={c.guid}
+                        className={cn(
+                          'font-mono text-xs break-all',
+                          isPicked ? 'text-foreground' : 'text-muted-foreground',
+                        )}
+                      >
+                        {formatKeptLine(c)}
+                        {isPicked && <span className="ml-2 font-sans text-[0.7rem] text-muted-foreground">picked</span>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            {dropped.length > 0 && (
+              <div>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Dropped · {dropped.length}
+                </p>
+                <ul className="space-y-1">
+                  {dropped.map((d, i) => (
+                    <li key={`${d.title}-${i}`} className="font-mono text-xs break-all text-muted-foreground">
+                      {d.title}
+                      <span className="font-sans"> · {d.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PickedHero({ picked }: { picked: PickedRelease }): ReactNode {
+  return (
+    <div className="space-y-3 rounded-lg border border-success-border bg-success-muted p-3">
+      <div>
+        <p className="mb-1 text-xs text-muted-foreground">{picked.forceGrab ? 'Force grabbed' : 'Grabbed'}</p>
+        <p className="font-mono text-sm break-all">{picked.title}</p>
+      </div>
+      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {picked.indexer && <Fact label="Indexer">{picked.indexer}</Fact>}
+        {picked.quality && <Fact label="Quality">{picked.quality}</Fact>}
+        {picked.size !== null && <Fact label="Size">{formatReleaseSize(picked.size)}</Fact>}
+        {picked.seeders !== null && <Fact label="Seeders">{picked.seeders}</Fact>}
+        {picked.shape && <Fact label="Shape">{releaseShapeLabel(picked.shape)}</Fact>}
+        {picked.seasonNumber !== null && <Fact label="Season">{picked.seasonNumber}</Fact>}
+        {picked.languages.length > 0 && <Fact label="Languages">{picked.languages.join(', ')}</Fact>}
+      </dl>
+    </div>
+  );
+}
+
+function PlacedFilesCard({ job, placedFiles }: { job: Job; placedFiles: PlacedFile[] }): ReactNode {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Files placed</CardTitle>
+        {placedFiles.length > 0 && (
+          <CardAction>
+            <Badge variant="outline" className="text-muted-foreground">
+              {placedFiles.length}
+            </Badge>
+          </CardAction>
+        )}
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {placedFiles.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{placedFilesEmptyCopy(job.status)}</p>
+        ) : (
+          placedFiles.map((f) => <PlacedFileRow key={f.id} file={f} />)
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PlacedFileRow({ file }: { file: PlacedFile }): ReactNode {
+  const lang = typeof file.data.lang === 'string' ? file.data.lang : null;
+  const matchedBy = typeof file.data.matchedBy === 'string' ? file.data.matchedBy : null;
+  const site = typeof file.data.site === 'string' ? file.data.site : null;
+  const archive = typeof file.data.archive === 'string' ? file.data.archive : null;
+  const sourceFile = typeof file.data.sourceFile === 'string' ? file.data.sourceFile : null;
+  const drift = typeof file.data.drift === 'string' ? file.data.drift : null;
+  const offsetMs = typeof file.data.offsetMs === 'number' ? file.data.offsetMs : null;
+  const driftLabel = drift ? formatDriftLabel(drift, offsetMs) : null;
+
+  return (
+    <div className="space-y-1.5 border-t pt-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <FileCheck2 className="size-4 text-muted-foreground" />
+        <Badge variant="outline" className="text-muted-foreground">
+          {PLACED_FILE_KIND_LABEL[file.kind]}
+        </Badge>
+        {matchedBy && <ToneBadge tone="neutral">{matchedBy}</ToneBadge>}
+        {lang && <ToneBadge tone="neutral">{lang}</ToneBadge>}
+        {site && <ToneBadge tone="neutral">{site}</ToneBadge>}
+        {driftLabel && <ToneBadge tone="neutral">{driftLabel}</ToneBadge>}
+        <span className="ml-auto text-xs text-muted-foreground">{formatRelativeTime(file.created_at)}</span>
+      </div>
+      <code className="block text-xs break-all">{file.placed_path}</code>
+      <code className="block text-xs break-all text-muted-foreground">from {file.source_path}</code>
+      {file.video_path && (
+        <code className="block text-xs break-all text-muted-foreground">beside {file.video_path}</code>
+      )}
+      {(archive || sourceFile) && (
+        <p className="text-xs text-muted-foreground">
+          {sourceFile && <span>Source file {sourceFile}</span>}
+          {sourceFile && archive && <span> · </span>}
+          {archive && <span className="font-mono break-all">{archive}</span>}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SubtitleRunsCard({ runs }: { runs: SubtitleRunRow[] }): ReactNode {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Subtitle site runs</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {runs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No site searches recorded.</p>
+        ) : (
+          runs.map((run) => <SubtitleRunCard key={run.id} run={run} />)
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -305,7 +529,7 @@ function SubtitleRunCard({ run }: { run: SubtitleRunRow }): ReactNode {
   return (
     <div className="border-t pt-4">
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <span className="font-medium">{run.site}</span>
+        <span className="font-medium">{siteLabel(run.site)}</span>
         <ToneBadge tone={subtitleRunTone(run.status)} dot pulse={subtitleRunTone(run.status) === 'info'}>
           {subtitleRunLabel(run.status)}
         </ToneBadge>
@@ -328,12 +552,117 @@ function BackLink() {
   );
 }
 
-/** `candidates_json` is `{ kept: [...], dropped: [...] }` for a movie (or a single
- * series-season row), written by `runAcquireJob` in `src/pipelines/acquire/run.ts` —
- * total considered is both arrays combined, not just the ones that survived prefilter. */
-function candidatesConsidered(candidatesJson: Record<string, unknown> | null | undefined): number | undefined {
-  if (!candidatesJson) return undefined;
-  const kept = Array.isArray(candidatesJson.kept) ? candidatesJson.kept.length : 0;
-  const dropped = Array.isArray(candidatesJson.dropped) ? candidatesJson.dropped.length : 0;
-  return kept + dropped;
+function payloadString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/** Season ascending with nulls last, then created_at. */
+function sortAcquireRecords(records: AcquireRecordDetail[]): AcquireRecordDetail[] {
+  return [...records].sort((a, b) => {
+    const aSeason = a.picked?.seasonNumber ?? null;
+    const bSeason = b.picked?.seasonNumber ?? null;
+    if (aSeason === null && bSeason !== null) return 1;
+    if (aSeason !== null && bSeason === null) return -1;
+    if (aSeason !== null && bSeason !== null && aSeason !== bSeason) return aSeason - bSeason;
+    return a.created_at - b.created_at;
+  });
+}
+
+function placedFilesEmptyCopy(status: JobStatus): string {
+  if (status === 'pending' || status === 'running') {
+    return 'Waiting to settle, or nothing to place yet.';
+  }
+  if (status === 'done') {
+    return 'No sidecars placed. The import settled without extra files.';
+  }
+  return 'No files placed for this job.';
+}
+
+function formatDriftLabel(drift: string, offsetMs: number | null): string {
+  if (drift === 'resynced') {
+    if (offsetMs === null) return 'Resynced';
+    const sign = offsetMs >= 0 ? '+' : '';
+    return `Resynced ${sign}${offsetMs}ms`;
+  }
+  if (drift === 'in-sync') return 'In sync';
+  if (drift === 'unverified') return 'Unverified timing';
+  return drift;
+}
+
+interface KeptCandidateView {
+  guid: string;
+  title: string;
+  indexer: string | null;
+  size: number | null;
+  seeders: number | null;
+  quality: string | null;
+}
+
+interface DroppedCandidateView {
+  title: string;
+  reason: string;
+}
+
+function parseCandidates(candidatesJson: Record<string, unknown> | null): {
+  kept: KeptCandidateView[];
+  dropped: DroppedCandidateView[];
+} {
+  if (!candidatesJson) return { kept: [], dropped: [] };
+
+  const kept: KeptCandidateView[] = [];
+  const rawKept = candidatesJson.kept;
+  if (Array.isArray(rawKept)) {
+    for (const raw of rawKept) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const entry = raw as Record<string, unknown>;
+      if (typeof entry.title !== 'string' || typeof entry.guid !== 'string') continue;
+      kept.push({
+        guid: entry.guid,
+        title: entry.title,
+        indexer: typeof entry.indexer === 'string' ? entry.indexer : null,
+        size: typeof entry.size === 'number' ? entry.size : null,
+        seeders: typeof entry.seeders === 'number' ? entry.seeders : null,
+        quality: qualityNameOf(entry),
+      });
+    }
+  }
+
+  const dropped: DroppedCandidateView[] = [];
+  const rawDropped = candidatesJson.dropped;
+  if (Array.isArray(rawDropped)) {
+    for (const raw of rawDropped) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const entry = raw as Record<string, unknown>;
+      const reason = typeof entry.reason === 'string' ? entry.reason : 'dropped';
+      const candidate = entry.candidate;
+      let title = 'Unknown release';
+      if (typeof candidate === 'object' && candidate !== null) {
+        const t = Reflect.get(candidate, 'title');
+        if (typeof t === 'string') title = t;
+      } else if (typeof entry.title === 'string') {
+        title = entry.title;
+      }
+      dropped.push({ title, reason });
+    }
+  }
+
+  return { kept, dropped };
+}
+
+function qualityNameOf(entry: Record<string, unknown>): string | null {
+  const quality = entry.quality;
+  if (typeof quality !== 'object' || quality === null) return null;
+  const inner = Reflect.get(quality, 'quality');
+  if (typeof inner !== 'object' || inner === null) return null;
+  const name = Reflect.get(inner, 'name');
+  return typeof name === 'string' ? name : null;
+}
+
+function formatKeptLine(c: KeptCandidateView): string {
+  const parts = [c.title];
+  if (c.quality) parts.push(c.quality);
+  if (c.size !== null) parts.push(formatReleaseSize(c.size));
+  if (c.seeders !== null) parts.push(`${c.seeders} seeders`);
+  if (c.indexer) parts.push(c.indexer);
+  return parts.join(' · ');
 }

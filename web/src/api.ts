@@ -31,6 +31,20 @@ export interface Job {
 
 export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
 
+/** Human summary of the release a job actually picked. Mirrors `PickedRelease` in
+ * `src/pipelines/acquire/picked.ts`. */
+export interface PickedRelease {
+  title: string;
+  indexer: string | null;
+  size: number | null;
+  seeders: number | null;
+  quality: string | null;
+  languages: string[];
+  shape: 'pack' | 'multi' | 'single' | null;
+  seasonNumber: number | null;
+  forceGrab: boolean;
+}
+
 export interface AcquireRecord {
   id: number;
   arr_instance: string;
@@ -43,6 +57,19 @@ export interface AcquireRecord {
   reasoning: string | null;
   candidates_json: Record<string, unknown> | null;
   created_at: number;
+}
+
+/** One acquire_records row for this job's run window, with a resolved `picked` summary. */
+export type AcquireRecordDetail = AcquireRecord & { picked: PickedRelease | null };
+
+/** Sibling job for the same target, excluding the job being viewed. */
+export interface RelatedJob {
+  id: number;
+  pipeline: string;
+  status: JobStatus;
+  created_at: number;
+  updated_at: number;
+  acquireOutcome: AcquireStatus | null;
 }
 
 export type PlacedFileKind = 'audio' | 'subtitle';
@@ -63,8 +90,11 @@ export interface PlacedFile {
 
 export interface JobDetailResponse {
   job: Job;
-  acquireRecord: AcquireRecord | null;
+  acquireRecords: AcquireRecordDetail[];
   acquireOutcome: AcquireStatus | null;
+  relatedJobs: RelatedJob[];
+  /** Open attention items for this job only (same shape as AttentionItem). */
+  attention: AttentionItem[];
   placedFiles: PlacedFile[];
   // Per-site agent-run records for a subtitle job — empty for non-subtitle pipelines.
   // Fetched alongside the rest of the job detail; `subtitle.transcript` SSE events

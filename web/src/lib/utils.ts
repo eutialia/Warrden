@@ -56,3 +56,8 @@ export function formatRelativeTime(ts: number | null): string {
   return new Date(ts).toLocaleDateString();
 }
 
+/** Release size as GiB with one decimal, matching `src/pipelines/acquire/pick.ts`. */
+export function formatReleaseSize(bytes: number): string {
+  return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+}
+
