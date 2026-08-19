@@ -16,7 +16,7 @@ import { atomicCopy, walkFiles } from '../../fs/files.js';
 import { mapArrPath, type PathMapping } from '../../fs/paths.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import { traceArrClient } from '../../arr/traced.js';
-import type { JobRow } from '../../jobs/queue.js';
+import type { JobRow, TargetKind } from '../../jobs/queue.js';
 import { traceTrigger } from '../../trace/tracer.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
@@ -73,8 +73,9 @@ type TargetContext = SeriesTargetContext | MovieTargetContext;
  * a series target, any leftover bundle video sitting in one of `bundleFolders`'s
  * root-derived folders that the sidecar sweep never touched — a sidecar only ever matches
  * beside an EXISTING video, so a whole extra episode file needs its own manual import. A
- * high/medium-confidence mapping imports immediately (`copy` mode); a low-confidence one
- * is proposed as an `attention` item instead of executed unattended. Movies only ever
+ * high/medium-confidence mapping imports immediately (`copy` mode), unless `rescueDeferred`'s
+ * live re-check finds the arr started importing this target itself; a low-confidence one is
+ * proposed as an `attention` item instead of executed unattended. Movies only ever
  * rescue a stuck download 1:1 onto `movieId` (dropping rejected/other-movie items first)
  * — leftover movie-folder videos are extras and are never imported; a movie that already
  * has a file on disk proposes instead of executing, mirroring the series occupied-episode
@@ -720,14 +721,46 @@ function dedupeManualImportItems(items: ManualImportItem[]): ManualImportItem[] 
 }
 
 /**
+ * Re-assesses the arr's LIVE queue immediately before a rescue import executes, and records
+ * an `ingest.rescue-deferred` event (returning `true`, "caller must not import") when the arr
+ * has since gone busy on this target.
+ *
+ * `runIngestJob`'s settle gate assessed the queue at the top of the run; everything between
+ * then and here — the manual-import listings, an LLM planning call — is time the arr is free
+ * to pick the download up itself. That window is what double-imported a whole season live:
+ * Sonarr flipped the record to `importing` nine seconds after Warrden's poll, and the rescue
+ * `ManualImport` landed on top of Sonarr's own. Deferring costs nothing, since a rescue that's
+ * still needed next run will be re-planned from a fresh queue read.
+ */
+async function rescueDeferred(
+  ctx: AppContext,
+  job: JobRow,
+  client: ArrApi,
+  target: { kind: TargetKind; id: number },
+  files: ManualImportFile[],
+  title: string,
+): Promise<boolean> {
+  const fresh = assessQueue(await client.listQueue(), target);
+  if (fresh.state !== 'busy') return false;
+
+  ctx.events.append({
+    kind: 'ingest.rescue-deferred',
+    jobId: job.id,
+    message: `Deferred importing ${files.length} leftover file(s) for "${title}" because Sonarr/Radarr started importing this target`,
+    data: targetEventData(job, { files }),
+  });
+  return true;
+}
+
+/**
  * Series rescue: gathers every unresolved manual-import item across two scopes — each
  * `'stuck'` `downloadId` (an import the arr gave up on) and each of the torrent's own
  * source folders (`filterExistingFiles: true` so the arr's own already-imported files
  * aren't re-offered) — then hands the deduped batch to `planBundleImport` with the
  * FULL episode list. A `null` plan (nothing importable) ends the rescue quietly; a
- * high/medium-confidence plan imports immediately in `copy` mode; a low-confidence one
- * is proposed as an `attention` item instead of executed unattended (`POST /api/attention/:id/accept`
- * is what actually runs it).
+ * high/medium-confidence plan imports immediately in `copy` mode, gated on `rescueDeferred`'s
+ * live queue re-check; a low-confidence one is proposed as an `attention` item instead of
+ * executed unattended (`POST /api/attention/:id/accept` is what actually runs it).
  */
 async function rescueSeries(
   ctx: AppContext,
@@ -760,6 +793,7 @@ async function rescueSeries(
   if (plan === null) return;
 
   if (plan.confidence !== 'low') {
+    if (await rescueDeferred(ctx, job, client, { kind: 'series', id: seriesId }, plan.files, target.seriesTitle)) return;
     await client.executeManualImport(plan.files, 'copy');
     ctx.events.append({
       kind: 'ingest.rescued',
@@ -812,7 +846,8 @@ async function rescueSeries(
  * dedupe result that was already empty (nothing to filter at all) stays silent, same as
  * the "nothing leftover" case elsewhere in this stage.
  *
- * Exactly one survivor maps 1:1 onto `job.target_id` and executes unattended, as above.
+ * Exactly one survivor maps 1:1 onto `job.target_id` and executes unattended, as above —
+ * gated, like the series branch, on `rescueDeferred`'s live queue re-check.
  * MORE than one survivor is never executed, even though every one of them individually
  * looks safe: with no episode numbers to disambiguate by (unlike the series branch's
  * per-episode mapping), picking which single file actually belongs to this one movie slot
@@ -893,6 +928,8 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
     });
     return;
   }
+
+  if (await rescueDeferred(ctx, job, client, { kind: 'movie', id: job.target_id }, files, movieTitle)) return;
 
   await client.executeManualImport(files, 'copy');
   ctx.events.append({

@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
+import type { QueueRecord } from '../src/arr/types.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
@@ -35,6 +36,15 @@ function claimIngestJob(fx: IngestFixture) {
     targetId: fx.targetId,
     arrInstance: fx.arrInstance,
   });
+}
+
+/** Replaces the fake's `listQueue` so the first poll (runIngestJob's settle gate) answers
+ * `first` and every later one (the rescue stage's pre-execute re-check) answers `rest` —
+ * the arr changing its mind mid-run, which is what the live double-import needed a 9-second
+ * window to do, expressed without any timing in the test. */
+function stageQueuePolls(fx: IngestFixture, first: QueueRecord[], rest: QueueRecord[]): void {
+  let polls = 0;
+  fx.client.listQueue = vi.fn(async () => (++polls === 1 ? [...first] : [...rest]));
 }
 
 describe('runIngestJob — settle gate', () => {
@@ -898,6 +908,76 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     expect(fx.client.listManualImport).toHaveBeenCalledWith({ downloadId: 'dl-stuck-1', filterExistingFiles: true });
     expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, episodeIds: [2] })], 'copy');
     expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(true);
+  });
+
+  it('pre-execute re-check (series): the arr starts importing between the settle gate and the import -> nothing is executed, an ingest.rescue-deferred event instead', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    stageQueuePolls(
+      fx,
+      [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })],
+      [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadState: 'importing' })],
+    );
+    const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.listQueue).toHaveBeenCalledTimes(2);
+    expect(fx.client.executeManualImport).not.toHaveBeenCalled();
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
+
+    const deferred = findEvent(fx.ctx.events.list(), 'ingest.rescue-deferred');
+    expect(deferred).toBeTruthy();
+    expect(deferred!.level).toBe('info');
+    expect(deferred!.data.files).toEqual([expect.objectContaining({ path: item.path, episodeIds: [2] })]);
+  });
+
+  it('pre-execute re-check (series): the arr is still stuck at the re-check -> the import executes as before', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    const stuck = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
+    stageQueuePolls(fx, stuck, stuck);
+    const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.listQueue).toHaveBeenCalledTimes(2);
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, episodeIds: [2] })], 'copy');
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescue-deferred')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(true);
+  });
+
+  it('pre-execute re-check (movie): the arr starts importing between the settle gate and the import -> nothing is executed, an ingest.rescue-deferred event instead', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    stageQueuePolls(
+      fx,
+      [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })],
+      [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadState: 'importing' })],
+    );
+    const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.executeManualImport).not.toHaveBeenCalled();
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
+
+    const deferred = findEvent(fx.ctx.events.list(), 'ingest.rescue-deferred');
+    expect(deferred).toBeTruthy();
+    expect(deferred!.data.files).toEqual([expect.objectContaining({ path: item.path, movieId: 7 })]);
   });
 
   it('dedupes manual-import items by path across the downloadId + folder scopes before planning: the same leftover file surfacing from both never double-imports', async () => {
