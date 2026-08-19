@@ -77,33 +77,3 @@ export function jobDuration(job: Job): string | null {
   if (minutes < 60) return `${minutes}m`;
   return `${Math.round(minutes / 60)}h`;
 }
-
-const PIPELINE_ORDER = ['acquire', 'ingest', 'subtitle'];
-
-export interface PipelineFold<T extends { pipeline: string }> {
-  pipeline: string;
-  latest: T;
-  earlier: T[];
-}
-
-/** Newest job per pipeline, with the rest tucked behind. Input should already be newest-first. */
-export function foldByPipeline<T extends { pipeline: string }>(jobs: T[]): PipelineFold<T>[] {
-  const buckets = new Map<string, T[]>();
-  for (const job of jobs) {
-    const list = buckets.get(job.pipeline);
-    if (list) list.push(job);
-    else buckets.set(job.pipeline, [job]);
-  }
-  return [...buckets.keys()]
-    .sort((a, b) => {
-      const ia = PIPELINE_ORDER.indexOf(a);
-      const ib = PIPELINE_ORDER.indexOf(b);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    })
-    .flatMap((pipeline) => {
-      const runs = buckets.get(pipeline);
-      const latest = runs?.[0];
-      if (!latest || !runs) return [];
-      return [{ pipeline, latest, earlier: runs.slice(1) }];
-    });
-}
