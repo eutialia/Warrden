@@ -185,6 +185,8 @@ export function openAttentionForJob(
     payload?: Record<string, unknown>;
     kind?: string;
     message?: string;
+    /** The item's executable payload, for the accept-endpoint shapes that need one. */
+    data?: object;
   },
 ): { app: ReturnType<typeof createApp>; attentionItems: AttentionItems; item: AttentionRow; jobId: number } {
   const attentionItems = new AttentionItems(ctx.db);
@@ -201,7 +203,7 @@ export function openAttentionForJob(
   ctx.queue.claim();
   ctx.queue.complete(jobId);
 
-  const item = attentionItems.open({ kind: opts?.kind ?? 'acquire.none-viable', message: opts?.message ?? 'x', jobId });
+  const item = attentionItems.open({ kind: opts?.kind ?? 'acquire.none-viable', message: opts?.message ?? 'x', jobId, data: opts?.data });
 
   return { app, attentionItems, item, jobId };
 }

@@ -631,6 +631,55 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     expect(ForceGrabSchema.safeParse(attentionEvents[0]!.data).success).toBe(true);
   });
 
+  it('a veto on an airing season offers the top single, not a pack: the force-grab follows the mode\'s own shape', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'The Ramparts of Ice',
+          seasons: [
+            {
+              seasonNumber: 1,
+              monitored: true,
+              statistics: { episodeCount: 6, totalEpisodeCount: 14 },
+            },
+          ],
+        }),
+      ],
+      releases: [
+        candidate({ guid: 'g-pack', fullSeason: true, title: '[Trix] S01 Batch', seeders: 900 }),
+        candidate({ guid: 'g-ep6', fullSeason: false, title: '[Other] S01E06', seeders: 20 }),
+        candidate({ guid: 'g-ep5', fullSeason: false, title: '[Trix] S01E05', seeders: 80 }),
+      ],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([
+        pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'every weekly rip is upscaled' }),
+      ]),
+    });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'The Ramparts of Ice' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.grabbed).toHaveLength(0);
+    const attentionEvents = ctx.events.list({ level: 'attention' });
+    expect(attentionEvents).toHaveLength(1);
+    expect(attentionEvents[0]!.data).toMatchObject({
+      action: 'force-grab',
+      guid: 'g-ep5', // highest-seeded SINGLE; the pack out-seeds it but airing ranks singles first
+      pickedTitle: '[Trix] S01E05',
+      releaseGroup: 'Trix',
+      seasonNumber: 1,
+    });
+    expect(ForceGrabSchema.safeParse(attentionEvents[0]!.data).success).toBe(true);
+  });
+
   it('a movie veto keeps the plain none-viable payload: with no shape claimed there is nothing to force-grab', async () => {
     const client = fakeArrClient({
       movies: [movieResource({ title: 'Perfect Blue', year: 1997 })],

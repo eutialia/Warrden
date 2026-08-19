@@ -18,6 +18,7 @@ import {
   type SiteKnowledge,
 } from '../agent/siteKnowledge.js';
 import { registerWebhooksInBackground } from '../arr/register.js';
+import { ArrApiError } from '../arr/client.js';
 import type { ArrApi, ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
 import { ConfigSchema, type Config } from '../config/schema.js';
@@ -32,9 +33,11 @@ import { PlacedFiles } from '../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '../db/siteProfiles.js';
 import { SubtitleRuns } from '../db/subtitleRuns.js';
 import { TraceEntries } from '../db/traceEntries.js';
-import type { TargetKind } from '../jobs/queue.js';
+import { targetEventData } from '../events/target.js';
+import type { JobRow, TargetKind } from '../jobs/queue.js';
 import { ModelCatalog } from '../llm/catalog.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
+import { pinReleaseGroup } from '../pipelines/acquire/pin.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
 import { cachedStorage, probeStorage } from './storageHealth.js';
@@ -141,7 +144,63 @@ export const ForceGrabSchema = z.object({
   guid: z.string().min(1),
   indexerId: z.number().int(),
   pickedTitle: z.string(),
+  // Both are the bookkeeping an accepted force-grab owes the pipeline: the group to pin,
+  // and which season's row to write. `releaseGroup` is always emitted (null when nothing
+  // was resolvable); `seasonNumber` only exists for a series.
+  releaseGroup: z.string().nullable(),
+  seasonNumber: z.number().int().optional(),
 });
+type ForceGrabData = z.infer<typeof ForceGrabSchema>;
+
+/**
+ * A human force-grab IS a grab, so it owes the same bookkeeping the pipeline does after its
+ * own `grabRelease`: an `acquire_records` row (which is what `outcomeForJob` and the
+ * double-grab guard read) and, for a series, the release-group pin. Both are contained
+ * exactly like `runAcquireJob` contains them (`acquire.record-failed` / `acquire.pin-failed`
+ * warn events): the grab already happened and cannot be undone, so nothing here is allowed
+ * to turn a successful accept into an error.
+ */
+async function recordForceGrab(
+  deps: { db: AppContext['db']; events: AppContext['events']; client: ArrApi },
+  job: JobRow,
+  data: ForceGrabData,
+): Promise<void> {
+  const { db, events, client } = deps;
+  try {
+    new AcquireRecords(db).insert({
+      arrInstance: job.arr_instance,
+      targetKind: job.target_kind,
+      targetId: job.target_id,
+      source: 'force-grab',
+      status: 'grabbed',
+      pickedGuid: data.guid,
+      releaseGroup: data.releaseGroup,
+      reasoning: 'human force-grab over LLM veto',
+      candidates: { ...(data.seasonNumber === undefined ? {} : { seasonNumber: data.seasonNumber }), forceGrab: true },
+    });
+  } catch (err) {
+    events.append({
+      kind: 'acquire.record-failed',
+      level: 'warn',
+      jobId: job.id,
+      message: `Force-grabbed "${data.pickedTitle}" but failed to record the outcome: ${errorMessage(err)}`,
+      data: targetEventData(job),
+    });
+  }
+
+  if (job.target_kind !== 'series' || !data.releaseGroup) return;
+  try {
+    await pinReleaseGroup({ client, db }, { instanceName: job.arr_instance, seriesId: job.target_id, group: data.releaseGroup });
+  } catch (err) {
+    events.append({
+      kind: 'acquire.pin-failed',
+      level: 'warn',
+      jobId: job.id,
+      message: `Force-grabbed "${data.pickedTitle}" but failed to pin release group "${data.releaseGroup}": ${errorMessage(err)}`,
+      data: targetEventData(job, { releaseGroup: data.releaseGroup }),
+    });
+  }
+}
 
 /**
  * Reads the *current* config directly off `ctx` rather than a value captured once at
@@ -604,10 +663,19 @@ export function createApp(ctx: Partial<AppContext>): Hono {
             await client.grabRelease(forceGrab.data.guid, forceGrab.data.indexerId);
           } catch (err) {
             // Interactive-search guids live in the arr's short-lived release cache; an accept
-            // clicked hours later can 404. The item stays open so Re-pick (a fresh search) is
-            // still available.
-            return c.json({ error: `grab failed: ${errorMessage(err)}. The release likely expired from the search cache - use Re-pick to search again.` }, 502);
+            // clicked hours later can 404. That diagnosis is only honest for an actual 404:
+            // a 500 or an unreachable arr says nothing about the cache. Either way the item
+            // stays open so Re-pick (a fresh search) is still available.
+            const expired = err instanceof ArrApiError && err.status === 404;
+            const message = expired
+              ? `grab failed: ${errorMessage(err)}. The release likely expired from the search cache, use Re-pick to search again.`
+              : `grab failed: ${errorMessage(err)}`;
+            return c.json({ error: message }, 502);
           }
+          // The linked job is what names the target to record against; an item whose job was
+          // pruned still keeps the grab, it just has nowhere to write the bookkeeping.
+          const forceGrabJob = item.job_id === null ? null : queue.get(item.job_id);
+          if (forceGrabJob) await recordForceGrab({ db, events, client }, forceGrabJob, forceGrab.data);
           attentionItems.setStatus(id, 'resolved');
           events.append({
             kind: 'attention.accepted',

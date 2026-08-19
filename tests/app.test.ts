@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
+import { ArrApiError } from '../src/arr/client.js';
+import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
@@ -12,9 +14,24 @@ import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
 import { ConfigSchema } from '../src/config/schema.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, bundleImportPayload, openAttentionForJob } from './helpers.js';
+import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, bundleImportPayload, openAttentionForJob, seriesResource } from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
+
+/** What `appendNonGrabAttentionEvent` puts in a shape-owned none-viable item's `data`, as
+ * the accept endpoint sees it: the season-one series case, overridable per test. */
+function forceGrabPayload(overrides?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    action: 'force-grab',
+    instance: 'sonarr',
+    guid: 'g-top',
+    indexerId: 3,
+    pickedTitle: '[Trix] S01 Batch',
+    releaseGroup: 'Trix',
+    seasonNumber: 1,
+    ...overrides,
+  };
+}
 
 describe('app', () => {
   it('serves healthz', async () => {
@@ -515,7 +532,7 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'acquire.none-viable',
         message: 'the model rejected every release',
-        data: { action: 'force-grab', instance: 'sonarr', guid: 'g-top', indexerId: 3, pickedTitle: '[Trix] S01 Batch' },
+        data: forceGrabPayload(),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
@@ -538,13 +555,41 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'acquire.none-viable',
         message: 'the model rejected every release',
-        data: { action: 'force-grab', instance: 'sonarr', guid: 'g-top', indexerId: 3, pickedTitle: '[Trix] S01 Batch' },
+        data: forceGrabPayload(),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
       expect(res.status).toBe(502);
       expect((await res.json() as { error: string }).error).toContain('release not found in cache');
       expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it.each([
+      {
+        name: 'a 404 blames the expired search cache',
+        err: new ArrApiError('POST', '/api/v3/release', 404, 'not found'),
+        expectHint: true,
+      },
+      {
+        name: 'any other failure reports the message alone',
+        err: new ArrApiError('POST', '/api/v3/release', 500, 'download client offline'),
+        expectHint: false,
+      },
+    ])('POST /api/attention/:id/accept: $name', async ({ err, expectHint }) => {
+      const client = fakeArrClient();
+      client.grabRelease = vi.fn(async () => {
+        throw err;
+      });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', data: forceGrabPayload() });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(502);
+      const { error } = await res.json() as { error: string };
+      expect(error).toContain('grab failed');
+      expect(error.includes('expired from the search cache')).toBe(expectHint);
     });
 
     it('POST /api/attention/:id/accept: 400 on a force-grab naming an unknown arr instance', async () => {
@@ -554,12 +599,106 @@ describe('app', () => {
       const item = attentionItems.open({
         kind: 'acquire.none-viable',
         message: 'x',
-        data: { action: 'force-grab', instance: 'no-such-instance', guid: 'g-top', indexerId: 3, pickedTitle: 'x' },
+        data: forceGrabPayload({ instance: 'no-such-instance', pickedTitle: 'x', releaseGroup: null }),
       });
 
       const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
       expect(res.status).toBe(400);
       expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it('POST /api/attention/:id/accept: a force-grab records a "grabbed" row and pins the group, like a pipeline grab', async () => {
+      const client = fakeArrClient({ series: [seriesResource({ id: 42 })] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item } = openAttentionForJob(ctx, { data: forceGrabPayload() });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+
+      const records = new AcquireRecords(ctx.db).listByTarget('sonarr', 'series', 42);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        status: 'grabbed',
+        source: 'force-grab',
+        picked_guid: 'g-top',
+        release_group: 'Trix',
+        reasoning: 'human force-grab over LLM veto',
+        candidates_json: { seasonNumber: 1, forceGrab: true },
+      });
+      expect(client.profiles[0]!.required).toEqual(['Trix']);
+    });
+
+    it('POST /api/attention/:id/accept: a movie force-grab records no seasonNumber and pins nothing', async () => {
+      const client = fakeArrClient();
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item } = openAttentionForJob(ctx, {
+        targetKind: 'movie',
+        targetId: 7,
+        data: forceGrabPayload({ seasonNumber: undefined }),
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+
+      const records = new AcquireRecords(ctx.db).listByTarget('sonarr', 'movie', 7);
+      expect(records[0]!.candidates_json).toEqual({ forceGrab: true });
+      expect(client.profiles).toHaveLength(0);
+    });
+
+    it('POST /api/attention/:id/accept: a force-grab with no resolvable release group grabs and records, but pins nothing', async () => {
+      const client = fakeArrClient({ series: [seriesResource({ id: 42 })] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item } = openAttentionForJob(ctx, { data: forceGrabPayload({ releaseGroup: null }) });
+
+      expect((await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders })).status).toBe(200);
+      expect(new AcquireRecords(ctx.db).listByTarget('sonarr', 'series', 42)[0]!.release_group).toBeNull();
+      expect(client.profiles).toHaveLength(0);
+    });
+
+    it('POST /api/attention/:id/accept: a force-grab whose linked job is gone still grabs and resolves, recording nothing', async () => {
+      const client = fakeArrClient();
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({ kind: 'acquire.none-viable', message: 'x', jobId: 9999, data: forceGrabPayload() });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(client.grabbed).toEqual([{ guid: 'g-top', indexerId: 3 }]);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+      expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM acquire_records').get()).toEqual({ n: 0 });
+    });
+
+    it.each([
+      {
+        name: 'a failed record',
+        kind: 'acquire.record-failed',
+        break: () => {
+          vi.spyOn(AcquireRecords.prototype, 'insert').mockImplementation(() => {
+            throw new Error('db is down');
+          });
+        },
+      },
+      {
+        name: 'a failed pin',
+        kind: 'acquire.pin-failed',
+        break: (client: ReturnType<typeof fakeArrClient>) => {
+          client.createTag = vi.fn(async () => {
+            throw new Error('arr is down');
+          });
+        },
+      },
+    ])('POST /api/attention/:id/accept: $name after a force-grab warns and still resolves the item', async (scenario) => {
+      const client = fakeArrClient({ series: [seriesResource({ id: 42 })] });
+      scenario.break(client);
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, attentionItems, item } = openAttentionForJob(ctx, { data: forceGrabPayload() });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(client.grabbed).toEqual([{ guid: 'g-top', indexerId: 3 }]);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+      expect(findEvent(ctx.events.list({ level: 'warn' }), scenario.kind)).toBeDefined();
     });
 
     it.each([
