@@ -32,22 +32,34 @@ describe('assessQueue', () => {
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'busy' });
   });
 
-  it('stuck: importPending state', () => {
-    const records = [queueRecord({ downloadId: 'dl-1', trackedDownloadState: 'importPending' })];
+  it('busy: a clean importPending record is the arr queueing its own import, not a stuck one', () => {
+    const records = [queueRecord({ status: 'completed', trackedDownloadState: 'importPending', trackedDownloadStatus: 'ok' })];
+    expect(assessQueue(records, seriesTarget)).toEqual({ state: 'busy' });
+  });
+
+  it('stuck: completed + importBlocked state', () => {
+    const records = [queueRecord({ downloadId: 'dl-1', status: 'completed', trackedDownloadState: 'importBlocked' })];
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'stuck', downloadIds: ['dl-1'] });
   });
 
-  it('stuck: completed + warning status', () => {
-    const records = [queueRecord({ downloadId: 'dl-2', status: 'completed', trackedDownloadStatus: 'warning' })];
+  it('stuck: completed + warning status, even while the state still says importPending', () => {
+    const records = [
+      queueRecord({ downloadId: 'dl-2', status: 'completed', trackedDownloadState: 'importPending', trackedDownloadStatus: 'warning' }),
+    ];
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'stuck', downloadIds: ['dl-2'] });
+  });
+
+  it('settled: a still-downloading record carrying a warning is not stuck (nothing has been handed to the importer yet)', () => {
+    const records = [queueRecord({ downloadId: 'dl-3', status: 'downloading', trackedDownloadStatus: 'warning' })];
+    expect(assessQueue(records, seriesTarget)).toEqual({ state: 'settled' });
   });
 
   it('stuck: dedupes downloadIds and drops undefined/empty ones, collecting every stuck record (not just one)', () => {
     const records = [
-      queueRecord({ id: 1, downloadId: 'dl-1', trackedDownloadState: 'importPending' }),
+      queueRecord({ id: 1, downloadId: 'dl-1', status: 'completed', trackedDownloadState: 'importBlocked' }),
       queueRecord({ id: 2, downloadId: 'dl-1', status: 'completed', trackedDownloadStatus: 'warning' }),
-      queueRecord({ id: 3, downloadId: undefined, trackedDownloadState: 'importPending' }),
-      queueRecord({ id: 4, downloadId: 'dl-2', trackedDownloadState: 'importPending' }),
+      queueRecord({ id: 3, downloadId: undefined, status: 'completed', trackedDownloadState: 'importBlocked' }),
+      queueRecord({ id: 4, downloadId: 'dl-2', status: 'completed', trackedDownloadState: 'importBlocked' }),
     ];
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'stuck', downloadIds: ['dl-1', 'dl-2'] });
   });
