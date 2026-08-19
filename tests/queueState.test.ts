@@ -37,6 +37,13 @@ describe('assessQueue', () => {
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'busy' });
   });
 
+  it('busy: importing wins over a warning on the SAME record (Sonarr keeps stale statusMessages while importing)', () => {
+    const records = [
+      queueRecord({ downloadId: 'dl-9', status: 'completed', trackedDownloadState: 'importing', trackedDownloadStatus: 'warning' }),
+    ];
+    expect(assessQueue(records, seriesTarget)).toEqual({ state: 'busy' });
+  });
+
   it('stuck: completed + importBlocked state', () => {
     const records = [queueRecord({ downloadId: 'dl-1', status: 'completed', trackedDownloadState: 'importBlocked' })];
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'stuck', downloadIds: ['dl-1'] });

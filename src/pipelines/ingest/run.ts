@@ -726,7 +726,7 @@ function dedupeManualImportItems(items: ManualImportItem[]): ManualImportItem[] 
  * has since gone busy on this target.
  *
  * `runIngestJob`'s settle gate assessed the queue at the top of the run; everything between
- * then and here — the manual-import listings, an LLM planning call — is time the arr is free
+ * then and here (the manual-import listings, an LLM planning call) is time the arr is free
  * to pick the download up itself. That window is what double-imported a whole season live:
  * Sonarr flipped the record to `importing` nine seconds after Warrden's poll, and the rescue
  * `ManualImport` landed on top of Sonarr's own. Deferring costs nothing, since a rescue that's
@@ -846,8 +846,8 @@ async function rescueSeries(
  * dedupe result that was already empty (nothing to filter at all) stays silent, same as
  * the "nothing leftover" case elsewhere in this stage.
  *
- * Exactly one survivor maps 1:1 onto `job.target_id` and executes unattended, as above —
- * gated, like the series branch, on `rescueDeferred`'s live queue re-check.
+ * Exactly one survivor maps 1:1 onto `job.target_id` and executes unattended, as above,
+ * gated like the series branch on `rescueDeferred`'s live queue re-check.
  * MORE than one survivor is never executed, even though every one of them individually
  * looks safe: with no episode numbers to disambiguate by (unlike the series branch's
  * per-episode mapping), picking which single file actually belongs to this one movie slot

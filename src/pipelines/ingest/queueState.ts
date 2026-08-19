@@ -17,9 +17,13 @@ function matchesTarget(record: QueueRecord, target: { kind: TargetKind; id: numb
  * a mapping it couldn't resolve, ...). Both mean the arr is NOT going to import this on its
  * own, which is the only condition under which a rescue may safely step in. `status` must be
  * `'completed'`: a warning on a record still `'downloading'` is about the fetch (stalled
- * tracker, no seeds), and there's nothing on disk to import yet. */
+ * tracker, no seeds), and there's nothing on disk to import yet. `'importing'` overrides the
+ * warning outright: the arr is moving these files RIGHT NOW, and Sonarr routinely carries
+ * `statusMessages` (hence `trackedDownloadStatus: 'warning'`) from earlier in the record's
+ * life straight into the importing state. Rescuing there is the double-import itself. */
 function isStuckRecord(r: QueueRecord): boolean {
-  return r.status === 'completed' && (r.trackedDownloadState === 'importBlocked' || r.trackedDownloadStatus === 'warning');
+  if (r.status !== 'completed' || r.trackedDownloadState === 'importing') return false;
+  return r.trackedDownloadState === 'importBlocked' || r.trackedDownloadStatus === 'warning';
 }
 
 /**
@@ -30,7 +34,7 @@ function isStuckRecord(r: QueueRecord): boolean {
  * - **Busy**: ANY matching record is `status: 'completed'` with `trackedDownloadState`
  *   `'importing'` or `'importPending'`, and isn't itself stuck (see `isStuckRecord`).
  *   `'importPending'` is Sonarr 4's NORMAL "grabbed, completed, sitting in the import
- *   queue" state, not a failure — treating it as stuck fired a rescue `ManualImport` that
+ *   queue" state, not a failure: treating it as stuck fired a rescue `ManualImport` that
  *   raced Sonarr's own import and double-imported a whole season. Busy deliberately
  *   ignores which `downloadId` triggered the job: webhook coalescing means the job's own
  *   payload `downloadId` may not even be the download currently importing, so waiting on

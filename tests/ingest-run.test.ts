@@ -39,8 +39,8 @@ function claimIngestJob(fx: IngestFixture) {
 }
 
 /** Replaces the fake's `listQueue` so the first poll (runIngestJob's settle gate) answers
- * `first` and every later one (the rescue stage's pre-execute re-check) answers `rest` —
- * the arr changing its mind mid-run, which is what the live double-import needed a 9-second
+ * `first` and every later one (the rescue stage's pre-execute re-check) answers `rest`: the
+ * arr changing its mind mid-run, which is what the live double-import needed a 9-second
  * window to do, expressed without any timing in the test. */
 function stageQueuePolls(fx: IngestFixture, first: QueueRecord[], rest: QueueRecord[]): void {
   let polls = 0;
@@ -972,12 +972,31 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
 
     await runIngestJob(fx.ctx, job);
 
+    expect(fx.client.listQueue).toHaveBeenCalledTimes(2);
     expect(fx.client.executeManualImport).not.toHaveBeenCalled();
     expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(false);
 
     const deferred = findEvent(fx.ctx.events.list(), 'ingest.rescue-deferred');
     expect(deferred).toBeTruthy();
     expect(deferred!.data.files).toEqual([expect.objectContaining({ path: item.path, movieId: 7 })]);
+  });
+
+  it('pre-execute re-check (movie): the arr is still stuck at the re-check -> the import executes as before', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv', movieFiles: [] });
+    const stuck = [
+      queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' }),
+    ];
+    stageQueuePolls(fx, stuck, stuck);
+    const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
+    const job = claimIngestJob(fx);
+
+    await runIngestJob(fx.ctx, job);
+
+    expect(fx.client.listQueue).toHaveBeenCalledTimes(2);
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, movieId: 7 })], 'copy');
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescue-deferred')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.rescued')).toBe(true);
   });
 
   it('dedupes manual-import items by path across the downloadId + folder scopes before planning: the same leftover file surfacing from both never double-imports', async () => {
