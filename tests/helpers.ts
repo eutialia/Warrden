@@ -323,6 +323,8 @@ export interface FakeArrClient extends ArrApi {
   movieFiles: MovieFileResource[];
   /** Every `grabRelease` call, recorded in order — the pipeline test's grab assertion. */
   grabbed: Array<{ guid: string; indexerId: number }>;
+  /** Every `searchSeason` call, recorded in order. */
+  seasonSearches: Array<{ seriesId: number; seasonNumber: number }>;
   /** `listManualImport`'s canned responses, keyed by `` `downloadId:${id}` `` or
    * `` `folder:${path}` `` (whichever the call under test is scoped by) — a test seeds
    * this directly (`client.manualImportByScope['downloadId:dl-1'] = [...]`) rather than
@@ -364,6 +366,7 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     episodeFiles: seed?.episodeFiles ? [...seed.episodeFiles] : [],
     movieFiles: seed?.movieFiles ? [...seed.movieFiles] : [],
     grabbed: [],
+    seasonSearches: [],
     manualImportByScope: seed?.manualImportByScope ? { ...seed.manualImportByScope } : {},
 
     ping: vi.fn(async (): Promise<ArrPingStatus> => 'ok'),
@@ -399,6 +402,9 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
     ),
     grabRelease: vi.fn(async (guid: string, indexerId: number): Promise<void> => {
       client.grabbed.push({ guid, indexerId });
+    }),
+    searchSeason: vi.fn(async (seriesId: number, seasonNumber: number): Promise<void> => {
+      client.seasonSearches.push({ seriesId, seasonNumber });
     }),
     async listTags(): Promise<TagResource[]> {
       return [...client.tags];

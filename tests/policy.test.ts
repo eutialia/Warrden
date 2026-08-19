@@ -48,11 +48,57 @@ describe('synthesizePolicyPrompt', () => {
     expect(system.toLowerCase()).toContain('none');
   });
 
-  it('frames Avoid as a strong negative preference rather than an absolute ban', () => {
+  it('frames Prefer as a rank boost, never an exclusive filter', () => {
     const { system } = synthesizePolicyPrompt({ prefer: [], avoid: [], title: 'X', kind: 'movie' });
-    expect(system).toContain(
-      'Avoid entries are strong negative preferences, not absolute bans: pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
-    );
+    expect(system).toContain('Prefer entries are rank boosts, never exclusive filters');
+    expect(system).toContain('Do not declare none viable just because a preferred group or keyword is absent');
+  });
+
+  it('frames Avoid as semantic: dual/multi is not an original-language-only dub', () => {
+    const { system } = synthesizePolicyPrompt({ prefer: [], avoid: [], title: 'X', kind: 'movie' });
+    expect(system).toContain('Avoid entries are strong negative preferences, not absolute bans');
+    expect(system).toContain('Dual-audio, multi-audio, Dual, and Multi include the original language');
+    expect(system).toContain('Sonarr language tags often list only the original language');
+  });
+
+  it('restricts none-viable to an actually unusable list', () => {
+    const { system } = synthesizePolicyPrompt({ prefer: [], avoid: [], title: 'X', kind: 'movie' });
+    expect(system).toContain('Declare none viable only when the list is actually unusable');
+    expect(system).toContain('not because a Prefer entry is unmatched');
+  });
+
+  it('states a complete-season pack-first rule in the user prompt', () => {
+    const { user } = synthesizePolicyPrompt({
+      prefer: [],
+      avoid: [],
+      title: 'The Ramparts of Ice',
+      kind: 'series',
+      seasonNumber: 1,
+      mode: 'complete',
+    });
+    expect(user).toContain('Season status: complete');
+    expect(user).toContain('Prefer a season pack');
+    expect(user).toContain('single-episode release is a fallback');
+  });
+
+  it('states an airing-season single-first rule in the user prompt', () => {
+    const { user } = synthesizePolicyPrompt({
+      prefer: [],
+      avoid: [],
+      title: 'X',
+      kind: 'series',
+      seasonNumber: 1,
+      mode: 'airing',
+    });
+    expect(user).toContain('Season status: airing');
+    expect(user).toContain('single-episode release');
+  });
+
+  it('omits season status for a movie or an unknown season', () => {
+    const movie = synthesizePolicyPrompt({ prefer: [], avoid: [], title: 'X', kind: 'movie' });
+    expect(movie.user).not.toContain('Season status');
+    const unknown = synthesizePolicyPrompt({ prefer: [], avoid: [], title: 'X', kind: 'series', seasonNumber: 1, mode: 'unknown' });
+    expect(unknown.user).not.toContain('Season status');
   });
 
   it('keeps the single none-specified line when both lists are empty', () => {
@@ -88,11 +134,14 @@ describe('synthesizePolicyPrompt', () => {
     expect(system).toBe(
       [
         'You are selecting a single release to download for a media library.',
-        "Pick exactly ONE release from the numbered candidate list the user provides, honoring the user's freeform preferences verbatim: favor releases matching the Prefer list and steer away from releases matching the Avoid list.",
-        'If no candidate is viable given those preferences, declare none viable instead of forcing a pick.',
-        'Avoid entries are strong negative preferences, not absolute bans: pick an avoided release only when every alternative is worse overall, and declare none viable if nothing acceptable remains.',
+        'Pick exactly ONE release from the numbered candidate list the user provides.',
+        'Prefer entries are rank boosts, never exclusive filters: if nothing matches the Prefer list, pick the best remaining candidate. Do not declare none viable just because a preferred group or keyword is absent.',
+        'Avoid entries are strong negative preferences, not absolute bans: pick an avoided release only when every alternative is worse overall.',
+        'Dual-audio, multi-audio, Dual, and Multi include the original language and are not original-language-only dubs; do not treat them as an English-dub-only release.',
+        'Sonarr language tags often list only the original language even on dual/multi releases. Do not treat a single-language tag as proof the release is not dual.',
+        'Declare none viable only when the list is actually unusable (wrong title, CAM, or nothing acceptable remains), not because a Prefer entry is unmatched.',
         'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
-        "Answer with the candidate's number (the # prefix on its line in the list, e.g. 2 for \"#2 [...]\") — not its title or any other identifier.",
+        'Answer with the candidate\'s number (the # prefix on its line in the list, e.g. 2 for "#2 [...]") — not its title or any other identifier.',
         'When you pick, also extract the release group — the fansub/release group name in the picked title, usually bracketed at the start or end — into releaseGroup; use null only if no group is identifiable.',
         'Respond with JSON matching the schema provided — no prose outside the JSON.',
       ].join(' '),

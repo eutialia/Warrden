@@ -9,11 +9,29 @@ export interface ReleaseCandidate {
   rejected: boolean;
   rejections: string[];
   publishDate: string;
+  // Optional: Sonarr/Radarr send these on /release; fixtures and Radarr movie
+  // rows often omit them. Acquire reads them instead of parsing titles.
+  fullSeason?: boolean;
+  infoHash?: string;
+  releaseGroup?: string;
+  episodeNumbers?: number[];
+  mappedEpisodeNumbers?: number[];
+  languages?: { id: number; name: string }[];
+  quality?: { quality?: { name?: string; resolution?: number } };
 }
 
-interface SeasonResource {
+export interface SeasonStatistics {
+  episodeCount: number;
+  totalEpisodeCount: number;
+  nextAiring?: string;
+  previousAiring?: string;
+  episodeFileCount?: number;
+}
+
+export interface SeasonResource {
   seasonNumber: number;
   monitored: boolean;
+  statistics?: SeasonStatistics;
 }
 
 /** One alternate title as returned by Sonarr/Radarr (shape varies; we only need the string). */
@@ -106,6 +124,7 @@ export interface EpisodeResource {
   title: string;
   episodeFileId: number; // 0 = no file on disk
   hasFile: boolean;
+  airDateUtc?: string;
 }
 
 export interface EpisodeFileResource {
@@ -168,6 +187,8 @@ export interface ArrApi {
   updateSeries(s: SeriesResource): Promise<SeriesResource>;
   searchReleases(p: { seriesId?: number; seasonNumber?: number; movieId?: number }): Promise<ReleaseCandidate[]>;
   grabRelease(guid: string, indexerId: number): Promise<void>;
+  /** Kick Sonarr's own SeasonSearch so remaining episodes backfill under the pinned group. */
+  searchSeason(seriesId: number, seasonNumber: number): Promise<void>;
   listTags(): Promise<TagResource[]>;
   createTag(label: string): Promise<TagResource>;
   deleteTag(id: number): Promise<void>;

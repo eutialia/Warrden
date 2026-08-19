@@ -109,6 +109,10 @@ export class ArrClient implements ArrApi {
     await this.request('POST', '/release', { body: { guid, indexerId } });
   }
 
+  async searchSeason(seriesId: number, seasonNumber: number): Promise<void> {
+    await this.request('POST', '/command', { body: { name: 'SeasonSearch', seriesId, seasonNumber } });
+  }
+
   listTags(): Promise<TagResource[]> {
     return this.request('GET', '/tag');
   }

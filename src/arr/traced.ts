@@ -7,6 +7,7 @@ import { errorMessage } from '../util/errors.js';
 // do to my library?", so a new mutator added to ArrApi belongs here too.
 const SIDE_EFFECT_METHODS = new Set([
   'grabRelease',
+  'searchSeason',
   'executeManualImport',
   'updateSeries',
   'createTag',

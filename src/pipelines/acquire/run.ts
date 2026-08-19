@@ -1,4 +1,4 @@
-import type { ArrApi, ReleaseCandidate } from '../../arr/types.js';
+import type { ArrApi, EpisodeResource, ReleaseCandidate, SeasonResource } from '../../arr/types.js';
 import { traceArrClient } from '../../arr/traced.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
@@ -8,7 +8,8 @@ import { resolvePayloadTitle, resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { pickRelease } from './pick.js';
 import { pinReleaseGroup } from './pin.js';
-import { capCandidates, prefilter, type DroppedCandidate } from './prefilter.js';
+import { capCandidates, dedupByInfoHash, prefilter, type DroppedCandidate } from './prefilter.js';
+import { classifySeason, type SeasonMode } from './seasonMode.js';
 
 const DEFAULT_SOURCE = 'webhook';
 
@@ -21,6 +22,7 @@ interface AttemptResult {
   releaseGroup?: string | null;
   reasoning?: string;
   pickedTitle?: string;
+  pickedFullSeason?: boolean;
   kept: ReleaseCandidate[];
   dropped: DroppedCandidate[];
 }
@@ -140,7 +142,7 @@ async function runSeriesAcquire(
   job: JobRow,
   client: ArrApi,
   title: string,
-  seasons: { seasonNumber: number; monitored: boolean }[],
+  seasons: SeasonResource[],
 ): Promise<void> {
   // Season 0 is Sonarr's convention for "Specials" — never auto-acquired.
   const monitoredSeasons = seasons.filter((s) => s.monitored && s.seasonNumber > 0);
@@ -170,13 +172,31 @@ async function runSeriesAcquire(
       continue;
     }
 
+    const mode = classifySeason(season.statistics);
+    if (mode === 'unaired') {
+      ctx.events.append({
+        kind: 'acquire.skip-unaired',
+        jobId: job.id,
+        message: `Skipped "${title}" Season ${season.seasonNumber} — no episodes have aired yet`,
+        data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+      });
+      continue;
+    }
+
     const raw = await client.searchReleases({ seriesId: job.target_id, seasonNumber: season.seasonNumber });
+    let missingEpisodeNumbers: number[] | undefined;
+    if (mode === 'airing') {
+      const episodes = await client.listEpisodes(job.target_id);
+      missingEpisodeNumbers = missingAiredEpisodeNumbers(episodes, season.seasonNumber);
+    }
     const result = await attempt(ctx, client, raw, {
       title,
       kind: 'series',
       seasonNumber: season.seasonNumber,
       jobId: job.id,
       hint: resolveHint(job),
+      mode,
+      missingEpisodeNumbers,
     });
     const seasonLabel = `${title} Season ${season.seasonNumber}`;
 
@@ -204,6 +224,20 @@ async function runSeriesAcquire(
           jobId: job.id,
           message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${errorMessage(err)}`,
           data: targetEventData(job, { releaseGroup: result.releaseGroup }),
+        });
+      }
+    }
+
+    if (mode === 'complete' && result.pickedFullSeason !== true) {
+      try {
+        await client.searchSeason(job.target_id, season.seasonNumber);
+      } catch (err) {
+        ctx.events.append({
+          kind: 'acquire.season-search-failed',
+          level: 'warn',
+          jobId: job.id,
+          message: `Grabbed "${result.pickedTitle}" but failed to kick a season search for "${seasonLabel}": ${errorMessage(err)}`,
+          data: targetEventData(job, { seasonNumber: season.seasonNumber }),
         });
       }
     }
@@ -238,11 +272,23 @@ async function attempt(
   ctx: AppContext,
   client: ArrApi,
   raw: ReleaseCandidate[],
-  input: { title: string; kind: 'series' | 'movie'; seasonNumber?: number; jobId: number; hint?: string },
+  input: {
+    title: string;
+    kind: 'series' | 'movie';
+    seasonNumber?: number;
+    jobId: number;
+    hint?: string;
+    mode?: SeasonMode | 'movie';
+    missingEpisodeNumbers?: number[];
+  },
 ): Promise<AttemptResult> {
   const { kept: prefiltered, dropped: prefilterDropped } = prefilter(raw, ctx.config.picking);
-  const { kept, dropped: capDropped } = capCandidates(prefiltered);
-  const dropped = [...prefilterDropped, ...capDropped];
+  const { kept: deduped, dropped: dedupDropped } = dedupByInfoHash(prefiltered);
+  const { kept, dropped: capDropped } = capCandidates(deduped, {
+    mode: input.mode,
+    missingEpisodeNumbers: input.missingEpisodeNumbers,
+  });
+  const dropped = [...prefilterDropped, ...dedupDropped, ...capDropped];
 
   ctx.trace.event({
     jobId: input.jobId,
@@ -257,7 +303,7 @@ async function attempt(
       kind: 'acquire.candidates-capped',
       level: 'warn',
       jobId: input.jobId,
-      message: `Capped candidates for "${label}" from ${prefiltered.length} to ${kept.length} (dropped ${capDropped.length} lower-seeded candidate(s))`,
+      message: `Capped candidates for "${label}" from ${deduped.length} to ${kept.length} (dropped ${capDropped.length} candidate(s))`,
       data: { title: input.title, seasonNumber: input.seasonNumber, droppedCount: capDropped.length },
     });
   }
@@ -275,6 +321,7 @@ async function attempt(
     kind: input.kind,
     seasonNumber: input.seasonNumber,
     hint: input.hint,
+    mode: input.mode === 'movie' ? undefined : input.mode,
     jobId: input.jobId,
   });
 
@@ -297,9 +344,21 @@ async function attempt(
     releaseGroup: pick.releaseGroup,
     reasoning: pick.reasoning,
     pickedTitle: picked.title,
+    pickedFullSeason: picked.fullSeason === true,
     kept,
     dropped,
   };
+}
+
+function missingAiredEpisodeNumbers(episodes: EpisodeResource[], seasonNumber: number, now = Date.now()): number[] {
+  return episodes
+    .filter((e) => {
+      if (e.seasonNumber !== seasonNumber || e.hasFile) return false;
+      if (!e.airDateUtc) return false;
+      const aired = Date.parse(e.airDateUtc);
+      return !Number.isNaN(aired) && aired <= now;
+    })
+    .map((e) => e.episodeNumber);
 }
 
 /** `seasonNumber`, when given, is folded into the event's `data` AND doubles as a

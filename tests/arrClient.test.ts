@@ -47,3 +47,20 @@ describe('ArrClient.ping', () => {
     expect(await new ArrClient(arrInstance()).ping()).toBe('unreachable');
   });
 });
+
+describe('ArrClient.searchSeason', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('POSTs SeasonSearch with seriesId and seasonNumber', async () => {
+    const fetchSpy = stubFetch(async () => new Response('', { status: 201 }));
+
+    await new ArrClient(arrInstance({ baseUrl: 'http://sonarr:8989' })).searchSeason(142, 1);
+
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('http://sonarr:8989/api/v3/command');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ name: 'SeasonSearch', seriesId: 142, seasonNumber: 1 });
+  });
+});

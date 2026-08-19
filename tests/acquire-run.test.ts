@@ -462,3 +462,153 @@ describe('runAcquireJob — double-grab guard (I10)', () => {
     expect(skipEvents[0]!.message).toContain('Season 1');
   });
 });
+
+describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
+  it('skips an unaired season without searching, without calling the LLM, and without opening attention', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'The Ramparts of Ice',
+          seasons: [
+            {
+              seasonNumber: 2,
+              monitored: true,
+              statistics: { episodeCount: 0, totalEpisodeCount: 1, nextAiring: '2026-10-01T14:45:00Z' },
+            },
+          ],
+        }),
+      ],
+      releases: [candidate({ guid: 'should-not-see' })],
+    });
+    const llm = new FakeGenerator([]);
+    const ctx = ctxWithClient('sonarr', client, { llm });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'The Ramparts of Ice' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.searchReleases).not.toHaveBeenCalled();
+    expect(llm.calls).toHaveLength(0);
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM acquire_records').get() as { n: number }).toEqual({ n: 0 });
+    const skips = ctx.events.list().filter((e) => e.kind === 'acquire.skip-unaired');
+    expect(skips).toHaveLength(1);
+    expect(skips[0]!.message).toContain('Season 2');
+  });
+
+  it('kicks a Sonarr season search after grabbing a single on a complete season', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'The Ramparts of Ice',
+          seasons: [
+            {
+              seasonNumber: 1,
+              monitored: true,
+              statistics: { episodeCount: 14, totalEpisodeCount: 14 },
+            },
+          ],
+        }),
+      ],
+      releases: [candidate({ guid: 'g-single', fullSeason: false, releaseGroup: undefined, title: '[Trix] S01E12' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([
+        pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'Trix', confidence: 'high', reasoning: 'fallback single' }),
+      ]),
+    });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'The Ramparts of Ice' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.grabbed).toEqual([{ guid: 'g-single', indexerId: candidate({}).indexerId }]);
+    expect(client.seasonSearches).toEqual([{ seriesId: 42, seasonNumber: 1 }]);
+    expect(client.profiles[0]?.required).toEqual(['Trix']);
+  });
+
+  it('grabs the only surviving pack on a complete season without calling the LLM', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'The Ramparts of Ice',
+          seasons: [
+            {
+              seasonNumber: 1,
+              monitored: true,
+              statistics: { episodeCount: 14, totalEpisodeCount: 14 },
+            },
+          ],
+        }),
+      ],
+      releases: [
+        candidate({ guid: 'g-pack', fullSeason: true, releaseGroup: 'Trix', title: '[Trix] S01 Batch' }),
+        candidate({ guid: 'g-ep', fullSeason: false, seeders: 3000, title: 'S01E12' }),
+      ],
+    });
+    const llm = new FakeGenerator([]);
+    const ctx = ctxWithClient('sonarr', client, { llm });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'The Ramparts of Ice' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(llm.calls).toHaveLength(0);
+    expect(client.grabbed).toEqual([{ guid: 'g-pack', indexerId: candidate({}).indexerId }]);
+    expect(client.seasonSearches).toHaveLength(0);
+  });
+
+  it('does not kick a season search after grabbing a pack on a complete season', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'The Ramparts of Ice',
+          seasons: [
+            {
+              seasonNumber: 1,
+              monitored: true,
+              statistics: { episodeCount: 14, totalEpisodeCount: 14 },
+            },
+          ],
+        }),
+      ],
+      releases: [candidate({ guid: 'g-pack', fullSeason: true, title: 'S01 Batch' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([
+        pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'Trix', confidence: 'high', reasoning: 'pack' }),
+      ]),
+    });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'The Ramparts of Ice' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.grabbed).toHaveLength(1);
+    expect(client.seasonSearches).toHaveLength(0);
+  });
+});

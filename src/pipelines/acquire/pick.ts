@@ -3,6 +3,7 @@ import type { ReleaseCandidate } from '../../arr/types.js';
 import { LlmError, type StructuredGenerator } from '../../llm/generator.js';
 import { BYTES_PER_GB } from '../../util/bytes.js';
 import { synthesizePolicyPrompt } from './policy.js';
+import type { SeasonMode } from './seasonMode.js';
 
 /**
  * Shape the LLM itself answers with. The prompt only ever shows the LLM a numbered
@@ -60,23 +61,79 @@ type PickResult = z.infer<typeof PickResultSchema>;
 
 const CALLSITE = 'release-pick';
 
-/** Renders one numbered candidate line, e.g. `#1 [title] | 1.4 GB | 25 seeders | indexer`. */
-function renderCandidateLine(index: number, c: ReleaseCandidate): string {
-  const sizeGB = (c.size / BYTES_PER_GB).toFixed(1);
-  const seedersLabel = c.seeders === null || c.seeders === undefined ? '? seeders' : `${c.seeders} seeders`;
-  return `#${index + 1} [${c.title}] | ${sizeGB} GB | ${seedersLabel} | ${c.indexer}`;
+function isPack(c: ReleaseCandidate): boolean {
+  return c.fullSeason === true;
+}
+
+function groupFromTitle(title: string): string | null {
+  const m = title.match(/^\[([^\]]+)\]/);
+  const group = m?.[1]?.trim();
+  return group && group.length > 0 ? group : null;
+}
+
+function resolveReleaseGroup(c: ReleaseCandidate): string | null {
+  if (c.releaseGroup && c.releaseGroup.length > 0) return c.releaseGroup;
+  return groupFromTitle(c.title);
+}
+
+function hostPick(c: ReleaseCandidate, reasoning: string): PickResult {
+  return {
+    decision: 'pick',
+    guid: c.guid,
+    releaseGroup: resolveReleaseGroup(c),
+    confidence: 'high',
+    reasoning,
+  };
+}
+
+function shapeOwned(mode: SeasonMode | undefined): boolean {
+  return mode === 'complete' || mode === 'airing';
 }
 
 /**
- * Asks the LLM to pick one release (or declare none viable) from the prefiltered
- * candidate list. Builds the policy prompt via `synthesizePolicyPrompt`, appends a
- * numbered rendering of every candidate, and calls the LLM with `LlmPickResponseSchema`
- * — the LLM answers with the candidate's 1-based number, since it's never shown a guid
- * to answer with in the first place. A `pick` decision's number is mapped back to the
- * real candidate (and its guid) after the schema validates the shape — the schema can
- * only check "is this an int", not "is this a number that exists in the list", so an
- * out-of-range number throws `LlmError` rather than propagating a pick that doesn't
- * correspond to any real candidate.
+ * The host already decided pack vs single from Sonarr facts. Complete prefers packs
+ * and falls back to singles only when no pack survived. Airing is the reverse.
+ * Unknown/movie keep the full list: the host did not claim a shape.
+ */
+export function eligibleCandidates(mode: SeasonMode | undefined, candidates: ReleaseCandidate[]): ReleaseCandidate[] {
+  if (mode === 'complete') {
+    const packs = candidates.filter(isPack);
+    return packs.length > 0 ? packs : candidates.filter((c) => !isPack(c));
+  }
+  if (mode === 'airing') {
+    const singles = candidates.filter((c) => !isPack(c));
+    return singles.length > 0 ? singles : candidates.filter(isPack);
+  }
+  return candidates;
+}
+
+function episodeNumbersOf(c: ReleaseCandidate): number[] {
+  if (c.mappedEpisodeNumbers && c.mappedEpisodeNumbers.length > 0) return c.mappedEpisodeNumbers;
+  return c.episodeNumbers ?? [];
+}
+
+function candidateShape(c: ReleaseCandidate): 'pack' | 'multi' | 'single' {
+  if (c.fullSeason === true) return 'pack';
+  return episodeNumbersOf(c).length > 1 ? 'multi' : 'single';
+}
+
+/** Renders one numbered candidate line, e.g. `#1 pack | [title] | WEBDL-1080p | Trix | Japanese | 2.2 GB | 130 seeders | Nyaa`. */
+function renderCandidateLine(index: number, c: ReleaseCandidate): string {
+  const sizeGB = (c.size / BYTES_PER_GB).toFixed(1);
+  const seedersLabel = c.seeders === null || c.seeders === undefined ? '? seeders' : `${c.seeders} seeders`;
+  const quality = c.quality?.quality?.name ?? '?';
+  const group = c.releaseGroup && c.releaseGroup.length > 0 ? c.releaseGroup : '?';
+  const langs =
+    c.languages && c.languages.length > 0 ? c.languages.map((l) => l.name).join(', ') : '?';
+  return `#${index + 1} ${candidateShape(c)} | [${c.title}] | ${quality} | ${group} | ${langs} | ${sizeGB} GB | ${seedersLabel} | ${c.indexer}`;
+}
+
+/**
+ * Picks one release from the prefiltered list. For a complete or airing season the
+ * host first builds the eligible set (packs vs singles); one eligible is a grab and
+ * several are ranked by the LLM, which cannot empty that set. Unknown/movie lists
+ * still go to the LLM and may still come back none. The LLM answers with a 1-based
+ * number into the eligible list, never a guid.
  */
 export async function pickRelease(input: {
   llm: StructuredGenerator;
@@ -86,6 +143,7 @@ export async function pickRelease(input: {
   title: string;
   kind: 'series' | 'movie';
   seasonNumber?: number;
+  mode?: SeasonMode;
   hint?: string;
   /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
    * with no job at hand (tests), which just means the call isn't traced. */
@@ -95,16 +153,20 @@ export async function pickRelease(input: {
   // `synthesizePolicyPrompt` and would change the prompt bytes.
   const { llm, candidates, jobId, ...promptInput } = input;
 
-  // Nothing to choose from — an empty candidate list isn't a policy question, so it's
-  // not worth an LLM round-trip (cost, latency, and a queued fixture the caller would
-  // have to supply for a foregone conclusion).
-  if (candidates.length === 0) {
+  const pool = eligibleCandidates(promptInput.mode, candidates);
+
+  // Empty after host filtering is the only real none. One eligible release is a grab:
+  // there is nothing to rank.
+  if (pool.length === 0) {
     return { decision: 'none', reasoning: 'no candidates' };
+  }
+  if (shapeOwned(promptInput.mode) && pool.length === 1) {
+    return hostPick(pool[0]!, 'only eligible release');
   }
 
   const { system, user } = synthesizePolicyPrompt(promptInput);
 
-  const candidateLines = candidates.map((c, i) => renderCandidateLine(i, c)).join('\n');
+  const candidateLines = pool.map((c, i) => renderCandidateLine(i, c)).join('\n');
   const prompt = [user, 'Candidates:', candidateLines].join('\n\n');
 
   const result = await llm.generate({
@@ -115,16 +177,20 @@ export async function pickRelease(input: {
     trace: jobId !== undefined ? { jobId } : undefined,
   });
 
-  if (result.decision === 'none') return { decision: 'none', reasoning: result.reasoning };
+  if (result.decision === 'none' && result.candidate === null) {
+    if (shapeOwned(promptInput.mode)) {
+      return hostPick(pool[0]!, `eligible set is non-empty; ignored none-viable (${result.reasoning})`);
+    }
+    return { decision: 'none', reasoning: result.reasoning };
+  }
 
-  // Unreachable after the schema's superRefine, but keeps the nullable type honest.
   if (result.candidate === null) {
     throw new LlmError('LLM said "pick" without a candidate number', CALLSITE);
   }
-  const picked = candidates[result.candidate - 1];
+  const picked = pool[result.candidate - 1];
   if (!picked) {
     throw new LlmError(
-      `LLM picked candidate number ${result.candidate}, which is out of range (candidates are numbered 1-${candidates.length})`,
+      `LLM picked candidate number ${result.candidate}, which is out of range (candidates are numbered 1-${pool.length})`,
       CALLSITE,
     );
   }
