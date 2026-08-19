@@ -20,10 +20,10 @@ function notificationUrl(notification: NotificationSummary): string | undefined 
 }
 
 /**
- * Self-registers the Warrden webhook notification on every configured arr instance
- * that doesn't already have one. Idempotent (checks by name before creating) and
- * fault-tolerant: a broken/unreachable/unconfigured instance logs a warning and is
- * skipped, it never stops the rest from registering.
+ * Self-registers the Warrden webhook notification on every configured arr instance that
+ * doesn't already have a correct one: create when absent, PUT in place when present but
+ * wrong. Idempotent (checks by name first) and fault-tolerant: an instance that errors
+ * raises its own attention item and is skipped, it never stops the rest from registering.
  */
 export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
   const managedObjects = new ManagedObjects(ctx.db);
@@ -43,34 +43,6 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
     const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
 
     try {
-      const existing = await client.listNotifications();
-      const found = existing.find((n) => n.name === NOTIFICATION_NAME);
-      // Set only when we've just deleted a stale registration — tracks both "recreate,
-      // not fresh-create" for the event payload below, and the removed id for the
-      // recreate-failure warning if the replacement create doesn't land.
-      let recreatedFromId: number | undefined;
-      if (found) {
-        const registeredUrl = notificationUrl(found);
-        // A rename of this instance, or a `server.publicUrl` change, moves the path we
-        // actually serve: the arr keeps POSTing to the old one and every event it sends is
-        // dropped on the floor, silently and for as long as nobody notices.
-        const pointsElsewhere = registeredUrl !== undefined && registeredUrl !== url;
-        if (found.onDownload === true && found.onUpgrade === true && !pointsElsewhere) {
-          // Already present in the arr and subscribed to everything we need, but the
-          // local registry may have been reset (fresh db, restore) — re-record it so
-          // GC (reconcile.ts's gc()) can still find it.
-          managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
-          continue;
-        }
-        // Missing import events (a Phase 1 registration), or pointing at an address that
-        // isn't ours any more: recreate rather than PUT, since a full notification update
-        // requires round-tripping every field, and delete+create with our own known-good
-        // body is simpler and idempotent under the name check above.
-        await client.deleteNotification(found.id);
-        managedObjects.delete(arr.name, 'notification', found.id);
-        recreatedFromId = found.id;
-      }
-
       const body = {
         name: NOTIFICATION_NAME,
         implementation: 'Webhook',
@@ -85,56 +57,55 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
         onUpgrade: true,
       };
 
-      let created: NotificationSummary;
-      try {
-        created = await client.createNotification(body);
-      } catch (err) {
-        // A fresh-create failure (no prior delete) is just a normal registration
-        // failure — fall through to the outer catch's "webhook.register-failed". A
-        // recreate failure is worse: the old notification is already gone, so the arr
-        // has *no* Warrden webhook right now. Retry once immediately (cheap — every
-        // startup retries anyway) before reporting that explicitly.
-        if (recreatedFromId === undefined) throw err;
-
-        // The create call can fail on our end (timeout, dropped connection) AFTER the arr
-        // already committed it server-side — a blind retry in that case would create a
-        // genuine duplicate on top of it. Re-list by name first: if "Warrden" is already
-        // there, that's the create that just failed to tell us it succeeded; record it
-        // instead of creating a second one. A re-list failure here is treated the same as
-        // "nothing found" — it falls through to the blind retry below, same as before this
-        // check existed.
-        const relisted = await client.listNotifications().catch(() => []);
-        const alreadyCommitted = relisted.find((n) => n.name === NOTIFICATION_NAME);
-        if (alreadyCommitted) {
-          created = alreadyCommitted;
-        } else {
-          try {
-            created = await client.createNotification(body);
-          } catch (retryErr) {
-            ctx.events.append({
-              kind: 'webhook.recreate-failed',
-              level: 'warn',
-              message: `Removed the stale "${NOTIFICATION_NAME}" webhook on "${arr.name}" but failed to recreate it — the instance currently has no Warrden webhook: ${errorMessage(retryErr)}`,
-              data: { instance: arr.name, oldId: recreatedFromId },
-            });
-            continue;
-          }
+      const existing = await client.listNotifications();
+      const found = existing.find((n) => n.name === NOTIFICATION_NAME);
+      if (found) {
+        const registeredUrl = notificationUrl(found);
+        // A rename of this instance, or a `server.publicUrl` change, moves the path we
+        // actually serve: the arr keeps POSTing to the old one and every event it sends is
+        // dropped on the floor, silently and for as long as nobody notices.
+        const pointsElsewhere = registeredUrl !== undefined && registeredUrl !== url;
+        if (found.onDownload === true && found.onUpgrade === true && !pointsElsewhere) {
+          // Already present in the arr and subscribed to everything we need, but the
+          // local registry may have been reset (fresh db, restore) — re-record it so
+          // GC (reconcile.ts's gc()) can still find it.
+          managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
+          continue;
         }
+        // Missing import events (a Phase 1 registration), or pointing at an address that
+        // isn't ours any more: PUT our own known-good body over the id it already has.
+        // Never delete-then-create: a create that doesn't land after the delete did
+        // leaves the arr with NO webhook (a live run lost 22 minutes of events that way),
+        // whereas a failed PUT leaves the old, wrong-but-present notification standing.
+        const updated = await client.updateNotification({ ...body, id: found.id });
+        managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: updated.id, name: NOTIFICATION_NAME });
+        ctx.events.append({
+          kind: 'webhook.registered',
+          message: `Updated the "${NOTIFICATION_NAME}" webhook on "${arr.name}" in place`,
+          data: { instance: arr.name, url, updated: true },
+        });
+        continue;
       }
 
+      const created = await client.createNotification(body);
       managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: created.id, name: NOTIFICATION_NAME });
 
       ctx.events.append({
         kind: 'webhook.registered',
         message: `Registered "${NOTIFICATION_NAME}" webhook on "${arr.name}"`,
-        data: recreatedFromId !== undefined ? { instance: arr.name, url, recreated: true } : { instance: arr.name, url },
+        data: { instance: arr.name, url },
       });
     } catch (err) {
+      // Attention, not warn: every path that lands here ends with the instance having no
+      // webhook we can vouch for, and the symptom (nothing ever arrives from this arr) is
+      // invisible until someone goes looking. `targetKind`/`targetId` are what
+      // `AttentionItems.open` actually dedupes on, so a failure that repeats every startup
+      // refreshes one open row per instance instead of piling up a new one per pass.
       ctx.events.append({
         kind: 'webhook.register-failed',
-        level: 'warn',
-        message: `Failed to register webhook on "${arr.name}": ${errorMessage(err)}`,
-        data: { instance: arr.name },
+        level: 'attention',
+        message: `Failed to register the Warrden webhook on "${arr.name}" - the instance may not be delivering events: ${errorMessage(err)}`,
+        data: { instance: arr.name, targetKind: 'notification', targetId: NOTIFICATION_NAME, dedupeKey: arr.name },
       });
     }
   }
