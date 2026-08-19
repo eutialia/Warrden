@@ -11,6 +11,7 @@ import { startRunner } from './jobs/runner.js';
 import { AiSdkGenerator } from './llm/generator.js';
 import { CliMediaTools } from './media/tools.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
+import { SearchCache } from './pipelines/acquire/searchCache.js';
 import { runIngestJob } from './pipelines/ingest/run.js';
 import { runSubtitleJob } from './pipelines/subtitle/run.js';
 import { createApp } from './server/app.js';
@@ -41,6 +42,7 @@ function buildContext(dataDir: string): AppContext {
     // config route so startup and a live save can't drift apart.
     clients: new Map<string, ArrApi>(),
     llm: new AiSdkGenerator(() => ctx.config, trace),
+    searchCache: new SearchCache(),
     trace,
     media: new CliMediaTools(),
   };

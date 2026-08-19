@@ -737,3 +737,42 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     expect(client.seasonSearches).toHaveLength(0);
   });
 });
+
+describe('runAcquireJob: interactive search cache across job retries', () => {
+  function noneResponse(): Record<string, unknown> {
+    return pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'nothing matches policy' });
+  }
+
+  /** A job whose first run dies inside the pick (the transient failure the runner retries)
+   * and whose next two runs answer 'none', so no grab is recorded and the double-grab
+   * guard never masks whether a later run searched again. */
+  function retryFixture(targetKind: 'series' | 'movie') {
+    const client = fakeArrClient({
+      series: [seriesResource({ id: 42, title: 'Frieren' })],
+      movies: [movieResource({ title: 'A Movie', year: 2023 })],
+      releases: [candidate({ guid: 'g1' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([new Error('llm blip'), noneResponse(), noneResponse()]) });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind, targetId: targetKind === 'movie' ? 7 : 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
+    return { ctx, client, job };
+  }
+
+  it.each(['series', 'movie'] as const)('re-runs a failed %s job off the cached candidates instead of re-sweeping the indexers', async (targetKind) => {
+    const { ctx, client, job } = retryFixture(targetKind);
+
+    await expect(runAcquireJob(ctx, job)).rejects.toThrow('llm blip');
+    await runAcquireJob(ctx, job);
+
+    expect(client.searchReleases).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['series', 'movie'] as const)('searches again for a %s once a run finished cleanly and cleared the job', async (targetKind) => {
+    const { ctx, client, job } = retryFixture(targetKind);
+
+    await expect(runAcquireJob(ctx, job)).rejects.toThrow('llm blip');
+    await runAcquireJob(ctx, job);
+    await runAcquireJob(ctx, job);
+
+    expect(client.searchReleases).toHaveBeenCalledTimes(2);
+  });
+});

@@ -6,6 +6,7 @@ import type { EventLog } from './events/log.js';
 import type { JobQueue } from './jobs/queue.js';
 import type { StructuredGenerator } from './llm/generator.js';
 import type { MediaTools } from './media/tools.js';
+import type { SearchCache } from './pipelines/acquire/searchCache.js';
 import type { Tracer } from './trace/tracer.js';
 
 // grows as later tasks add more fields
@@ -19,6 +20,9 @@ export interface AppContext {
   // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly
   clients: Map<string, ArrApi>;
   llm: StructuredGenerator;
+  // Process-wide so a job's retry (a different runner tick, same process) can still see what
+  // its previous run already searched, instead of re-sweeping every indexer for it.
+  searchCache: SearchCache;
   trace: Tracer;
   // External media binaries (ffprobe/alass/ffsubsync) behind one seam — production wires
   // CliMediaTools, tests inject a fake. Optional so existing Partial<AppContext> call

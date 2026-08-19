@@ -77,6 +77,10 @@ interface RecordOutcomeInput {
  * across a job's own rows via `AcquireRecords.outcomeForJob` rather than reading any single
  * row, since the latest row alone doesn't reflect "any season grabbed" when a later season's
  * own outcome was worse than an earlier one's.
+ *
+ * Every interactive search a run performs is cached per (job, target) in `ctx.searchCache`
+ * and only cleared once the job finishes without throwing, so the retry a mid-run failure
+ * earns replays those candidates instead of sweeping every indexer a second time.
  */
 export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void> {
   const rawClient = ctx.clients.get(job.arr_instance);
@@ -90,12 +94,31 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
   if (job.target_kind === 'movie') {
     const title = await resolveTargetTitle(client, job);
     await runMovieAcquire(ctx, job, client, title);
-    return;
+  } else {
+    const series = await client.getSeries(job.target_id);
+    const title = resolvePayloadTitle(job) ?? series.title;
+    await runSeriesAcquire(ctx, job, client, title, series.seasons);
   }
 
-  const series = await client.getSeries(job.target_id);
-  const title = resolvePayloadTitle(job) ?? series.title;
-  await runSeriesAcquire(ctx, job, client, title, series.seasons);
+  // Only reached on a clean finish: a throw leaves this job's cached candidates in place,
+  // which is exactly who the cache is for (the retry the runner is about to schedule).
+  ctx.searchCache.clearJob(job.id);
+}
+
+/** Searches the arr for `key`'s candidates, or replays what this job's previous run already
+ * found. `key` names the target within the job (`'movie'`, or `` `s${seasonNumber}` ``), so
+ * each season of a series keeps its own entry. */
+async function cachedSearch(
+  ctx: AppContext,
+  job: JobRow,
+  key: string,
+  search: () => Promise<ReleaseCandidate[]>,
+): Promise<ReleaseCandidate[]> {
+  const cached = ctx.searchCache.get(job.id, key);
+  if (cached) return cached;
+  const raw = await search();
+  ctx.searchCache.set(job.id, key, raw);
+  return raw;
 }
 
 async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, title: string): Promise<void> {
@@ -109,7 +132,7 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
     return;
   }
 
-  const raw = await client.searchReleases({ movieId: job.target_id });
+  const raw = await cachedSearch(ctx, job, 'movie', () => client.searchReleases({ movieId: job.target_id }));
   const result = await attempt(ctx, client, raw, { title, kind: 'movie', jobId: job.id, hint: resolveHint(job) });
 
   if (result.status !== 'grabbed') {
@@ -187,7 +210,9 @@ async function runSeriesAcquire(
       continue;
     }
 
-    const raw = await client.searchReleases({ seriesId: job.target_id, seasonNumber: season.seasonNumber });
+    const raw = await cachedSearch(ctx, job, `s${season.seasonNumber}`, () =>
+      client.searchReleases({ seriesId: job.target_id, seasonNumber: season.seasonNumber }),
+    );
     let missingEpisodeNumbers: number[] | undefined;
     if (mode === 'airing') {
       const episodes = await client.listEpisodes(job.target_id);

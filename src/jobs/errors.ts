@@ -2,7 +2,7 @@
  * Whether `err` is one no retry can fix (a provider contract error, a prompt the SDK
  * refuses to send), so the runner should fail its job terminally on first sight instead of
  * burning every attempt on the same rejection. Duck-typed rather than `instanceof` so any
- * layer can mark an error permanent without this module importing it — the llm layer's
+ * layer can mark an error permanent without this module importing it. The llm layer's
  * `LlmError` is the main producer.
  */
 export function isPermanentError(err: unknown): boolean {

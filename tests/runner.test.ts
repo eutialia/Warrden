@@ -88,7 +88,7 @@ describe('startRunner', () => {
   it('fails a permanently-marked error terminally on the first attempt, without burning the remaining retries', async () => {
     const ctx = makeCtx();
     const { id } = ctx.queue.enqueue(target);
-    // Duck-typed marker, exactly how `LlmError` carries it — the runner must not need to
+    // Duck-typed marker, exactly how `LlmError` carries it: the runner must not need to
     // know which layer produced the error to honour it.
     const handler = vi.fn().mockRejectedValue(Object.assign(new Error('invalid request'), { permanent: true }));
     const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });

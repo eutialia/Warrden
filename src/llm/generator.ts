@@ -45,7 +45,7 @@ export class LlmError extends Error {
  * Whether the failure can never succeed on a retry: a 4xx the provider already rejected the
  * request with (408/429 are the transient ones), a prompt the SDK itself refuses to send, or
  * a model that failed structured output on both in-call attempts. Retrying those costs a
- * full job re-run — for the acquire pipeline, another sweep of every indexer — to arrive at
+ * full job re-run (for the acquire pipeline, another sweep of every indexer) to arrive at
  * the identical rejection.
  *
  * Traverses `cause` links AND `AggregateError.errors`, because `withRetry` parks the first

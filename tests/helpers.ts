@@ -29,6 +29,7 @@ import type { SiteProfileRow } from '../src/db/siteProfiles.js';
 import { EventLog, type EventRow } from '../src/events/log.js';
 import { JobQueue, type EnqueueInput, type JobRow, type PipelineName, type TargetKind } from '../src/jobs/queue.js';
 import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
+import { SearchCache } from '../src/pipelines/acquire/searchCache.js';
 import { createApp } from '../src/server/app.js';
 import { SqlTracer } from '../src/trace/tracer.js';
 import { BYTES_PER_GB } from '../src/util/bytes.js';
@@ -95,6 +96,7 @@ export function makeCtx(overrides?: Partial<AppContext>): AppContext {
     events,
     clients: new Map<string, ArrApi>(),
     llm: new FakeGenerator(),
+    searchCache: new SearchCache(),
     // Captures by default so pipeline tests get real trace rows without opting in;
     // tests that care about the off-state pass `trace: NOOP_TRACER`.
     trace: overrides?.trace ?? new SqlTracer(db, events, () => true),

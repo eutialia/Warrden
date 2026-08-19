@@ -256,7 +256,13 @@ describe('AiSdkGenerator provider-error classification', () => {
       message: 'no object generated',
       text: 'not json',
       response: { id: 'r1', timestamp: new Date(0), modelId: 'primary-model' },
-      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        inputTokenDetails: { noCacheTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        outputTokenDetails: { textTokens: 1, reasoningTokens: 0 },
+      },
       finishReason: 'stop',
     });
     expect(await permanenceOf(err)).toBe(true);
