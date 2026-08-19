@@ -33,6 +33,11 @@ const DownloadSchema = z.object({
 
 const WebhookSchema = z.discriminatedUnion('eventType', [SeriesAddSchema, MovieAddedSchema, DownloadSchema, TestSchema]);
 
+/** A season pack import fires one Download webhook per episode; enqueueing each ingest run
+ * `notBefore` this far out lets the queue's coalescing (which resets the pending twin's
+ * not_before on every duplicate) collapse the storm into one run after the last webhook. */
+export const INGEST_DEBOUNCE_MS = 30_000;
+
 interface HandleWebhookResult {
   handled: boolean;
   reason?: string;
@@ -110,6 +115,7 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
     targetId: target.id,
     arrInstance: instanceName,
     payload: jobPayload,
+    ...(event.eventType === 'Download' ? { notBefore: Date.now() + INGEST_DEBOUNCE_MS } : {}),
   });
   traceTrigger(ctx.trace, result, {
     kind: 'trigger.webhook',

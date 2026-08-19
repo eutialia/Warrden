@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { handleWebhook } from '../src/arr/webhooks.js';
-import { makeCtx, configWithArrs, fakeArrClient } from './helpers.js';
+import { describe, it, expect, vi } from 'vitest';
+import { handleWebhook, INGEST_DEBOUNCE_MS } from '../src/arr/webhooks.js';
+import { makeCtx, configWithArrs, fakeArrClient, withFakeTime } from './helpers.js';
 import type { ArrApi } from '../src/arr/types.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 
@@ -40,8 +40,10 @@ describe('handleWebhook', () => {
     const ctx = knownArrsCtx();
     const target = 'series' in payload ? payload.series : payload.movie;
     expect(handleWebhook(ctx, instance, payload).handled).toBe(true);
-    const job = ctx.queue.claim()!;
-    expect(job).toMatchObject({ pipeline: 'ingest', target_kind: targetKind, target_id: targetId, arr_instance: instance });
+    // Not `claim()`: a Download enqueue's `not_before` is debounced INGEST_DEBOUNCE_MS into
+    // the future (see below), so it isn't claimable yet; read the pending row back directly.
+    const job = ctx.queue.list().find((j) => j.pipeline === 'ingest')!;
+    expect(job).toMatchObject({ pipeline: 'ingest', target_kind: targetKind, target_id: targetId, arr_instance: instance, status: 'pending' });
     // No `downloadId` — the payload above carries one (mimicking a real webhook body), but
     // it's never read, so it must not survive onto the job payload. `isUpgrade` DOES ride
     // along: the subtitle pipeline reads it to decide whether an upgrade re-triggers sub
@@ -51,6 +53,39 @@ describe('handleWebhook', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: 'webhook.received', job_id: job.id });
     expect(events[0]!.data).toMatchObject({ isUpgrade });
+  });
+
+  it('debounces a Download webhook\'s ingest enqueue by INGEST_DEBOUNCE_MS', () => {
+    const ctx = knownArrsCtx();
+    const now = Date.now();
+    handleWebhook(ctx, 'sonarr', seriesDownload);
+    const job = ctx.queue.list().find((j) => j.pipeline === 'ingest')!;
+    expect(job.not_before).toBeGreaterThanOrEqual(now + INGEST_DEBOUNCE_MS - 1000);
+  });
+
+  it('coalesces a second Download webhook and pushes not_before forward, one run after the storm', () => {
+    withFakeTime(() => {
+      vi.setSystemTime(1_000);
+      const ctx = knownArrsCtx();
+      handleWebhook(ctx, 'sonarr', seriesDownload);
+      const firstJob = ctx.queue.list().find((j) => j.pipeline === 'ingest')!;
+      expect(firstJob.not_before).toBe(1_000 + INGEST_DEBOUNCE_MS);
+
+      vi.setSystemTime(1_000 + 10_000); // a second Download webhook, 10 simulated seconds later
+      expect(handleWebhook(ctx, 'sonarr', seriesDownload).handled).toBe(true);
+
+      // events.list() is newest-first, so the second webhook's event is events[0].
+      expect(ctx.events.list()[0]!.data).toMatchObject({ outcome: 'coalesced' });
+      expect(ctx.queue.get(firstJob.id)!.not_before).toBe(1_000 + 10_000 + INGEST_DEBOUNCE_MS);
+      expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest')).toHaveLength(1);
+    });
+  });
+
+  it('keeps not_before = 0 for a SeriesAdd acquire enqueue (no debounce outside Download)', () => {
+    const ctx = knownArrsCtx();
+    handleWebhook(ctx, 'sonarr', seriesAdd);
+    const job = ctx.queue.list().find((j) => j.pipeline === 'acquire')!;
+    expect(job.not_before).toBe(0);
   });
 
   it('ignores a Download event with neither series nor movie', () => {

@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleWebhook } from '../src/arr/webhooks.js';
+import { handleWebhook, INGEST_DEBOUNCE_MS } from '../src/arr/webhooks.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { startRunner } from '../src/jobs/runner.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
@@ -39,7 +39,10 @@ describe('end-to-end: webhook -> queue -> runner -> ingest', () => {
 
     const stop = startRunner(fx.ctx, REAL_HANDLERS, { intervalMs: 10 });
     try {
-      await vi.advanceTimersByTimeAsync(20);
+      // The Download webhook's ingest enqueue is debounced INGEST_DEBOUNCE_MS out (Task 6);
+      // advance past that quiescence window, then the same margin the pre-debounce version
+      // of this test used for the runner to actually pick the job up and finish it.
+      await vi.advanceTimersByTimeAsync(INGEST_DEBOUNCE_MS + 20);
     } finally {
       stop();
     }
