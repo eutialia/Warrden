@@ -71,23 +71,12 @@ function groupFromTitle(title: string): string | null {
   return group && group.length > 0 ? group : null;
 }
 
-function resolveReleaseGroup(c: ReleaseCandidate): string | null {
+/** The arr's own `releaseGroup` when it filled one in, else the bracketed prefix of the
+ * title (`[Trix] ...`), which is where fansub releases actually carry it. Exported because
+ * `run.ts` needs the same answer for a candidate the LLM never picked (a force-grab offer). */
+export function resolveReleaseGroup(c: ReleaseCandidate): string | null {
   if (c.releaseGroup && c.releaseGroup.length > 0) return c.releaseGroup;
   return groupFromTitle(c.title);
-}
-
-function hostPick(c: ReleaseCandidate, reasoning: string): PickResult {
-  return {
-    decision: 'pick',
-    guid: c.guid,
-    releaseGroup: resolveReleaseGroup(c),
-    confidence: 'high',
-    reasoning,
-  };
-}
-
-function shapeOwned(mode: SeasonMode | undefined): boolean {
-  return mode === 'complete' || mode === 'airing';
 }
 
 /**
@@ -129,11 +118,12 @@ function renderCandidateLine(index: number, c: ReleaseCandidate): string {
 }
 
 /**
- * Picks one release from the prefiltered list. For a complete or airing season the
- * host first builds the eligible set (packs vs singles); one eligible is a grab and
- * several are ranked by the LLM, which cannot empty that set. Unknown/movie lists
- * still go to the LLM and may still come back none. The LLM answers with a 1-based
- * number into the eligible list, never a guid.
+ * Picks one release from the prefiltered list. The host owns only the SHAPE of the
+ * eligible set (packs vs singles, via `eligibleCandidates`); the LLM ranks whatever
+ * survives — even a pool of one — and its `none` verdict is returned verbatim rather
+ * than overridden here. What a veto costs is the CALLER's call: `run.ts` turns a
+ * shape-owned one into a human attention item offering a force-grab. The LLM answers
+ * with a 1-based number into the eligible list, never a guid.
  */
 export async function pickRelease(input: {
   llm: StructuredGenerator;
@@ -155,13 +145,9 @@ export async function pickRelease(input: {
 
   const pool = eligibleCandidates(promptInput.mode, candidates);
 
-  // Empty after host filtering is the only real none. One eligible release is a grab:
-  // there is nothing to rank.
+  // Nothing to rank and nothing to veto: the only none the host declares on its own.
   if (pool.length === 0) {
     return { decision: 'none', reasoning: 'no candidates' };
-  }
-  if (shapeOwned(promptInput.mode) && pool.length === 1) {
-    return hostPick(pool[0]!, 'only eligible release');
   }
 
   const { system, user } = synthesizePolicyPrompt(promptInput);
@@ -178,9 +164,6 @@ export async function pickRelease(input: {
   });
 
   if (result.decision === 'none' && result.candidate === null) {
-    if (shapeOwned(promptInput.mode)) {
-      return hostPick(pool[0]!, `eligible set is non-empty; ignored none-viable (${result.reasoning})`);
-    }
     return { decision: 'none', reasoning: result.reasoning };
   }
 

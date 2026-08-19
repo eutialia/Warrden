@@ -539,7 +539,7 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     expect(client.profiles[0]?.required).toEqual(['Trix']);
   });
 
-  it('grabs the only surviving pack on a complete season without calling the LLM', async () => {
+  it('offers the LLM only the surviving pack on a complete season, and grabs its pick', async () => {
     const client = fakeArrClient({
       series: [
         seriesResource({
@@ -559,7 +559,9 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
         candidate({ guid: 'g-ep', fullSeason: false, seeders: 3000, title: 'S01E12' }),
       ],
     });
-    const llm = new FakeGenerator([]);
+    const llm = new FakeGenerator([
+      pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'Trix', confidence: 'high', reasoning: 'the pack' }),
+    ]);
     const ctx = ctxWithClient('sonarr', client, { llm });
     const job = enqueueAndClaim(ctx, {
       pipeline: 'acquire',
@@ -571,7 +573,7 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
 
     await runAcquireJob(ctx, job);
 
-    expect(llm.calls).toHaveLength(0);
+    expect(llm.calls[0]!.prompt).not.toContain('S01E12'); // the single never made the eligible set
     expect(client.grabbed).toEqual([{ guid: 'g-pack', indexerId: candidate({}).indexerId }]);
     expect(client.seasonSearches).toHaveLength(0);
   });
