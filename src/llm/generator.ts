@@ -51,13 +51,17 @@ export class LlmError extends Error {
  * Traverses `cause` links AND `AggregateError.errors`, because `withRetry` parks the first
  * attempt's failure in an `AggregateError` on the last one's `cause`: a permanent error can
  * therefore sit either at the top or one hop into that aggregate. Bounded so a self- or
- * mutually-referencing cause chain can't spin.
+ * mutually-referencing cause chain can't spin. The bound counts real error nodes only, since
+ * every node queues its own `cause` and the `undefined` ones at the end of each chain would
+ * otherwise burn the budget before the error one hop further in is ever looked at.
  */
 function isPermanentProviderError(err: unknown): boolean {
   const pending: unknown[] = [err];
-  for (let seen = 0; seen < 5 && pending.length > 0; seen++) {
+  let seen = 0;
+  while (seen < 5 && pending.length > 0) {
     const e = pending.shift();
     if (typeof e !== 'object' || e === null) continue;
+    seen++;
     if (InvalidPromptError.isInstance(e) || NoObjectGeneratedError.isInstance(e)) return true;
     if (APICallError.isInstance(e) && isPermanentStatus(e.statusCode)) return true;
     if (e instanceof AggregateError) pending.push(...e.errors);
@@ -180,6 +184,24 @@ export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCach
   };
 }
 
+/** What `AiSdkGenerator` reports when a requested reasoning effort came back unused. `route`
+ * is the upstream provider OpenRouter actually picked (`providerMetadata.openrouter.provider`,
+ * empty-string when the response carried none), `undefined` when nothing named one: the only
+ * actionable half of the warning, since the model id alone doesn't say who dropped the field. */
+export interface EffortIgnoredInfo {
+  callsite: string;
+  model: string;
+  effort: Effort;
+  route: string | undefined;
+}
+
+/** The routed upstream provider out of one `generateObject` result's provider metadata. */
+function routeOf(providerMetadata: unknown): string | undefined {
+  const openrouter = (providerMetadata as { openrouter?: { provider?: unknown } } | undefined)?.openrouter;
+  const provider = openrouter?.provider;
+  return typeof provider === 'string' && provider.length > 0 ? provider : undefined;
+}
+
 /** `StructuredGenerator` backed by the Vercel AI SDK, running every call-site on the one
  * configured model. Takes a getter rather than a `Config` so the model and API keys are
  * read fresh on every call: a `PUT /api/config` swaps `ctx.config` wholesale, and a
@@ -189,7 +211,7 @@ export class AiSdkGenerator implements StructuredGenerator {
   constructor(
     private readonly getCfg: () => Config,
     private readonly trace: Tracer = NOOP_TRACER,
-    private readonly onEffortIgnored?: (info: { callsite: string; model: string; effort: Effort }) => void,
+    private readonly onEffortIgnored?: (info: EffortIgnoredInfo) => void,
   ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
@@ -249,7 +271,14 @@ export class AiSdkGenerator implements StructuredGenerator {
       // reasoning at all; no count reported means the provider said nothing, which proves
       // nothing either way.
       if (ref.effort !== undefined && ref.effort !== 'none' && result.usage?.outputTokenDetails?.reasoningTokens === 0) {
-        this.onEffortIgnored?.({ callsite: opts.callsite, model: ref.model, effort: ref.effort });
+        // Swallowed deliberately: this attempt already succeeded and was already paid for, so
+        // a reporting callback that throws must not escape into `withRetry` and buy a second
+        // identical call.
+        try {
+          this.onEffortIgnored?.({ callsite: opts.callsite, model: ref.model, effort: ref.effort, route: routeOf(result.providerMetadata) });
+        } catch {
+          // nothing to report the reporter with
+        }
       }
       return result.object;
     } catch (err) {

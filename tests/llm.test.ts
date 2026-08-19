@@ -1,12 +1,12 @@
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { APICallError, InvalidPromptError, NoObjectGeneratedError } from 'ai';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { z } from 'zod';
 import type { Config, Effort } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { isPermanentError } from '../src/jobs/errors.js';
-import { AiSdkGenerator, LlmError, resolveModel, withRetry } from '../src/llm/generator.js';
+import { AiSdkGenerator, LlmError, resolveModel, withRetry, type EffortIgnoredInfo } from '../src/llm/generator.js';
 import { NOOP_TRACER, SqlTracer } from '../src/trace/tracer.js';
 import { baseConfig, freshDb } from './helpers.js';
 
@@ -275,6 +275,16 @@ describe('AiSdkGenerator provider-error classification', () => {
   it('leaves an ordinary transport error retryable', async () => {
     expect(await permanenceOf(new Error('socket hang up'))).toBe(false);
   });
+
+  // The exact shape withRetry builds: the last attempt's error, with the first attempt's
+  // parked underneath it in an AggregateError. Walking it queues the `cause` of every node,
+  // including the undefined ones at the ends of each chain, and those are not nodes worth
+  // spending the traversal budget on.
+  it('finds a permanent error under the AggregateError withRetry parks on the cause, past the undefined cause hops in between', async () => {
+    const firstAttempt = new Error('attempt 1 failed', { cause: new Error('wrapped', { cause: apiCallError(400) }) });
+    const lastAttempt = new Error('attempt 2 failed', { cause: new AggregateError([firstAttempt], 'preceding attempts') });
+    expect(await permanenceOf(lastAttempt)).toBe(true);
+  });
 });
 
 describe('AiSdkGenerator reasoning effort', () => {
@@ -340,21 +350,25 @@ describe('AiSdkGenerator reasoning effort', () => {
   });
 });
 
+type EffortIgnoredMock = Mock<(info: EffortIgnoredInfo) => void>;
+
 describe('AiSdkGenerator ignored-effort detection', () => {
   const schema = z.object({ ok: z.boolean() });
 
   async function generateReporting(
     effort: Effort | undefined,
     reasoningTokens: number | undefined,
-  ): Promise<ReturnType<typeof vi.fn>> {
+    opts?: { providerMetadata?: Record<string, unknown>; callback?: EffortIgnoredMock },
+  ): Promise<EffortIgnoredMock> {
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({
       object: { ok: true },
       usage: { inputTokens: 10, outputTokens: 2, outputTokenDetails: { textTokens: 2, reasoningTokens } },
+      providerMetadata: opts?.providerMetadata,
     });
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort };
-    const onEffortIgnored = vi.fn();
+    const onEffortIgnored = opts?.callback ?? vi.fn<(info: EffortIgnoredInfo) => void>();
     await new AiSdkGenerator(() => cfg, NOOP_TRACER, onEffortIgnored).generate({
       callsite: 'site-search',
       schema,
@@ -369,7 +383,34 @@ describe('AiSdkGenerator ignored-effort detection', () => {
       callsite: 'site-search',
       model: 'deepseek/deepseek-v4-flash-0731',
       effort: 'high',
+      route: undefined,
     });
+  });
+
+  // Which upstream OpenRouter actually routed to is the only actionable half of the warning:
+  // the model id alone doesn't name the provider that dropped the reasoning field.
+  it('names the routed upstream provider when OpenRouter reported one', async () => {
+    const cb = await generateReporting('high', 0, { providerMetadata: { openrouter: { provider: 'DeepInfra' } } });
+    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ route: 'DeepInfra' }));
+  });
+
+  it.each([
+    { name: 'the provider field is the empty string the SDK falls back to', metadata: { openrouter: { provider: '' } } },
+    { name: 'no openrouter metadata came back at all', metadata: { anthropic: {} } },
+  ])('leaves route undefined when $name', async ({ metadata }) => {
+    const cb = await generateReporting('high', 0, { providerMetadata: metadata });
+    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ route: undefined }));
+  });
+
+  // The attempt already succeeded and was paid for: a reporting callback that throws must not
+  // turn it into a retry (and a second billed call).
+  it('survives a throwing callback: the generation still resolves, on one provider call', async () => {
+    const thrower: EffortIgnoredMock = vi.fn(() => {
+      throw new Error('event log is down');
+    });
+    await expect(generateReporting('high', 0, { callback: thrower })).resolves.toBe(thrower);
+    expect(thrower).toHaveBeenCalledTimes(1);
+    expect(generateObjectMock).toHaveBeenCalledTimes(1);
   });
 
   it('stays quiet when the model actually reasoned', async () => {
