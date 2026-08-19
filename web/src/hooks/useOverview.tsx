@@ -8,6 +8,7 @@ interface OverviewState {
   error: string | null;
   loading: boolean;
   refetch: () => void;
+  setDebugEnabled: (enabled: boolean) => void;
 }
 
 const OverviewContext = createContext<OverviewState | null>(null);
@@ -44,7 +45,14 @@ export function OverviewProvider({ children }: { children: ReactNode }) {
   useSseRefetch(refetch);
   useEffect(refetch, [refetch]);
 
-  const value = useMemo(() => ({ data, error, loading, refetch }), [data, error, loading, refetch]);
+  const setDebugEnabled = useCallback((enabled: boolean) => {
+    setData((prev) => (prev ? { ...prev, debugEnabled: enabled } : prev));
+  }, []);
+
+  const value = useMemo(
+    () => ({ data, error, loading, refetch, setDebugEnabled }),
+    [data, error, loading, refetch, setDebugEnabled],
+  );
 
   return <OverviewContext value={value}>{children}</OverviewContext>;
 }

@@ -33,6 +33,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { useOverview } from '@/hooks/useOverview';
 import { arrStatusLabel, arrStatusTone, storageStatusLabel, storageStatusTone } from '@/lib/labels';
 import { TONE_TEXT } from '@/lib/tone';
 import { cn, formatUsage } from '@/lib/utils';
@@ -109,6 +110,7 @@ export default function ConfigPage() {
   // being down.
   const [arrChecks, setArrChecks] = useState<ArrCheck[] | null>(null);
   const { theme, setTheme } = useTheme();
+  const { refetch: refetchOverview, setDebugEnabled } = useOverview();
 
   const loadArrHealth = useCallback(() => {
     fetchArrHealth()
@@ -257,6 +259,10 @@ export default function ConfigPage() {
 
       await saveConfig(payload);
       toast.success('Settings saved');
+      // Sidebar Debug item and the amber frame read `debugEnabled` from overview, which
+      // otherwise only moves on SSE / the 45s heartbeat — config PUT emits neither.
+      setDebugEnabled(payload.debug.enabled);
+      refetchOverview();
       // Same three independent reads as `load()`, and re-read for the same reason: the
       // server is the authority on what was actually stored, and both probes now have new
       // instances to answer for.
