@@ -26,7 +26,7 @@ import { siteKey } from '../config/siteLabel.js';
 import { saveConfig } from '../config/store.js';
 import { applyConfig, type AppContext } from '../context.js';
 import { AcquireRecords } from '../db/acquireRecords.js';
-import { AttentionItems, type AttentionStatus } from '../db/attention.js';
+import { AttentionItems, type AttentionRow, type AttentionStatus } from '../db/attention.js';
 import { ManagedObjects } from '../db/managedObjects.js';
 import { Overview } from '../db/overview.js';
 import { PlacedFiles } from '../db/placedFiles.js';
@@ -38,6 +38,7 @@ import type { JobRow, TargetKind } from '../jobs/queue.js';
 import { ModelCatalog } from '../llm/catalog.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 import { pinReleaseGroup } from '../pipelines/acquire/pin.js';
+import { assessQueue } from '../pipelines/ingest/queueState.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
 import { cachedStorage, probeStorage } from './storageHealth.js';
@@ -200,6 +201,28 @@ async function recordForceGrab(
       data: targetEventData(job, { releaseGroup: data.releaseGroup }),
     });
   }
+}
+
+/**
+ * Whether a release was already grabbed for this force-grab's target AFTER the attention item
+ * offering it was raised, i.e. the offer is stale and re-grabbing it would duplicate a
+ * download that's already running. The sequence this exists for: run 1 vetoes and opens the
+ * item, a later run (a re-pick, a reconcile pass) grabs fine, and the still-open item keeps
+ * offering its old guid to whoever clicks accept.
+ *
+ * `item.ts` is the comparison point, not the job's `created_at`: the item's own row is what
+ * the operator is acting on, and it's refreshed in place every time the condition re-fires
+ * (`AttentionItems.open`), so a grab that landed before the latest re-raise is not evidence
+ * against the offer that re-raise carries. A series only counts a grab for the SAME season
+ * (each season is its own target here, tagged in `candidates_json` by `runAcquireJob`); a
+ * movie, or a payload carrying no `seasonNumber` at all, counts any grab for the target.
+ */
+function grabbedSinceItemRaised(db: AppContext['db'], job: JobRow, item: AttentionRow, data: ForceGrabData): boolean {
+  const seasonMatches = (candidates: Record<string, unknown> | null): boolean =>
+    data.seasonNumber === undefined || candidates?.seasonNumber === data.seasonNumber;
+  return new AcquireRecords(db)
+    .listByTarget(job.arr_instance, job.target_kind, job.target_id)
+    .some((r) => r.status === 'grabbed' && r.created_at > item.ts && seasonMatches(r.candidates_json));
 }
 
 /**
@@ -659,6 +682,12 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         if (forceGrab.success) {
           const client = requireClients(ctx).get(forceGrab.data.instance);
           if (!client) return c.json({ error: `unknown arr instance "${forceGrab.data.instance}"` }, 400);
+          // The linked job is what names the target, both for the staleness check here and for
+          // the bookkeeping after the grab. An item whose job was pruned has neither.
+          const forceGrabJob = item.job_id === null ? null : queue.get(item.job_id);
+          if (forceGrabJob && grabbedSinceItemRaised(db, forceGrabJob, item, forceGrab.data)) {
+            return c.json({ error: 'a release was already grabbed for this target after this item was raised - dismiss it' }, 409);
+          }
           try {
             await client.grabRelease(forceGrab.data.guid, forceGrab.data.indexerId);
           } catch (err) {
@@ -672,9 +701,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
               : `grab failed: ${errorMessage(err)}`;
             return c.json({ error: message }, 502);
           }
-          // The linked job is what names the target to record against; an item whose job was
-          // pruned still keeps the grab, it just has nowhere to write the bookkeeping.
-          const forceGrabJob = item.job_id === null ? null : queue.get(item.job_id);
+          // An item whose job was pruned still keeps the grab, it just has nowhere to write
+          // the bookkeeping.
           if (forceGrabJob) await recordForceGrab({ db, events, client }, forceGrabJob, forceGrab.data);
           attentionItems.setStatus(id, 'resolved');
           events.append({
@@ -692,6 +720,19 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         if (!parsed.success) return c.json({ error: 'malformed accept data', issues: parsed.error.issues }, 400);
         const client = requireClients(ctx).get(parsed.data.instance);
         if (!client) return c.json({ error: `unknown arr instance "${parsed.data.instance}"` }, 400);
+
+        // A human can click accept hours after the proposal was raised, by which time the arr
+        // may well have picked the download up itself: the same race `rescueDeferred` closes
+        // inside the pipeline, and the reason a rescue import is never fired blind. The
+        // payload names files, not a target, so the LINKED JOB is what there is to assess
+        // against; an item whose job was pruned has no target to check and imports as before.
+        const importJob = item.job_id === null ? null : queue.get(item.job_id);
+        if (importJob) {
+          const assessment = assessQueue(await client.listQueue(), { kind: importJob.target_kind, id: importJob.target_id });
+          if (assessment.state === 'busy') {
+            return c.json({ error: 'Sonarr/Radarr is importing this target right now - try again in a couple of minutes' }, 409);
+          }
+        }
 
         await client.executeManualImport(parsed.data.files as ManualImportFile[], 'copy');
         // Marked resolved only once the import actually succeeded — a rejected/thrown

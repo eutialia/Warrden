@@ -14,7 +14,18 @@ import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
 import { ConfigSchema } from '../src/config/schema.js';
-import { freshDb, makeCtx, configWithArrs, fakeArrClient, ctxWithClient, findEvent, bundleImportPayload, openAttentionForJob, seriesResource } from './helpers.js';
+import {
+  freshDb,
+  makeCtx,
+  configWithArrs,
+  fakeArrClient,
+  ctxWithClient,
+  findEvent,
+  bundleImportPayload,
+  openAttentionForJob,
+  queueRecord,
+  seriesResource,
+} from './helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json' };
 
@@ -524,6 +535,42 @@ describe('app', () => {
       expect(attentionItems.get(item.id)!.status).toBe('open');
     });
 
+    it('POST /api/attention/:id/accept: a bundle-import whose linked target the arr is importing right now -> 409, no import, item left open', async () => {
+      const client = fakeArrClient({ queue: [queueRecord({ seriesId: 42, status: 'completed', trackedDownloadState: 'importing' })] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item, attentionItems } = openAttentionForJob(ctx, {
+        pipeline: 'ingest',
+        kind: 'ingest.rescue-proposed',
+        data: bundleImportPayload({ targetKind: 'series', targetId: 42, files: [{ path: '/downloads/Show/ep1.mkv' }] }),
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(409);
+      expect((await res.json() as { error: string }).error).toMatch(/importing this target right now/i);
+      expect(client.executeManualImport).not.toHaveBeenCalled();
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it.each([
+      { name: 'a settled queue', queue: [] },
+      { name: 'a stuck queue (the very state the item was raised for)', queue: [queueRecord({ seriesId: 42, downloadId: 'dl-1', status: 'completed', trackedDownloadState: 'importBlocked' })] },
+      { name: 'a busy record for a DIFFERENT target', queue: [queueRecord({ seriesId: 99, status: 'completed', trackedDownloadState: 'importing' })] },
+    ])('POST /api/attention/:id/accept: a bundle-import with $name imports as before', async ({ queue }) => {
+      const client = fakeArrClient({ queue });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const files = [{ path: '/downloads/Show/ep1.mkv' }];
+      const { app, item, attentionItems } = openAttentionForJob(ctx, {
+        pipeline: 'ingest',
+        kind: 'ingest.rescue-proposed',
+        data: bundleImportPayload({ targetKind: 'series', targetId: 42, files }),
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(client.executeManualImport).toHaveBeenCalledWith(files, 'copy');
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+    });
+
     it('POST /api/attention/:id/accept: a force-grab item grabs the offered release and resolves', async () => {
       const client = fakeArrClient();
       const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
@@ -653,6 +700,62 @@ describe('app', () => {
       expect((await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders })).status).toBe(200);
       expect(new AcquireRecords(ctx.db).listByTarget('sonarr', 'series', 42)[0]!.release_group).toBeNull();
       expect(client.profiles).toHaveLength(0);
+    });
+
+    it('POST /api/attention/:id/accept: a stale force-grab whose season was grabbed after the item was raised -> 409, no grab, item left open', async () => {
+      const client = fakeArrClient({ series: [seriesResource({ id: 42 })] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item, attentionItems } = openAttentionForJob(ctx, { data: forceGrabPayload() });
+      // The item was raised a minute ago; a later run grabbed season 1 since.
+      ctx.db.prepare('UPDATE attention_items SET ts = ? WHERE id = ?').run(Date.now() - 60_000, item.id);
+      new AcquireRecords(ctx.db).insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed', candidates: { seasonNumber: 1 } });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(409);
+      expect((await res.json() as { error: string }).error).toMatch(/already grabbed/i);
+      expect(client.grabbed).toEqual([]);
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it('POST /api/attention/:id/accept: a stale movie force-grab is blocked by any newer grabbed row (no season to match on)', async () => {
+      const client = fakeArrClient();
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item } = openAttentionForJob(ctx, { targetKind: 'movie', targetId: 7, data: forceGrabPayload({ seasonNumber: undefined }) });
+      ctx.db.prepare('UPDATE attention_items SET ts = ? WHERE id = ?').run(Date.now() - 60_000, item.id);
+      new AcquireRecords(ctx.db).insert({ arrInstance: 'sonarr', targetKind: 'movie', targetId: 7, status: 'grabbed', candidates: {} });
+
+      expect((await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders })).status).toBe(409);
+      expect(client.grabbed).toEqual([]);
+    });
+
+    it.each([
+      {
+        name: 'the newer grabbed row is for a different season',
+        record: { status: 'grabbed' as const, candidates: { seasonNumber: 2 } },
+        older: false,
+      },
+      {
+        name: 'the grabbed row predates the item (it is the very run that raised it)',
+        record: { status: 'grabbed' as const, candidates: { seasonNumber: 1 } },
+        older: true,
+      },
+      {
+        name: 'the newer row for this season is not a grab',
+        record: { status: 'none-viable' as const, candidates: { seasonNumber: 1 } },
+        older: false,
+      },
+    ])('POST /api/attention/:id/accept: a force-grab still grabs when $name', async ({ record, older }) => {
+      const client = fakeArrClient({ series: [seriesResource({ id: 42 })] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const { app, item, attentionItems } = openAttentionForJob(ctx, { data: forceGrabPayload() });
+      ctx.db.prepare('UPDATE attention_items SET ts = ? WHERE id = ?').run(Date.now() - 60_000, item.id);
+      new AcquireRecords(ctx.db).insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, ...record });
+      if (older) ctx.db.prepare('UPDATE acquire_records SET created_at = ?').run(Date.now() - 120_000);
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(client.grabbed).toEqual([{ guid: 'g-top', indexerId: 3 }]);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
     });
 
     it('POST /api/attention/:id/accept: a force-grab whose linked job is gone still grabs and resolves, recording nothing', async () => {
