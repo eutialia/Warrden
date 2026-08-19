@@ -120,7 +120,7 @@ function renderCandidateLine(index: number, c: ReleaseCandidate): string {
 /**
  * Picks one release from the prefiltered list. The host owns only the SHAPE of the
  * eligible set (packs vs singles, via `eligibleCandidates`); the LLM ranks whatever
- * survives — even a pool of one — and its `none` verdict is returned verbatim rather
+ * survives, even a pool of one, and its `none` verdict is returned verbatim rather
  * than overridden here. What a veto costs is the CALLER's call: `run.ts` turns a
  * shape-owned one into a human attention item offering a force-grab. The LLM answers
  * with a 1-based number into the eligible list, never a guid.

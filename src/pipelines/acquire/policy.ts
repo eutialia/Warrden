@@ -35,6 +35,7 @@ export function synthesizePolicyPrompt(input: SynthesizePolicyPromptInput): Poli
     'Dual-audio, multi-audio, Dual, and Multi include the original language and are not original-language-only dubs; do not treat them as an English-dub-only release.',
     'Sonarr language tags often list only the original language even on dual/multi releases. Do not treat a single-language tag as proof the release is not dual.',
     'Declare none viable only when the list is actually unusable (wrong title, CAM, or nothing acceptable remains), not because a Prefer entry is unmatched.',
+    'If you declare none viable, a human reviews your reasoning and can override it, so name the concrete defect that disqualifies the candidates.',
     'When multiple candidates are otherwise equally good, prefer the one with higher seeders.',
     'Answer with the candidate\'s number (the # prefix on its line in the list, e.g. 2 for "#2 [...]") — not its title or any other identifier.',
     'When you pick, also extract the release group — the fansub/release group name in the picked title, usually bracketed at the start or end — into releaseGroup; use null only if no group is identifiable.',

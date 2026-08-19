@@ -6,7 +6,7 @@ import { targetEventData } from '../../events/target.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolvePayloadTitle, resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
-import { pickRelease } from './pick.js';
+import { eligibleCandidates, pickRelease, resolveReleaseGroup } from './pick.js';
 import { pinReleaseGroup } from './pin.js';
 import { capCandidates, dedupByInfoHash, prefilter, type DroppedCandidate } from './prefilter.js';
 import { classifySeason, type SeasonMode } from './seasonMode.js';
@@ -23,6 +23,10 @@ interface AttemptResult {
   reasoning?: string;
   pickedTitle?: string;
   pickedFullSeason?: boolean;
+  /** The candidate a human can grab anyway over the model's veto: the top of the eligible
+   * set the model was shown. Only ever set on `'none-viable'` for a season whose shape the
+   * host claimed (complete/airing); elsewhere a veto is just a veto. */
+  forceGrab?: { guid: string; indexerId: number; title: string; releaseGroup: string | null };
   kept: ReleaseCandidate[];
   dropped: DroppedCandidate[];
 }
@@ -326,7 +330,19 @@ async function attempt(
   });
 
   if (pick.decision === 'none') {
-    return { status: 'none-viable', reasoning: pick.reasoning, kept, dropped };
+    // A veto on a season the host shaped is a judgement call, not a dead end: carry the
+    // top eligible candidate so a human can overrule the model with one click.
+    const shapedMode = input.mode === 'complete' || input.mode === 'airing' ? input.mode : undefined;
+    const top = shapedMode ? eligibleCandidates(shapedMode, kept)[0] : undefined;
+    return {
+      status: 'none-viable',
+      reasoning: pick.reasoning,
+      kept,
+      dropped,
+      ...(top
+        ? { forceGrab: { guid: top.guid, indexerId: top.indexerId, title: top.title, releaseGroup: resolveReleaseGroup(top) } }
+        : {}),
+    };
   }
 
   // pickRelease already validated this guid against `kept` — re-finding it here is just
@@ -379,12 +395,25 @@ function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string
     });
     return;
   }
+  // `action: 'force-grab'` is what `POST /api/attention/:id/accept` dispatches on
+  // (`ForceGrabSchema` in src/server/app.ts): the accept re-executes exactly this payload.
+  const forceGrabData = result.forceGrab
+    ? {
+        action: 'force-grab',
+        guid: result.forceGrab.guid,
+        indexerId: result.forceGrab.indexerId,
+        pickedTitle: result.forceGrab.title,
+        releaseGroup: result.forceGrab.releaseGroup,
+      }
+    : {};
   ctx.events.append({
     kind: 'acquire.none-viable',
     level: 'attention',
     jobId: job.id,
-    message: `Couldn't pick a release for "${label}": ${result.reasoning}`,
-    data: targetEventData(job, { ...extra, title: label, reasoning: result.reasoning }),
+    message: result.forceGrab
+      ? `The model rejected every release for "${label}" (${result.reasoning}) - accept to grab "${result.forceGrab.title}" anyway`
+      : `Couldn't pick a release for "${label}": ${result.reasoning}`,
+    data: targetEventData(job, { ...extra, title: label, reasoning: result.reasoning, ...forceGrabData }),
   });
 }
 

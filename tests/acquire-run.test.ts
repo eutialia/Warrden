@@ -3,6 +3,7 @@ import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
+import { ForceGrabSchema } from '../src/server/app.js';
 import { candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
@@ -576,6 +577,79 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     expect(llm.calls[0]!.prompt).not.toContain('S01E12'); // the single never made the eligible set
     expect(client.grabbed).toEqual([{ guid: 'g-pack', indexerId: candidate({}).indexerId }]);
     expect(client.seasonSearches).toHaveLength(0);
+  });
+
+  it('a veto on a shape-owned season opens attention offering a force-grab of the top eligible candidate, and grabs nothing', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'The Ramparts of Ice',
+          seasons: [
+            {
+              seasonNumber: 1,
+              monitored: true,
+              statistics: { episodeCount: 14, totalEpisodeCount: 14 },
+            },
+          ],
+        }),
+      ],
+      releases: [
+        candidate({ guid: 'g-second', fullSeason: true, releaseGroup: 'Other', title: '[Other] S01 Batch', seeders: 40 }),
+        candidate({ guid: 'g-top', fullSeason: true, releaseGroup: undefined, title: '[Trix] S01 Batch', seeders: 300 }),
+      ],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([
+        pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'every pack is the censored broadcast cut' }),
+      ]),
+    });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'The Ramparts of Ice' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.grabbed).toHaveLength(0);
+    const attentionEvents = ctx.events.list({ level: 'attention' });
+    expect(attentionEvents).toHaveLength(1);
+    expect(attentionEvents[0]!.kind).toBe('acquire.none-viable');
+    expect(attentionEvents[0]!.data).toMatchObject({
+      action: 'force-grab',
+      guid: 'g-top', // highest-seeded pack, not the first one Sonarr listed
+      indexerId: candidate({}).indexerId,
+      pickedTitle: '[Trix] S01 Batch',
+      releaseGroup: 'Trix', // resolved from the title: Sonarr left releaseGroup unset
+      reasoning: 'every pack is the censored broadcast cut',
+    });
+    // Drift fixture: the accept endpoint has to re-execute this exact payload, so run the
+    // real emitted data through the real schema rather than a hand-copied lookalike.
+    expect(ForceGrabSchema.safeParse(attentionEvents[0]!.data).success).toBe(true);
+  });
+
+  it('a movie veto keeps the plain none-viable payload: with no shape claimed there is nothing to force-grab', async () => {
+    const client = fakeArrClient({
+      movies: [movieResource({ title: 'Perfect Blue', year: 1997 })],
+      releases: [candidate({ guid: 'g1' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([
+        pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'all CAM rips' }),
+      ]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'sonarr', payload: { title: 'Perfect Blue' } });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.grabbed).toHaveLength(0);
+    const attentionEvents = ctx.events.list({ level: 'attention' });
+    expect(attentionEvents).toHaveLength(1);
+    expect(attentionEvents[0]!.data).not.toHaveProperty('action');
+    expect(attentionEvents[0]!.data).not.toHaveProperty('guid');
   });
 
   it('does not kick a season search after grabbing a pack on a complete season', async () => {

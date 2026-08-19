@@ -133,6 +133,16 @@ export const AcceptDataSchema = z.object({
 // conventions elsewhere in the codebase don't apply here.
 const DisableSiteSchema = z.object({ action: z.literal('disable-site'), baseUrl: z.url(), reason: z.string() });
 
+// What `appendNonGrabAttentionEvent` (src/pipelines/acquire/run.ts) puts in a shape-owned
+// none-viable item's `data`. Exported for the same drift-fixture reason as AcceptDataSchema.
+export const ForceGrabSchema = z.object({
+  action: z.literal('force-grab'),
+  instance: z.string(),
+  guid: z.string().min(1),
+  indexerId: z.number().int(),
+  pickedTitle: z.string(),
+});
+
 /**
  * Reads the *current* config directly off `ctx` rather than a value captured once at
  * `createApp` time — every route below shares this so a `PUT /api/config` (which
@@ -580,6 +590,29 @@ export function createApp(ctx: Partial<AppContext>): Hono {
             kind: 'attention.accepted',
             message: `Accepted disable-site for attention item #${id} (${item.kind}) — ${baseUrl}`,
             data: { id, kind: item.kind, baseUrl },
+          });
+          return c.json({ ok: true });
+        }
+
+        // Accepting a release the pick model vetoed: the operator overrules the veto and
+        // grabs the top candidate it was offered.
+        const forceGrab = ForceGrabSchema.safeParse(item.data);
+        if (forceGrab.success) {
+          const client = requireClients(ctx).get(forceGrab.data.instance);
+          if (!client) return c.json({ error: `unknown arr instance "${forceGrab.data.instance}"` }, 400);
+          try {
+            await client.grabRelease(forceGrab.data.guid, forceGrab.data.indexerId);
+          } catch (err) {
+            // Interactive-search guids live in the arr's short-lived release cache; an accept
+            // clicked hours later can 404. The item stays open so Re-pick (a fresh search) is
+            // still available.
+            return c.json({ error: `grab failed: ${errorMessage(err)}. The release likely expired from the search cache - use Re-pick to search again.` }, 502);
+          }
+          attentionItems.setStatus(id, 'resolved');
+          events.append({
+            kind: 'attention.accepted',
+            message: `Accepted force-grab for attention item #${id} (${item.kind}) - "${forceGrab.data.pickedTitle}"`,
+            data: { id, kind: item.kind, guid: forceGrab.data.guid },
           });
           return c.json({ ok: true });
         }

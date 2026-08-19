@@ -507,6 +507,61 @@ describe('app', () => {
       expect(attentionItems.get(item.id)!.status).toBe('open');
     });
 
+    it('POST /api/attention/:id/accept: a force-grab item grabs the offered release and resolves', async () => {
+      const client = fakeArrClient();
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({
+        kind: 'acquire.none-viable',
+        message: 'the model rejected every release',
+        data: { action: 'force-grab', instance: 'sonarr', guid: 'g-top', indexerId: 3, pickedTitle: '[Trix] S01 Batch' },
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(client.grabbed).toEqual([{ guid: 'g-top', indexerId: 3 }]);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+      expect(findEvent(ctx.events.list(), 'attention.accepted')).toMatchObject({
+        data: { id: item.id, kind: 'acquire.none-viable', guid: 'g-top' },
+      });
+    });
+
+    it('POST /api/attention/:id/accept: a failed force-grab returns 502 and leaves the item open for a re-pick', async () => {
+      const client = fakeArrClient();
+      client.grabRelease = vi.fn(async () => {
+        throw new Error('release not found in cache');
+      });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({
+        kind: 'acquire.none-viable',
+        message: 'the model rejected every release',
+        data: { action: 'force-grab', instance: 'sonarr', guid: 'g-top', indexerId: 3, pickedTitle: '[Trix] S01 Batch' },
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(502);
+      expect((await res.json() as { error: string }).error).toContain('release not found in cache');
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
+    it('POST /api/attention/:id/accept: 400 on a force-grab naming an unknown arr instance', async () => {
+      const ctx = makeCtx();
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+      const item = attentionItems.open({
+        kind: 'acquire.none-viable',
+        message: 'x',
+        data: { action: 'force-grab', instance: 'no-such-instance', guid: 'g-top', indexerId: 3, pickedTitle: 'x' },
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(400);
+      expect(attentionItems.get(item.id)!.status).toBe('open');
+    });
+
     it.each([
       ['accept', 'accept', true],
       ['dismiss', 'dismiss', false],

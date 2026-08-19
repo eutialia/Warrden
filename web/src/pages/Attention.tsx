@@ -92,6 +92,13 @@ function disableSiteData(item: AttentionItem): DisableSiteData | null {
   };
 }
 
+/** True for a none-viable item whose accept means "grab the release the model vetoed"
+ * (`ForceGrabSchema` in src/server/app.ts). The item's own message already names the
+ * release, so the button is all this branch needs. */
+function isForceGrab(item: AttentionItem): boolean {
+  return item.data.action === 'force-grab' && typeof item.data.guid === 'string';
+}
+
 function basename(path: string): string {
   return path.split('/').pop() || path;
 }
@@ -242,6 +249,7 @@ export default function Attention() {
           const canRepick = item.job_id !== null && item.kind.startsWith('acquire.');
           const bundleImport = bundleImportData(item);
           const disableSite = disableSiteData(item);
+          const forceGrab = isForceGrab(item);
           const tone = attentionKindTone(item.kind);
           const title = attentionTitle(item);
           const fileCount = bundleImport?.fileCount ?? bundleImport?.files.length ?? 0;
@@ -364,6 +372,17 @@ export default function Attention() {
                         }
                       >
                         Disable site
+                      </Button>
+                    )}
+                    {forceGrab && (
+                      <Button
+                        size="sm"
+                        disabled={pending}
+                        onClick={() =>
+                          void runAction(item.id, () => acceptAttention(item.id), 'Release grabbed', 'Failed to grab release')
+                        }
+                      >
+                        Grab anyway
                       </Button>
                     )}
                     {canRepick && (
