@@ -151,6 +151,12 @@ export class ArrClient implements ArrApi {
     return this.request('POST', '/notification', { body });
   }
 
+  // Safe with a hand-built body, unlike updateSeries/updateReleaseProfile: the only
+  // notification Warrden ever PUTs is its own, and it authors every field of it.
+  updateNotification(body: object & { id: number }): Promise<NotificationSummary> {
+    return this.request('PUT', `/notification/${body.id}`, { body });
+  }
+
   async listQueue(): Promise<QueueRecord[]> {
     const res = await this.request<{ records: QueueRecord[] }>('GET', '/queue', {
       // One page big enough to hold any realistic queue; the arr has no unpaged variant.

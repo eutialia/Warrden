@@ -48,6 +48,26 @@ describe('ArrClient.ping', () => {
   });
 });
 
+describe('ArrClient.updateNotification', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('PUTs the body to the notification id and returns the parsed response', async () => {
+    const fetchSpy = stubFetch(async () => new Response(JSON.stringify({ id: 7, name: 'Warrden' }), { status: 202 }));
+    const body = { id: 7, name: 'Warrden', fields: [{ name: 'url', value: 'http://warrden:9797/webhooks/sonarr' }] };
+
+    const updated = await new ArrClient(arrInstance({ baseUrl: 'http://sonarr:8989', apiKey: 'k-1' })).updateNotification(body);
+
+    expect(updated).toEqual({ id: 7, name: 'Warrden' });
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('http://sonarr:8989/api/v3/notification/7');
+    expect(init?.method).toBe('PUT');
+    expect((init?.headers as Record<string, string>)['X-Api-Key']).toBe('k-1');
+    expect(JSON.parse(String(init?.body))).toEqual(body);
+  });
+});
+
 describe('ArrClient.searchSeason', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

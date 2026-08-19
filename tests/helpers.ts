@@ -453,6 +453,16 @@ export function fakeArrClient(seed?: FakeArrClientSeed): FakeArrClient {
       client.notifications.push(created);
       return created;
     }),
+    updateNotification: vi.fn(async (body: object & { id: number }): Promise<NotificationSummary> => {
+      const b = body as NotificationSummary;
+      const idx = client.notifications.findIndex((n) => n.id === b.id);
+      if (idx === -1) throw new Error(`fakeArrClient: no notification with id ${b.id}`);
+      // Wholesale replacement, like the real PUT: the arr keeps the id and takes every
+      // other field from the body, so a test reads the new url straight off the store.
+      const updated: NotificationSummary = { id: b.id, name: b.name, onDownload: b.onDownload, onUpgrade: b.onUpgrade, fields: b.fields };
+      client.notifications[idx] = updated;
+      return updated;
+    }),
 
     listQueue: async (): Promise<QueueRecord[]> => [...client.queue],
     listSeriesHistory: async (): Promise<HistoryRecord[]> => [...client.seriesHistory],

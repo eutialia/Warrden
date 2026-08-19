@@ -16,6 +16,7 @@ const SIDE_EFFECT_METHODS = new Set([
   'updateReleaseProfile',
   'deleteReleaseProfile',
   'createNotification',
+  'updateNotification',
   'deleteNotification',
 ]);
 

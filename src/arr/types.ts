@@ -198,6 +198,9 @@ export interface ArrApi {
   deleteReleaseProfile(id: number): Promise<void>;
   listNotifications(): Promise<NotificationSummary[]>;
   createNotification(body: object): Promise<NotificationSummary>;
+  /** Replaces the notification at `body.id` wholesale (PUT). Used to re-point or re-subscribe
+   * Warrden's own webhook without ever leaving the instance webhook-less mid-flight. */
+  updateNotification(body: object & { id: number }): Promise<NotificationSummary>;
   listQueue(): Promise<QueueRecord[]>;
   listSeriesHistory(seriesId: number): Promise<HistoryRecord[]>; // Sonarr, imports only
   listMovieHistory(movieId: number): Promise<HistoryRecord[]>; // Radarr, imports only
