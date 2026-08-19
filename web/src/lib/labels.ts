@@ -108,21 +108,6 @@ export function acquireOutcomeTone(outcome: AcquireStatus): Tone {
   return outcome === 'grabbed' ? 'success' : 'warning';
 }
 
-/** Compact status for a slim activity line, where a chip would double the row height. */
-export function jobRunLineStatus(job: { status: JobStatus; pipeline: string; acquireOutcome?: AcquireStatus | null }): {
-  label: string;
-  tone: Tone;
-} {
-  if (job.status !== 'done') {
-    return { label: jobStatusLabel(job.status), tone: jobStatusTone(job.status) };
-  }
-  if (job.pipeline === 'acquire' && job.acquireOutcome) {
-    if (job.acquireOutcome === 'grabbed') return { label: 'Grabbed', tone: 'success' };
-    return { label: acquireOutcomeLabel(job.acquireOutcome), tone: 'warning' };
-  }
-  return { label: 'Finished', tone: 'success' };
-}
-
 /** Pack / multi / single as short sentence-case copy for release facts. */
 export function releaseShapeLabel(shape: 'pack' | 'multi' | 'single' | null | undefined): string {
   switch (shape) {

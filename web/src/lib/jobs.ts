@@ -78,43 +78,6 @@ export function jobDuration(job: Job): string | null {
   return `${Math.round(minutes / 60)}h`;
 }
 
-/** Arr identity for a job's target. Two series with the same display name stay
- * distinct; retries of the same Sonarr/Radarr id fold together. */
-export function jobTargetKey(job: { arr_instance: string; target_kind: string; target_id: number }): string {
-  return `${job.arr_instance}\0${job.target_kind}\0${job.target_id}`;
-}
-
-export interface JobTargetGroup {
-  key: string;
-  latest: Job;
-  runs: Job[];
-  failed: boolean;
-}
-
-/**
- * Folds a newest-first job list into one group per arr target, preserving first-seen
- * order so the title whose latest run is newest stays on top.
- */
-export function foldJobsByTarget(jobs: Job[]): JobTargetGroup[] {
-  const groups = new Map<string, Job[]>();
-  const order: string[] = [];
-  for (const job of jobs) {
-    const key = jobTargetKey(job);
-    const list = groups.get(key);
-    if (list) {
-      list.push(job);
-    } else {
-      groups.set(key, [job]);
-      order.push(key);
-    }
-  }
-  return order.map((key) => {
-    const runs = groups.get(key) ?? [];
-    const latest = runs.reduce((a, b) => (a.updated_at >= b.updated_at ? a : b));
-    return { key, latest, runs, failed: runs.some((j) => j.status === 'failed') };
-  });
-}
-
 const PIPELINE_ORDER = ['acquire', 'ingest', 'subtitle'];
 
 export interface PipelineFold<T extends { pipeline: string }> {
