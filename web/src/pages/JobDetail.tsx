@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowLeft, Bug, FileCheck2 } from 'lucide-react';
+import { ArrowLeft, Bug, ChevronRight, FileCheck2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -26,12 +26,13 @@ import { TierBadge } from '@/components/TierBadge';
 import { ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { jobDuration, jobTitle } from '@/lib/jobs';
+import { foldByPipeline, jobDuration, jobTitle } from '@/lib/jobs';
 import {
   acquireOutcomeLabel,
   pipelineLabel,
@@ -296,23 +297,48 @@ export default function JobDetail() {
 }
 
 function RelatedJobsCard({ jobs }: { jobs: RelatedJob[] }): ReactNode {
+  const folds = foldByPipeline(jobs);
   return (
     <Card>
       <CardHeader>
         <CardTitle>Related jobs</CardTitle>
       </CardHeader>
-      <CardContent className="max-h-64 space-y-2 overflow-y-auto">
-        {jobs.map((sibling) => (
-          <Link
-            key={sibling.id}
-            to={`/jobs/${sibling.id}`}
-            className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-muted/50"
-          >
-            <span className="font-medium">{pipelineLabel(sibling.pipeline)}</span>
-            <StatusBadge status={sibling.status} />
-            {sibling.acquireOutcome && <AcquireOutcomeBadge outcome={sibling.acquireOutcome} />}
-            <span className="ml-auto text-xs text-muted-foreground">#{sibling.id}</span>
-          </Link>
+      <CardContent className="space-y-2">
+        {folds.map((fold) => (
+          <div key={fold.pipeline}>
+            <Link
+              to={`/jobs/${fold.latest.id}`}
+              className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-muted/50"
+            >
+              <span className="font-medium">{pipelineLabel(fold.pipeline)}</span>
+              <StatusBadge status={fold.latest.status} />
+              {fold.latest.acquireOutcome && <AcquireOutcomeBadge outcome={fold.latest.acquireOutcome} />}
+              <span className="ml-auto text-xs text-muted-foreground">#{fold.latest.id}</span>
+            </Link>
+            {fold.earlier.length > 0 && (
+              <Collapsible>
+                <CollapsibleTrigger
+                  render={
+                    <Button type="button" variant="ghost" size="sm" className="group/earlier mt-1 -ml-2 h-7 px-2 text-xs">
+                      <ChevronRight className="size-3.5 transition-transform data-panel-open:rotate-90" />
+                      {fold.earlier.length} earlier
+                    </Button>
+                  }
+                />
+                <CollapsibleContent>
+                  <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto pl-2 text-xs">
+                    {fold.earlier.map((sibling) => (
+                      <li key={sibling.id}>
+                        <Link to={`/jobs/${sibling.id}`} className="text-muted-foreground hover:text-foreground hover:underline">
+                          {pipelineLabel(sibling.pipeline)} #{sibling.id}
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </CollapsibleContent>
+              </Collapsible>
+            )}
+          </div>
         ))}
       </CardContent>
     </Card>

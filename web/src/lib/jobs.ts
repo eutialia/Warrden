@@ -77,3 +77,70 @@ export function jobDuration(job: Job): string | null {
   if (minutes < 60) return `${minutes}m`;
   return `${Math.round(minutes / 60)}h`;
 }
+
+/** Arr identity for a job's target. Two series with the same display name stay
+ * distinct; retries of the same Sonarr/Radarr id fold together. */
+export function jobTargetKey(job: { arr_instance: string; target_kind: string; target_id: number }): string {
+  return `${job.arr_instance}\0${job.target_kind}\0${job.target_id}`;
+}
+
+export interface JobTargetGroup {
+  key: string;
+  latest: Job;
+  runs: Job[];
+  failed: boolean;
+}
+
+/**
+ * Folds a newest-first job list into one group per arr target, preserving first-seen
+ * order so the title whose latest run is newest stays on top.
+ */
+export function foldJobsByTarget(jobs: Job[]): JobTargetGroup[] {
+  const groups = new Map<string, Job[]>();
+  const order: string[] = [];
+  for (const job of jobs) {
+    const key = jobTargetKey(job);
+    const list = groups.get(key);
+    if (list) {
+      list.push(job);
+    } else {
+      groups.set(key, [job]);
+      order.push(key);
+    }
+  }
+  return order.map((key) => {
+    const runs = groups.get(key) ?? [];
+    const latest = runs.reduce((a, b) => (a.updated_at >= b.updated_at ? a : b));
+    return { key, latest, runs, failed: runs.some((j) => j.status === 'failed') };
+  });
+}
+
+const PIPELINE_ORDER = ['acquire', 'ingest', 'subtitle'];
+
+export interface PipelineFold<T extends { pipeline: string }> {
+  pipeline: string;
+  latest: T;
+  earlier: T[];
+}
+
+/** Newest job per pipeline, with the rest tucked behind. Input should already be newest-first. */
+export function foldByPipeline<T extends { pipeline: string }>(jobs: T[]): PipelineFold<T>[] {
+  const buckets = new Map<string, T[]>();
+  for (const job of jobs) {
+    const list = buckets.get(job.pipeline);
+    if (list) list.push(job);
+    else buckets.set(job.pipeline, [job]);
+  }
+  return [...buckets.keys()]
+    .sort((a, b) => {
+      const ia = PIPELINE_ORDER.indexOf(a);
+      const ib = PIPELINE_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    })
+    .flatMap((pipeline) => {
+      const runs = buckets.get(pipeline);
+      const latest = runs?.[0];
+      if (!latest || !runs) return [];
+      return [{ pipeline, latest, earlier: runs.slice(1) }];
+    });
+}
