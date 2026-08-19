@@ -1,4 +1,5 @@
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
+import { APICallError, InvalidPromptError, NoObjectGeneratedError } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { Config } from '../src/config/schema.js';
@@ -211,6 +212,64 @@ function recordedCall(index = 0): {
   ];
   return { settings: opts.model.settings, providerOptions: opts.providerOptions };
 }
+
+describe('AiSdkGenerator provider-error classification', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  /** The shape the AI SDK actually throws for a non-2xx provider response. */
+  function apiCallError(statusCode: number): APICallError {
+    return new APICallError({
+      message: `provider returned ${statusCode}`,
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      requestBodyValues: {},
+      statusCode,
+    });
+  }
+
+  async function permanenceOf(thrown: unknown): Promise<boolean> {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockRejectedValue(thrown);
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
+    try {
+      await new AiSdkGenerator(() => cfg).generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+    } catch (err) {
+      return isPermanentError(err);
+    }
+    throw new Error('permanenceOf: generate() unexpectedly resolved');
+  }
+
+  it.each([400, 401, 403, 404, 422])('marks a %i from the provider permanent', async (status) => {
+    expect(await permanenceOf(apiCallError(status))).toBe(true);
+  });
+
+  it.each([408, 429, 500, 503])('leaves a %i retryable', async (status) => {
+    expect(await permanenceOf(apiCallError(status))).toBe(false);
+  });
+
+  it('marks a prompt the SDK refuses to send permanent', async () => {
+    expect(await permanenceOf(new InvalidPromptError({ prompt: {}, message: 'unsupported message role' }))).toBe(true);
+  });
+
+  it('marks structured-output exhaustion permanent', async () => {
+    const err = new NoObjectGeneratedError({
+      message: 'no object generated',
+      text: 'not json',
+      response: { id: 'r1', timestamp: new Date(0), modelId: 'primary-model' },
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      finishReason: 'stop',
+    });
+    expect(await permanenceOf(err)).toBe(true);
+  });
+
+  it('finds a permanent error the provider wrapped one level down', async () => {
+    expect(await permanenceOf(new Error('request failed', { cause: apiCallError(400) }))).toBe(true);
+  });
+
+  it('leaves an ordinary transport error retryable', async () => {
+    expect(await permanenceOf(new Error('socket hang up'))).toBe(false);
+  });
+});
 
 describe('AiSdkGenerator reasoning effort', () => {
   const schema = z.object({ ok: z.boolean() });

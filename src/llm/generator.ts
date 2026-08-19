@@ -1,6 +1,6 @@
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
-import { generateObject } from 'ai';
+import { APICallError, generateObject, InvalidPromptError, NoObjectGeneratedError } from 'ai';
 import type { z } from 'zod';
 import type { Config, Effort, Provider } from '../config/schema.js';
 import { NOOP_HANDLE, NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
@@ -39,6 +39,35 @@ export class LlmError extends Error {
     this.name = 'LlmError';
     this.permanent = options?.permanent ?? false;
   }
+}
+
+/**
+ * Whether the failure can never succeed on a retry: a 4xx the provider already rejected the
+ * request with (408/429 are the transient ones), a prompt the SDK itself refuses to send, or
+ * a model that failed structured output on both in-call attempts. Retrying those costs a
+ * full job re-run — for the acquire pipeline, another sweep of every indexer — to arrive at
+ * the identical rejection.
+ *
+ * Traverses `cause` links AND `AggregateError.errors`, because `withRetry` parks the first
+ * attempt's failure in an `AggregateError` on the last one's `cause`: a permanent error can
+ * therefore sit either at the top or one hop into that aggregate. Bounded so a self- or
+ * mutually-referencing cause chain can't spin.
+ */
+function isPermanentProviderError(err: unknown): boolean {
+  const pending: unknown[] = [err];
+  for (let seen = 0; seen < 5 && pending.length > 0; seen++) {
+    const e = pending.shift();
+    if (typeof e !== 'object' || e === null) continue;
+    if (InvalidPromptError.isInstance(e) || NoObjectGeneratedError.isInstance(e)) return true;
+    if (APICallError.isInstance(e) && isPermanentStatus(e.statusCode)) return true;
+    if (e instanceof AggregateError) pending.push(...e.errors);
+    pending.push((e as Error).cause);
+  }
+  return false;
+}
+
+function isPermanentStatus(status: number | undefined): boolean {
+  return status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 /** A resolved provider + model id, as configured under `llm.model`. */
@@ -182,6 +211,7 @@ export class AiSdkGenerator implements StructuredGenerator {
       const message = errorMessage(err);
       throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite, {
         cause: err,
+        permanent: isPermanentProviderError(err),
       });
     }
   }
