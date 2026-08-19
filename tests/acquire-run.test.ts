@@ -1,10 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
+import { startRunner } from '../src/jobs/runner.js';
+import { LlmError } from '../src/llm/generator.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
 import { ForceGrabSchema } from '../src/server/app.js';
-import { candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, pickResponse } from './helpers.js';
+import { candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, findEvent, pickResponse } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
   const client = fakeArrClient({
@@ -774,5 +776,37 @@ describe('runAcquireJob: interactive search cache across job retries', () => {
     await runAcquireJob(ctx, job);
 
     expect(client.searchReleases).toHaveBeenCalledTimes(2);
+  });
+});
+
+// The seam this whole mechanism exists for: the runner, the acquire pipeline and the cache
+// meeting on one real permanent provider error, rather than each half proved in isolation.
+describe('runAcquireJob under startRunner: a permanent LLM error', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('fails the job terminally on attempt 1, raises attention, and leaves the searched candidates cached', async () => {
+    const client = fakeArrClient({
+      movies: [movieResource({ id: 7, title: 'A Movie', year: 2023 })],
+      releases: [candidate({ guid: 'g1' })],
+    });
+    const ctx = ctxWithClient('radarr', client, {
+      llm: new FakeGenerator([new LlmError('provider rejected the request', 'acquire.pick', { permanent: true })]),
+    });
+    const { id } = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'radarr', payload: { title: 'A Movie' } });
+
+    const stop = startRunner(ctx, { acquire: runAcquireJob }, { intervalMs: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    const job = ctx.queue.get(id!)!;
+    expect(job.status).toBe('failed');
+    expect(job.attempts).toBe(1); // no second sweep of every indexer for an error that cannot succeed
+    expect(client.searchReleases).toHaveBeenCalledTimes(1);
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: true });
+    expect(ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'job.attention')).toHaveLength(1);
+    // Terminal failure skips clearJob, so the entries survive until the TTL sweep: the
+    // reason SearchCache cannot rely on clearJob alone to reclaim them.
+    expect(ctx.searchCache.get(id!, 'movie')).toEqual([candidate({ guid: 'g1' })]);
   });
 });

@@ -107,7 +107,10 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
 
 /** Searches the arr for `key`'s candidates, or replays what this job's previous run already
  * found. `key` names the target within the job (`'movie'`, or `` `s${seasonNumber}` ``), so
- * each season of a series keeps its own entry. */
+ * each season of a series keeps its own entry. A cache hit makes no arr call at all, so it
+ * emits no `arr.request` trace entry either: a retried job's trace shows the pick with no
+ * search in front of it, which is honest (no request was made) but worth knowing when
+ * reading one. */
 async function cachedSearch(
   ctx: AppContext,
   job: JobRow,
