@@ -65,11 +65,14 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
         // actually serve: the arr keeps POSTing to the old one and every event it sends is
         // dropped on the floor, silently and for as long as nobody notices.
         const pointsElsewhere = registeredUrl !== undefined && registeredUrl !== url;
-        // Every flag `body` sets, not just the two import ones: a hook subscribed to Download
-        // alone still delivers nothing on SeriesAdd/MovieAdded, so treating it as healthy
-        // left it standing forever and no arr-side add ever reached Warrden.
-        const subscribedToAll =
-          found.onSeriesAdd === true && found.onMovieAdded === true && found.onDownload === true && found.onUpgrade === true;
+        // Every flag that this app actually has, not every flag `body` sends: a hook
+        // subscribed to Download alone still delivers nothing on the add event, so treating it
+        // as healthy left it standing forever and no arr-side add ever reached Warrden. The
+        // notification resource is per-app though, so Sonarr echoes `onSeriesAdd` and never
+        // `onMovieAdded` and Radarr the reverse; demanding both would make the predicate
+        // permanently false and re-PUT an already-correct webhook on every single pass.
+        const addEvent = arr.kind === 'sonarr' ? found.onSeriesAdd : found.onMovieAdded;
+        const subscribedToAll = addEvent === true && found.onDownload === true && found.onUpgrade === true;
         if (subscribedToAll && !pointsElsewhere) {
           // Already present in the arr and subscribed to everything we need, but the
           // local registry may have been reset (fresh db, restore) — re-record it so

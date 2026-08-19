@@ -84,9 +84,11 @@ export interface ReleaseProfileResource {
 export interface NotificationSummary {
   id: number;
   name: string;
-  /** All four of the events Warrden's own registration subscribes to. Optional because an
-   * arr that predates one of them (or a Phase 1 Warrden registration) simply omits it:
-   * absent reads the same as `false` to `registerWebhooks`'s healthy-skip predicate. */
+  /** All four of the events Warrden's own registration subscribes to. Optional because the
+   * resource is per-app: Sonarr echoes `onSeriesAdd` and never `onMovieAdded`, Radarr the
+   * reverse, and a Phase 1 registration omits the add events entirely. Absent reads the same
+   * as `false` to `registerWebhooks`'s healthy-skip predicate, which only ever asks for the
+   * add event belonging to the instance's own kind. */
   onSeriesAdd?: boolean;
   onMovieAdded?: boolean;
   onDownload?: boolean;
