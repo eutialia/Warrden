@@ -172,6 +172,14 @@ export class AttentionItems {
     return rows.map(parseRow);
   }
 
+  /** Open attention items linked to this job, newest first. */
+  listByJob(jobId: number): AttentionRow[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM attention_items WHERE job_id = ? AND status = 'open' ORDER BY ts DESC, id DESC`)
+      .all(jobId) as AttentionRowRaw[];
+    return rows.map(parseRow);
+  }
+
   get(id: number): AttentionRow | null {
     const row = this.db.prepare(`SELECT * FROM attention_items WHERE id = ?`).get(id) as AttentionRowRaw | undefined;
     return row ? parseRow(row) : null;

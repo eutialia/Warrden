@@ -149,6 +149,26 @@ describe('JobQueue', () => {
     expect(q.list({ limit: 2 }).map((j) => j.id)).toEqual([c, b]);
   });
 
+  it('listByTarget returns every job for that target, newest first, and excludes other targets', () => {
+    const older = q.enqueue(target).id!;
+    q.claim();
+    q.complete(older);
+    const newer = q.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+    const otherTarget = q.enqueue({ ...target, targetId: 43 }).id!;
+    const otherInstance = q.enqueue({ ...target, arrInstance: 'radarr' }).id!;
+
+    expect(q.listByTarget({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42 }).map((j) => j.id)).toEqual([
+      newer,
+      older,
+    ]);
+    expect(q.listByTarget({ arrInstance: 'sonarr', targetKind: 'series', targetId: 43 }).map((j) => j.id)).toEqual([
+      otherTarget,
+    ]);
+    expect(q.listByTarget({ arrInstance: 'radarr', targetKind: 'series', targetId: 42 }).map((j) => j.id)).toEqual([
+      otherInstance,
+    ]);
+  });
+
   it('round-trips payload and result JSON through enqueue -> claim -> complete -> get', () => {
     const payload = { season: 3, reason: 'missing' };
     const result = { picked: 'release-guid-123', sizeMB: 1234 };

@@ -296,4 +296,16 @@ export class JobQueue {
     ) as JobRowRaw[];
     return rows.map(parseRow);
   }
+
+  /** Every job for this target (any pipeline/status), newest first. */
+  listByTarget(opts: { arrInstance: string; targetKind: TargetKind; targetId: number }): JobRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE arr_instance = ? AND target_kind = ? AND target_id = ?
+         ORDER BY created_at DESC, id DESC`,
+      )
+      .all(opts.arrInstance, opts.targetKind, opts.targetId) as JobRowRaw[];
+    return rows.map(parseRow);
+  }
 }

@@ -3,6 +3,7 @@ import { createApp } from '../src/server/app.js';
 import { ArrClient } from '../src/arr/client.js';
 import * as register from '../src/arr/register.js';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
+import { AttentionItems } from '../src/db/attention.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { loadConfig } from '../src/config/store.js';
 import type { AppContext } from '../src/context.js';
@@ -10,7 +11,7 @@ import { makeCtx, configWithArrs, arrInstance, fakeArrClient, withFakeTime, ctxW
 
 describe('dashboard api', () => {
   describe('GET /api/jobs, /api/jobs/:id', () => {
-    it('lists jobs and fetches detail with its latest acquire record', async () => {
+    it('lists jobs and fetches detail with its acquire records window', async () => {
       const ctx = makeCtx();
       ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });
       new AcquireRecords(ctx.db).insert({
@@ -21,6 +22,22 @@ describe('dashboard api', () => {
         pickedGuid: 'release-guid-1',
         releaseGroup: 'SubsPlease',
         reasoning: 'best available candidate',
+        candidates: {
+          seasonNumber: 1,
+          kept: [
+            {
+              guid: 'release-guid-1',
+              title: '[SubsPlease] Show S01',
+              indexer: 'Nyaa',
+              size: 1_000,
+              seeders: 10,
+              fullSeason: true,
+              quality: { quality: { name: 'WEB 1080p' } },
+              languages: [{ id: 1, name: 'Japanese' }],
+            },
+          ],
+          dropped: [],
+        },
       });
       const app = createApp(ctx);
 
@@ -29,27 +46,40 @@ describe('dashboard api', () => {
 
       const detail: any = await (await app.request(`/api/jobs/${list[0].id}`)).json();
       expect(detail.job.pipeline).toBe('acquire');
-      expect(detail.acquireRecord).toMatchObject({
+      expect(detail.acquireRecords).toHaveLength(1);
+      expect(detail.acquireRecords[0]).toMatchObject({
         status: 'grabbed',
         picked_guid: 'release-guid-1',
         release_group: 'SubsPlease',
         reasoning: 'best available candidate',
       });
+      expect(detail.acquireRecords[0].picked).toEqual({
+        title: '[SubsPlease] Show S01',
+        indexer: 'Nyaa',
+        size: 1_000,
+        seeders: 10,
+        quality: 'WEB 1080p',
+        languages: ['Japanese'],
+        shape: 'pack',
+        seasonNumber: 1,
+        forceGrab: false,
+      });
+      expect(detail).not.toHaveProperty('acquireRecord');
 
       expect((await app.request('/api/jobs/999')).status).toBe(404);
     });
 
-    it('returns acquireRecord: null when the job has no acquire record yet', async () => {
+    it('returns acquireRecords: [] when the job has no acquire record yet', async () => {
       const ctx = makeCtx();
       ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });
       const app = createApp(ctx);
 
       const list: any[] = await (await app.request('/api/jobs')).json();
       const detail: any = await (await app.request(`/api/jobs/${list[0].id}`)).json();
-      expect(detail.acquireRecord).toBeNull();
+      expect(detail.acquireRecords).toEqual([]);
     });
 
-    it("bounds a terminal job's detail record to its own run window — an older job's detail does not pick up a later re-pick's record, and returns null when its own run produced none", async () => {
+    it("bounds a terminal job's detail records to its own run window — an older job's detail does not pick up a later re-pick's record, and returns [] when its own run produced none", async () => {
       await withFakeTime(async () => {
         const ctx = makeCtx();
         const records = new AcquireRecords(ctx.db);
@@ -70,12 +100,102 @@ describe('dashboard api', () => {
         records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed', pickedGuid: 'g1' });
 
         const detailA: any = await (await app.request(`/api/jobs/${jobAId}`)).json();
-        expect(detailA.acquireRecord).toBeNull(); // job B's later record must not leak into job A's detail
+        expect(detailA.acquireRecords).toEqual([]); // job B's later record must not leak into job A's detail
 
         vi.setSystemTime(5_000);
         ctx.queue.complete(ctx.queue.claim()!.id);
         const detailB: any = await (await app.request(`/api/jobs/${jobBId}`)).json();
-        expect(detailB.acquireRecord).toMatchObject({ status: 'grabbed', picked_guid: 'g1' });
+        expect(detailB.acquireRecords).toHaveLength(1);
+        expect(detailB.acquireRecords[0]).toMatchObject({ status: 'grabbed', picked_guid: 'g1' });
+      });
+    });
+
+    it('returns every season row a multi-season job wrote in its own window', async () => {
+      await withFakeTime(async () => {
+        const ctx = makeCtx();
+        const records = new AcquireRecords(ctx.db);
+        const app = createApp(ctx);
+
+        vi.setSystemTime(1_000);
+        const jobId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+        vi.setSystemTime(2_000);
+        records.insert({
+          arrInstance: 'sonarr',
+          targetKind: 'series',
+          targetId: 42,
+          status: 'grabbed',
+          pickedGuid: 's1',
+          candidates: { seasonNumber: 1, kept: [], dropped: [] },
+        });
+        vi.setSystemTime(3_000);
+        records.insert({
+          arrInstance: 'sonarr',
+          targetKind: 'series',
+          targetId: 42,
+          status: 'none-viable',
+          candidates: { seasonNumber: 2, kept: [], dropped: [] },
+        });
+        vi.setSystemTime(4_000);
+        ctx.queue.complete(ctx.queue.claim()!.id);
+
+        const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
+        expect(detail.acquireRecords).toHaveLength(2);
+        // Newest first, matching listByTarget.
+        expect(detail.acquireRecords.map((r: { candidates_json: { seasonNumber: number } }) => r.candidates_json.seasonNumber)).toEqual([
+          2, 1,
+        ]);
+        expect(detail.acquireRecords.map((r: { status: string }) => r.status)).toEqual(['none-viable', 'grabbed']);
+      });
+    });
+
+    it('relatedJobs lists sibling jobs for the same target and excludes the job being viewed', async () => {
+      const ctx = makeCtx();
+      const acquireId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      ctx.queue.claim();
+      ctx.queue.complete(acquireId);
+      const ingestId = ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      const app = createApp(ctx);
+
+      const acquireDetail: any = await (await app.request(`/api/jobs/${acquireId}`)).json();
+      expect(acquireDetail.relatedJobs).toHaveLength(1);
+      expect(acquireDetail.relatedJobs[0]).toMatchObject({
+        id: ingestId,
+        pipeline: 'ingest',
+        status: 'pending',
+      });
+      expect(acquireDetail.relatedJobs[0]).toHaveProperty('acquireOutcome');
+      expect(acquireDetail.relatedJobs[0]).toHaveProperty('created_at');
+      expect(acquireDetail.relatedJobs[0]).toHaveProperty('updated_at');
+      expect(acquireDetail.relatedJobs.map((j: { id: number }) => j.id)).not.toContain(acquireId);
+
+      const ingestDetail: any = await (await app.request(`/api/jobs/${ingestId}`)).json();
+      expect(ingestDetail.relatedJobs).toHaveLength(1);
+      expect(ingestDetail.relatedJobs[0]).toMatchObject({
+        id: acquireId,
+        pipeline: 'acquire',
+        status: 'done',
+      });
+      expect(ingestDetail.relatedJobs.map((j: { id: number }) => j.id)).not.toContain(ingestId);
+    });
+
+    it('includes open attention items for the job and excludes dismissed ones', async () => {
+      const ctx = makeCtx();
+      const jobId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      const items = new AttentionItems(ctx.db);
+      const open = items.open({ kind: 'acquire.none-viable', message: 'needs eyes', jobId, data: { n: 1 } });
+      const dismissed = items.open({ kind: 'other', message: 'gone', jobId });
+      items.setStatus(dismissed.id, 'dismissed');
+      items.open({ kind: 'other-job', message: 'elsewhere', jobId: 999 });
+      const app = createApp(ctx);
+
+      const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
+      expect(detail.attention).toHaveLength(1);
+      expect(detail.attention[0]).toMatchObject({
+        id: open.id,
+        kind: 'acquire.none-viable',
+        message: 'needs eyes',
+        status: 'open',
+        job_id: jobId,
       });
     });
   });

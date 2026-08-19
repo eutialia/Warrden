@@ -38,6 +38,7 @@ import type { JobRow, TargetKind } from '../jobs/queue.js';
 import { ModelCatalog } from '../llm/catalog.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 import { pinReleaseGroup } from '../pipelines/acquire/pin.js';
+import { resolvePickedRelease } from '../pipelines/acquire/picked.js';
 import { assessQueue } from '../pipelines/ingest/queueState.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
@@ -177,7 +178,11 @@ async function recordForceGrab(
       pickedGuid: data.guid,
       releaseGroup: data.releaseGroup,
       reasoning: 'human force-grab over LLM veto',
-      candidates: { ...(data.seasonNumber === undefined ? {} : { seasonNumber: data.seasonNumber }), forceGrab: true },
+      candidates: {
+        ...(data.seasonNumber === undefined ? {} : { seasonNumber: data.seasonNumber }),
+        forceGrab: true,
+        pickedTitle: data.pickedTitle,
+      },
     });
   } catch (err) {
     events.append({
@@ -314,6 +319,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     const db = ctx.db;
     const acquireRecords = new AcquireRecords(ctx.db);
     const placedFiles = new PlacedFiles(ctx.db);
+    const jobAttention = new AttentionItems(db);
 
     // The dashboard-facing "did this job actually grab anything" status: `null` for a
     // non-acquire pipeline, or an acquire job with no record yet (still pending/running,
@@ -369,14 +375,18 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!job) return c.json({ error: 'job not found' }, 404);
       // Bounded to this job's own run window — exactly like `acquireOutcome` above —
       // rather than the target's unbounded latest record, which could belong to a
-      // different job entirely (an earlier or later re-pick of the same target). Within
-      // that window, `listByTarget` orders newest first, so [0] is this run's latest
-      // outcome, shown for its detail (reasoning, candidates).
-      const acquireRecord =
-        acquireRecords.listByTarget(job.arr_instance, job.target_kind, job.target_id, {
+      // different job entirely (an earlier or later re-pick of the same target). A
+      // multi-season series run writes one row per season, so the detail returns the
+      // full window, newest first, each with a computed `picked` summary.
+      const acquireRecordsForJob = acquireRecords
+        .listByTarget(job.arr_instance, job.target_kind, job.target_id, {
           since: job.created_at,
           until: isTerminal(job) ? job.updated_at : undefined,
-        })[0] ?? null;
+        })
+        .map((row) => ({
+          ...row,
+          picked: resolvePickedRelease({ picked_guid: row.picked_guid, candidates_json: row.candidates_json }),
+        }));
       const targetTitle = await resolveJobTitle({
         client: ctx.clients?.get(job.arr_instance),
         arrInstance: job.arr_instance,
@@ -384,10 +394,23 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         targetId: job.target_id,
         payload: job.payload,
       });
+      const relatedJobs = queue
+        .listByTarget({ arrInstance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id })
+        .filter((sibling) => sibling.id !== job.id)
+        .map((sibling) => ({
+          id: sibling.id,
+          pipeline: sibling.pipeline,
+          status: sibling.status,
+          created_at: sibling.created_at,
+          updated_at: sibling.updated_at,
+          acquireOutcome: acquireOutcome(sibling),
+        }));
       return c.json({
         job: { ...job, targetTitle, acquireOutcome: acquireOutcome(job) },
-        acquireRecord,
+        acquireRecords: acquireRecordsForJob,
         acquireOutcome: acquireOutcome(job),
+        relatedJobs,
+        attention: jobAttention.listByJob(job.id),
         placedFiles: placedFiles.listByJob(job.id),
         // This job's own subtitle site-search runs, transcript included — the dashboard's
         // JobDetail "Subtitle runs" card renders these as a chronological step list.

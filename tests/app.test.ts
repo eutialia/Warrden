@@ -670,7 +670,7 @@ describe('app', () => {
         picked_guid: 'g-top',
         release_group: 'Trix',
         reasoning: 'human force-grab over LLM veto',
-        candidates_json: { seasonNumber: 1, forceGrab: true },
+        candidates_json: { seasonNumber: 1, forceGrab: true, pickedTitle: '[Trix] S01 Batch' },
       });
       expect(client.profiles[0]!.required).toEqual(['Trix']);
     });
@@ -688,8 +688,41 @@ describe('app', () => {
       expect(res.status).toBe(200);
 
       const records = new AcquireRecords(ctx.db).listByTarget('sonarr', 'movie', 7);
-      expect(records[0]!.candidates_json).toEqual({ forceGrab: true });
+      expect(records[0]!.candidates_json).toEqual({ forceGrab: true, pickedTitle: '[Trix] S01 Batch' });
       expect(client.profiles).toHaveLength(0);
+    });
+
+    it('POST /api/attention/:id/accept: after a force-grab, GET /api/jobs/:id resolves the picked title', async () => {
+      // Leave the job non-terminal: a live job's acquire window has no upper bound, so the
+      // force-grab row written on accept is visible on this job's detail. (A terminal job's
+      // window closes at updated_at, which is before the accept.)
+      const client = fakeArrClient({ series: [seriesResource({ id: 42 })] });
+      const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+      const jobId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      const attentionItems = new AttentionItems(ctx.db);
+      const item = attentionItems.open({
+        kind: 'acquire.none-viable',
+        message: 'x',
+        jobId,
+        data: forceGrabPayload(),
+      });
+      const app = createApp(ctx);
+
+      expect((await app.request(`/api/attention/${item.id}/accept`, { method: 'POST', headers: jsonHeaders })).status).toBe(200);
+
+      const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
+      expect(detail.acquireRecords).toHaveLength(1);
+      expect(detail.acquireRecords[0].picked).toEqual({
+        title: '[Trix] S01 Batch',
+        indexer: null,
+        size: null,
+        seeders: null,
+        quality: null,
+        languages: [],
+        shape: null,
+        seasonNumber: 1,
+        forceGrab: true,
+      });
     });
 
     it('POST /api/attention/:id/accept: a force-grab with no resolvable release group grabs and records, but pins nothing', async () => {

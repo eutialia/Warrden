@@ -261,4 +261,22 @@ describe('AttentionItems', () => {
     const items = new AttentionItems(freshDb());
     expect(items.get(999)).toBeNull();
   });
+
+  it('listByJob returns open items for that job, newest first; dismissed and other jobs are excluded', () => {
+    withFakeTime(() => {
+      const items = new AttentionItems(freshDb());
+      vi.setSystemTime(1_000);
+      const older = items.open({ kind: 'a', message: 'older', jobId: 7 });
+      vi.setSystemTime(2_000);
+      const newer = items.open({ kind: 'b', message: 'newer', jobId: 7 });
+      vi.setSystemTime(3_000);
+      const dismissed = items.open({ kind: 'c', message: 'dismissed', jobId: 7 });
+      items.setStatus(dismissed.id, 'dismissed');
+      items.open({ kind: 'd', message: 'other job', jobId: 8 });
+
+      expect(items.listByJob(7).map((r) => r.id)).toEqual([newer.id, older.id]);
+      expect(items.listByJob(8)).toHaveLength(1);
+      expect(items.listByJob(99)).toEqual([]);
+    });
+  });
 });
