@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Config } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
+import { isPermanentError } from '../src/jobs/errors.js';
 import { AiSdkGenerator, LlmError, resolveModel, withRetry } from '../src/llm/generator.js';
 import { SqlTracer } from '../src/trace/tracer.js';
 import { baseConfig, freshDb } from './helpers.js';
@@ -39,6 +40,16 @@ describe('resolveModel', () => {
     const resolved = resolveModel(cfg);
     resolved.model = 'mutated';
     expect(cfg.llm.model).toEqual({ provider: 'openrouter', model: 'a' });
+  });
+});
+
+describe('LlmError permanence marker', () => {
+  it('satisfies isPermanentError when built with permanent: true', () => {
+    expect(isPermanentError(new LlmError('bad request', 'release-pick', { permanent: true }))).toBe(true);
+  });
+
+  it('does not satisfy it by default', () => {
+    expect(isPermanentError(new LlmError('socket hang up', 'release-pick'))).toBe(false);
   });
 });
 

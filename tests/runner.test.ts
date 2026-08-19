@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AttentionItems } from '../src/db/attention.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { startRunner } from '../src/jobs/runner.js';
-import { makeCtx, hasEvent } from './helpers.js';
+import { makeCtx, findEvent, hasEvent } from './helpers.js';
 
 const target = { pipeline: 'acquire' as const, targetKind: 'series' as const, targetId: 1, arrInstance: 'sonarr' };
 
@@ -83,6 +83,39 @@ describe('startRunner', () => {
     expect(openRows).toHaveLength(2);
     expect(ctx.queue.get(acquireId!)!.status).toBe('failed');
     expect(ctx.queue.get(ingestId!)!.status).toBe('failed');
+  });
+
+  it('fails a permanently-marked error terminally on the first attempt, without burning the remaining retries', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    // Duck-typed marker, exactly how `LlmError` carries it — the runner must not need to
+    // know which layer produced the error to honour it.
+    const handler = vi.fn().mockRejectedValue(Object.assign(new Error('invalid request'), { permanent: true }));
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    const job = ctx.queue.get(id!)!;
+    expect(job.status).toBe('failed');
+    expect(job.attempts).toBe(1);
+    expect(handler).toHaveBeenCalledTimes(1);
+    const attentionEvents = ctx.events.list({ level: 'attention' });
+    expect(attentionEvents).toHaveLength(1);
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: true });
+  });
+
+  it('keeps retrying an unmarked error, tagging the warn event as not permanent', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(ctx.queue.get(id!)!.status).toBe('pending');
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: false });
   });
 
   it('fails a job immediately, with an attention-worthy message, when no handler is registered for its pipeline', async () => {

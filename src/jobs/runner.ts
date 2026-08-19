@@ -1,7 +1,7 @@
 import type { AppContext } from '../context.js';
 import { targetEventData } from '../events/target.js';
 import { errorMessage } from '../util/errors.js';
-import { RescheduleError } from './errors.js';
+import { isPermanentError, RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
 
 type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
@@ -49,7 +49,7 @@ export function startRunner(
 
       const handler = handlers[job.pipeline];
       if (!handler) {
-        failJob(ctx, job, `No handler registered for pipeline "${job.pipeline}"`);
+        failJob(ctx, job, `No handler registered for pipeline "${job.pipeline}"`, false);
         return;
       }
 
@@ -67,7 +67,7 @@ export function startRunner(
           });
           return;
         }
-        failJob(ctx, job, errorMessage(err));
+        failJob(ctx, job, errorMessage(err), isPermanentError(err));
       }
     } finally {
       ticking = false;
@@ -84,14 +84,17 @@ export function startRunner(
   return () => clearInterval(interval);
 }
 
-function failJob(ctx: AppContext, job: JobRow, message: string): void {
-  const { retried } = ctx.queue.fail(job.id, message);
+function failJob(ctx: AppContext, job: JobRow, message: string, permanent: boolean): void {
+  // `maxAttempts: 1` makes this very attempt the last one: a permanent error (a provider
+  // 4xx, a prompt the SDK refuses) fails identically on every retry, so the two extra runs
+  // would only cost two more full indexer sweeps before landing on the same attention row.
+  const { retried } = ctx.queue.fail(job.id, message, permanent ? { maxAttempts: 1 } : undefined);
   ctx.events.append({
     kind: 'job.failed',
     level: 'warn',
     jobId: job.id,
     message: `Job #${job.id} (${job.pipeline}) failed: ${message}`,
-    data: { pipeline: job.pipeline, retried },
+    data: { pipeline: job.pipeline, retried, permanent },
   });
   if (!retried) {
     // Joins the target-dedupe protocol (`targetEventData`): a `JobRow` always carries the

@@ -26,13 +26,18 @@ export interface StructuredGenerator {
 }
 
 export class LlmError extends Error {
+  /** Read by the job runner (`isPermanentError`) to fail a job terminally instead of
+   * retrying an error that can only fail the same way again. */
+  public readonly permanent: boolean;
+
   constructor(
     msg: string,
     public callsite: string,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { permanent?: boolean },
   ) {
     super(msg, options);
     this.name = 'LlmError';
+    this.permanent = options?.permanent ?? false;
   }
 }
 
