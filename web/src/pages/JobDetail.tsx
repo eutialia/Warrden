@@ -268,10 +268,6 @@ export default function JobDetail() {
           </CardContent>
         </Card>
 
-        {relatedJobs.length > 0 && <RelatedJobsCard jobs={relatedJobs} />}
-
-        {attention.length > 0 && <AttentionCard items={attention} />}
-
         {job.pipeline === 'acquire' ? (
           sortedAcquireRecords.length === 0 ? (
             <Card>
@@ -290,6 +286,10 @@ export default function JobDetail() {
         )}
 
         {job.pipeline === 'subtitle' && <SubtitleRunsCard runs={subtitleRuns ?? []} />}
+
+        {relatedJobs.length > 0 && <RelatedJobsCard jobs={relatedJobs} />}
+
+        {attention.length > 0 && <AttentionCard items={attention} />}
       </SectionStack>
     </div>
   );
@@ -301,7 +301,7 @@ function RelatedJobsCard({ jobs }: { jobs: RelatedJob[] }): ReactNode {
       <CardHeader>
         <CardTitle>Related jobs</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="max-h-64 space-y-2 overflow-y-auto">
         {jobs.map((sibling) => (
           <Link
             key={sibling.id}
@@ -384,7 +384,7 @@ function ReleasePickCard({ record }: { record: AcquireRecordDetail }): ReactNode
                 <p className="mb-2 text-xs text-muted-foreground">
                   Kept · {kept.length}
                 </p>
-                <ul className="space-y-1">
+                <ul className="max-h-80 space-y-1 overflow-y-auto pr-1">
                   {kept.map((c) => {
                     const isPicked = record.picked_guid !== null && c.guid === record.picked_guid;
                     return (
@@ -408,7 +408,7 @@ function ReleasePickCard({ record }: { record: AcquireRecordDetail }): ReactNode
                 <p className="mb-2 text-xs text-muted-foreground">
                   Dropped · {dropped.length}
                 </p>
-                <ul className="space-y-1">
+                <ul className="max-h-96 space-y-1 overflow-y-auto pr-1">
                   {dropped.map((d, i) => (
                     <li key={`${d.title}-${i}`} className="font-mono text-xs break-all text-muted-foreground">
                       {d.title}
