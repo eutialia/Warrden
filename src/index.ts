@@ -5,6 +5,7 @@ import { loadConfig, resolveDataDir } from './config/store.js';
 import { applyConfig, type AppContext } from './context.js';
 import { openDb } from './db/db.js';
 import { EventLog } from './events/log.js';
+import { bindEventLogToStdio } from './events/stdio.js';
 import { JobQueue } from './jobs/queue.js';
 import { startRunner } from './jobs/runner.js';
 import { AiSdkGenerator } from './llm/generator.js';
@@ -49,6 +50,7 @@ function buildContext(dataDir: string): AppContext {
 
 async function main(): Promise<void> {
   const ctx = buildContext(resolveDataDir());
+  bindEventLogToStdio(ctx.events);
 
   reclaimAbandonedJobs(ctx);
 
