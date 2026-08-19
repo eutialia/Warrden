@@ -77,16 +77,16 @@ describe('pickRelease', () => {
     expect(llm.calls[0].prompt).toContain(expected);
   });
 
-  it('treats a none decision that still names a candidate as a pick (the model found one, then waffled)', async () => {
+  it('honours a none decision that still names a candidate: the veto stands, nothing is grabbed', async () => {
     const llm = new FakeGenerator([
-      pickResponse({ decision: 'none', candidate: 1, releaseGroup: 'Trix', confidence: 'high', reasoning: 'best remaining is Trix' }),
+      pickResponse({ decision: 'none', candidate: 1, releaseGroup: 'Trix', confidence: 'high', reasoning: 'best remaining is Trix, but it is a CAM' }),
     ]);
     const res = await pickRelease({
       llm,
       candidates: [candidate({ guid: 'g-trix' }), candidate({ guid: 'g2', title: 'other' })],
       ...base,
     });
-    expect(res).toMatchObject({ decision: 'pick', guid: 'g-trix', releaseGroup: 'Trix' });
+    expect(res).toEqual({ decision: 'none', reasoning: 'best remaining is Trix, but it is a CAM' });
   });
 
   it('renders Sonarr shape, quality, group and languages on the candidate line so the model does not have to parse the title', async () => {

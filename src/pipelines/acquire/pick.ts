@@ -163,7 +163,11 @@ export async function pickRelease(input: {
     trace: jobId !== undefined ? { jobId } : undefined,
   });
 
-  if (result.decision === 'none' && result.candidate === null) {
+  // `none` is honoured unconditionally, candidate number or not. A structured-output model
+  // that vetoes and still fills the number in is answering the schema, not changing its mind:
+  // reading that as a pick grabs a release the model just rejected, which is the whole veto
+  // this pipeline exists to respect.
+  if (result.decision === 'none') {
     return { decision: 'none', reasoning: result.reasoning };
   }
 

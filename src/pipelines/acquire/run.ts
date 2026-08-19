@@ -79,8 +79,10 @@ interface RecordOutcomeInput {
  * own outcome was worse than an earlier one's.
  *
  * Every interactive search a run performs is cached per (job, target) in `ctx.searchCache`
- * and only cleared once the job finishes without throwing, so the retry a mid-run failure
- * earns replays those candidates instead of sweeping every indexer a second time.
+ * and cleared once the job finishes without throwing, so the retry a mid-run failure earns
+ * replays those candidates instead of sweeping every indexer a second time. The one failure
+ * that clears it too is a thrown `grabRelease` (see `attempt`), where the cached guids are
+ * exactly what just proved untrustworthy.
  */
 export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void> {
   const rawClient = ctx.clients.get(job.arr_instance);
@@ -380,7 +382,17 @@ async function attempt(
     throw new Error(`Picked guid "${pick.guid}" is missing from the candidate list`);
   }
 
-  await client.grabRelease(pick.guid, picked.indexerId);
+  try {
+    await client.grabRelease(pick.guid, picked.indexerId);
+  } catch (err) {
+    // The cache survives a thrown run so an LLM blip's retry replays the same candidates
+    // instead of re-sweeping every indexer. A thrown GRAB is the one failure that argues the
+    // other way: whatever the arr rejected (an expired release-cache guid, an indexer that
+    // has since dropped the release) makes those exact guids the least trustworthy thing to
+    // retry against for the next 30 minutes. Drop them and let the retry search fresh.
+    ctx.searchCache.clearJob(input.jobId);
+    throw err;
+  }
 
   return {
     status: 'grabbed',

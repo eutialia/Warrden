@@ -768,6 +768,22 @@ describe('runAcquireJob: interactive search cache across job retries', () => {
     expect(client.searchReleases).toHaveBeenCalledTimes(1);
   });
 
+  it('drops the cache when the grab itself throws, so the retry searches for a live guid instead of replaying a dead one', async () => {
+    const client = fakeArrClient({ movies: [movieResource({ id: 7, title: 'A Movie', year: 2023 })], releases: [candidate({ guid: 'g1' })] });
+    client.grabRelease = vi.fn(async () => {
+      throw new Error('release no longer available');
+    });
+    const pick = pickResponse({ decision: 'pick', candidate: 1, releaseGroup: null, confidence: 'high', reasoning: 'ok' });
+    const ctx = ctxWithClient('radarr', client, { llm: new FakeGenerator([pick, noneResponse()]) });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'radarr', payload: { title: 'A Movie' } });
+
+    await expect(runAcquireJob(ctx, job)).rejects.toThrow('release no longer available');
+    expect(ctx.searchCache.get(job.id, 'movie')).toBeUndefined();
+
+    await runAcquireJob(ctx, job);
+    expect(client.searchReleases).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['series', 'movie'] as const)('searches again for a %s once a run finished cleanly and cleared the job', async (targetKind) => {
     const { ctx, client, job } = retryFixture(targetKind);
 
