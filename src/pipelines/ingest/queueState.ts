@@ -13,17 +13,20 @@ function matchesTarget(record: QueueRecord, target: { kind: TargetKind; id: numb
 }
 
 /** A completed download the arr itself has flagged as trouble: `importBlocked` (the arr
- * stopped and is waiting on a human) or any `trackedDownloadStatus: 'warning'` (a rejection,
- * a mapping it couldn't resolve, ...). Both mean the arr is NOT going to import this on its
- * own, which is the only condition under which a rescue may safely step in. `status` must be
- * `'completed'`: a warning on a record still `'downloading'` is about the fetch (stalled
- * tracker, no seeds), and there's nothing on disk to import yet. `'importing'` overrides the
- * warning outright: the arr is moving these files RIGHT NOW, and Sonarr routinely carries
- * `statusMessages` (hence `trackedDownloadStatus: 'warning'`) from earlier in the record's
- * life straight into the importing state. Rescuing there is the double-import itself. */
+ * stopped and is waiting on a human), or a `trackedDownloadStatus` of `'warning'` (a
+ * rejection, a mapping it couldn't resolve, ...) or `'error'`, the status Sonarr pairs with
+ * `importPending` for its "Waiting to Import (Error)" path-mapping failures, which is a
+ * download that will sit there forever, not one it's about to pick up. All of them mean the
+ * arr is NOT going to import this on its own, which is the only condition under which a
+ * rescue may safely step in. `status` must be `'completed'`: a warning on a record still
+ * `'downloading'` is about the fetch (stalled tracker, no seeds), and there's nothing on disk
+ * to import yet. `'importing'` overrides the flag outright: the arr is moving these files
+ * RIGHT NOW, and Sonarr routinely carries `statusMessages` (hence a non-ok
+ * `trackedDownloadStatus`) from earlier in the record's life straight into the importing
+ * state. Rescuing there is the double-import itself. */
 function isStuckRecord(r: QueueRecord): boolean {
   if (r.status !== 'completed' || r.trackedDownloadState === 'importing') return false;
-  return r.trackedDownloadState === 'importBlocked' || r.trackedDownloadStatus === 'warning';
+  return r.trackedDownloadState === 'importBlocked' || r.trackedDownloadStatus === 'warning' || r.trackedDownloadStatus === 'error';
 }
 
 /**

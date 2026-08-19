@@ -31,6 +31,13 @@ import { resolveSourceDirsDetailed } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
 export const SETTLE_DEADLINE_MS = 24 * 60 * 60_000;
+/** How long a job must have existed before a `'stuck'` assessment is allowed to rescue.
+ * Sonarr routinely carries stale `statusMessages` (hence `trackedDownloadStatus: 'warning'`)
+ * on an `importPending` record it is seconds away from importing itself, so a stuck verdict
+ * reached right after the Download webhook fired is not evidence of anything yet: acting on
+ * it re-arms the double-import race the settle gate exists to close. A genuinely stuck
+ * download is still stuck ten minutes later, and the job re-runs from scratch each time. */
+export const RESCUE_DWELL_MS = 10 * 60_000;
 
 type MatchedBy = 'deterministic' | 'llm';
 
@@ -59,6 +66,10 @@ type TargetContext = SeriesTargetContext | MovieTargetContext;
  * whatever's left — and atomically copies matches into place beside their video,
  * recording provenance so a later run (or `Reconcile`) can tell what Warrden itself put
  * there.
+ *
+ * A `'stuck'` verdict on a job younger than `RESCUE_DWELL_MS` reschedules too, for the
+ * reason spelled out on that constant: fresh evidence of "stuck" is usually just the arr
+ * about to import.
  *
  * The handler owns its own deadline: rescheduling itself while the arr is still importing
  * is unbounded by design (`RescheduleError` isn't a retry, the runner never counts it
@@ -109,6 +120,16 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
     }
     ctx.trace.event({ jobId: job.id, kind: 'pipeline.wait', summary: 'waiting for arr import to settle' });
     throw new RescheduleError('arr still importing this target', SETTLE_RETRY_MS);
+  }
+
+  // Same placement and shape as the busy branch above: before any filesystem work, so the
+  // whole job simply re-runs (it is idempotent by design) once the dwell has elapsed. No
+  // deadline guard of its own is needed: `RESCUE_DWELL_MS` is two orders of magnitude under
+  // `SETTLE_DEADLINE_MS` and a job's age only grows, so this branch can only ever hold a job
+  // back for the first ten minutes of its life, never forever.
+  if (assessment.state === 'stuck' && Date.now() - job.created_at < RESCUE_DWELL_MS) {
+    ctx.trace.event({ jobId: job.id, kind: 'pipeline.wait', summary: 'stuck download still settling' });
+    throw new RescheduleError('stuck download still settling', SETTLE_RETRY_MS);
   }
 
   const placedFiles = new PlacedFiles(ctx.db);

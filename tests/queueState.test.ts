@@ -56,6 +56,20 @@ describe('assessQueue', () => {
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'stuck', downloadIds: ['dl-2'] });
   });
 
+  it('stuck: completed + error status (Sonarr\'s "Waiting to Import (Error)" path-mapping failure)', () => {
+    const records = [
+      queueRecord({ downloadId: 'dl-err', status: 'completed', trackedDownloadState: 'importPending', trackedDownloadStatus: 'error' }),
+    ];
+    expect(assessQueue(records, seriesTarget)).toEqual({ state: 'stuck', downloadIds: ['dl-err'] });
+  });
+
+  it('busy: importing wins over an error on the SAME record, exactly as it does over a warning', () => {
+    const records = [
+      queueRecord({ downloadId: 'dl-err', status: 'completed', trackedDownloadState: 'importing', trackedDownloadStatus: 'error' }),
+    ];
+    expect(assessQueue(records, seriesTarget)).toEqual({ state: 'busy' });
+  });
+
   it('settled: a still-downloading record carrying a warning is not stuck (nothing has been handed to the importer yet)', () => {
     const records = [queueRecord({ downloadId: 'dl-3', status: 'downloading', trackedDownloadStatus: 'warning' })];
     expect(assessQueue(records, seriesTarget)).toEqual({ state: 'settled' });

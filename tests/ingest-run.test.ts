@@ -7,7 +7,7 @@ import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { RescheduleError } from '../src/jobs/errors.js';
-import { runIngestJob, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS } from '../src/pipelines/ingest/run.js';
+import { runIngestJob, RESCUE_DWELL_MS, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS } from '../src/pipelines/ingest/run.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
 import { AcceptDataSchema } from '../src/server/app.js';
 import {
@@ -36,6 +36,16 @@ function claimIngestJob(fx: IngestFixture) {
     targetId: fx.targetId,
     arrInstance: fx.arrInstance,
   });
+}
+
+/** A claimed ingest job old enough to be past `RESCUE_DWELL_MS`, which every rescue test
+ * needs, since a stuck assessment on a job younger than the dwell reschedules instead of
+ * rescuing (runIngestJob's dwell gate: a fresh Download webhook's stale warning is usually
+ * about to be imported by the arr itself). */
+function claimAgedIngestJob(fx: IngestFixture) {
+  const job = claimIngestJob(fx);
+  fx.ctx.db.prepare('UPDATE jobs SET created_at = ? WHERE id = ?').run(Date.now() - RESCUE_DWELL_MS - 1_000, job.id);
+  return fx.ctx.queue.get(job.id)!;
 }
 
 /** Replaces the fake's `listQueue` so the first poll (runIngestJob's settle gate) answers
@@ -74,6 +84,46 @@ describe('runIngestJob — settle gate', () => {
 
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.settle-timeout')).toBe(true);
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId)).toHaveLength(0);
+  });
+
+  it('rescue dwell: a stuck assessment on a job younger than RESCUE_DWELL_MS -> RescheduleError(SETTLE_RETRY_MS), nothing rescued, nothing swept', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    // The exact live shape: a stale statusMessage warning on a record Sonarr is seconds away
+    // from importing itself, seen right after the Download webhook enqueued this job.
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
+    fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' })];
+    writeFileSync(join(fx.torrentDir, 'Show - 05 [JPSC].ass'), 'sub');
+    const job = claimIngestJob(fx);
+
+    const call = runIngestJob(fx.ctx, job);
+    await expect(call).rejects.toThrow(RescheduleError);
+    await expect(call).rejects.toMatchObject({ delayMs: SETTLE_RETRY_MS });
+
+    expect(fx.client.executeManualImport).not.toHaveBeenCalled();
+    expect(fx.client.listManualImport).not.toHaveBeenCalled();
+    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, fx.targetKind, fx.targetId)).toHaveLength(0);
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.placed')).toBe(false);
+  });
+
+  it('rescue dwell: the same stuck assessment on a job older than RESCUE_DWELL_MS rescues instead of waiting', async () => {
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
+    const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
+    fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
+
+    await runIngestJob(fx.ctx, claimAgedIngestJob(fx));
+
+    expect(fx.client.executeManualImport).toHaveBeenCalledWith([expect.objectContaining({ path: item.path, episodeIds: [2] })], 'copy');
   });
 
   it('mount missing: an absent mount marker -> RescheduleError(MOUNT_RETRY_MS) + ingest.mount-missing attention event', async () => {
@@ -901,7 +951,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -924,7 +974,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     );
     const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -949,7 +999,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     stageQueuePolls(fx, stuck, stuck);
     const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -968,7 +1018,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     );
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -989,7 +1039,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     stageQueuePolls(fx, stuck, stuck);
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1012,7 +1062,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     const item = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [item];
     fx.client.manualImportByScope[`folder:${fx.torrentDir}`] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1033,7 +1083,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [stuckItem];
     // Seeded on a folder scope that must never be queried — if it were, this would ship too.
     fx.client.manualImportByScope[`folder:${fx.torrentDir}`] = [manualImportItem({ path: '/downloads/Show/Should Not Ship.mkv' })];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1058,7 +1108,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
     const llm = new FakeGenerator([]);
     fx.ctx.llm = llm;
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1091,7 +1141,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
       rejections: [{ reason: 'sample file' }],
     });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [clean, rejected];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1108,7 +1158,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     const clean = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const otherMovie = manualImportItem({ path: '/downloads/Movie/Featurette.mkv', folderName: 'Movie Torrent', movie: { id: 999 } });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [clean, otherMovie];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1129,7 +1179,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     });
     const otherMovie = manualImportItem({ path: '/downloads/Movie/Featurette.mkv', folderName: 'Movie Torrent', movie: { id: 999 } });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [rejected, otherMovie];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1150,7 +1200,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     const itemA = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const itemB = manualImportItem({ path: '/downloads/Movie/Movie.Alt.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [itemA, itemB];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1183,7 +1233,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     const itemA = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     const itemB = manualImportItem({ path: '/downloads/Movie/Movie.Alt.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [itemA, itemB];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1199,7 +1249,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     fx.client.queue = [queueRecord({ seriesId: undefined, movieId: 7, downloadId: 'dl-movie-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
-    const job = claimIngestJob(fx);
+    const job = claimAgedIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
 
@@ -1216,7 +1266,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     const item = manualImportItem({ path: '/downloads/Movie/Movie.mkv', folderName: 'Movie Torrent' });
     fx.client.manualImportByScope['downloadId:dl-movie-1'] = [item];
 
-    const job1 = claimIngestJob(fx);
+    const job1 = claimAgedIngestJob(fx);
     await runIngestJob(fx.ctx, job1);
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1); // unoccupied -> executed
     fx.ctx.queue.complete(job1.id); // free the singleton slot so a second job can be claimed below
@@ -1224,7 +1274,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     // The import landed: the movie now has a file. The arr's queue record for the same
     // download lingers (it hasn't cleared it yet), so the next run sees it as stuck again.
     fx.client.movieFiles.push({ id: 200, movieId: 7, relativePath: 'Movie.mkv', path: fx.videoPath, size: statSync(fx.videoPath).size });
-    const job2 = claimIngestJob(fx);
+    const job2 = claimAgedIngestJob(fx);
     await runIngestJob(fx.ctx, job2);
 
     expect(fx.client.executeManualImport).toHaveBeenCalledTimes(1); // NOT re-executed
