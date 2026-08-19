@@ -2,12 +2,12 @@ import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { APICallError, InvalidPromptError, NoObjectGeneratedError } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import type { Config } from '../src/config/schema.js';
+import type { Config, Effort } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { isPermanentError } from '../src/jobs/errors.js';
 import { AiSdkGenerator, LlmError, resolveModel, withRetry } from '../src/llm/generator.js';
-import { SqlTracer } from '../src/trace/tracer.js';
+import { NOOP_TRACER, SqlTracer } from '../src/trace/tracer.js';
 import { baseConfig, freshDb } from './helpers.js';
 
 // AiSdkGenerator.generate composes resolveModel + withRetry around `ai`'s generateObject.
@@ -201,12 +201,12 @@ describe('AiSdkGenerator', () => {
  * built with on the instance, so what will end up in the request body is inspectable here
  * without a network round trip. */
 function recordedCall(index = 0): {
-  settings: { extraBody?: { reasoning?: { effort?: string; enabled?: boolean } } };
+  settings: { extraBody?: Record<string, unknown> };
   providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
 } {
   const [opts] = generateObjectMock.mock.calls[index] as [
     {
-      model: { settings: { extraBody?: { reasoning?: { effort?: string; enabled?: boolean } } } };
+      model: { settings: { extraBody?: Record<string, unknown> } };
       providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
     },
   ];
@@ -300,7 +300,10 @@ describe('AiSdkGenerator reasoning effort', () => {
     'sends effort "%s" through unchanged as an extraBody reasoning field',
     async (effort) => {
       await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort });
-      expect(recordedCall().settings.extraBody).toEqual({ reasoning: { effort } });
+      expect(recordedCall().settings.extraBody).toEqual({
+        reasoning: { effort },
+        provider: { require_parameters: true },
+      });
     },
   );
 
@@ -312,19 +315,83 @@ describe('AiSdkGenerator reasoning effort', () => {
   // Omitting the field leaves a default-on model thinking, so 'none' has to say so out loud.
   it('sends reasoning enabled false for effort "none"', async () => {
     await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort: 'none' });
-    expect(recordedCall().settings.extraBody).toEqual({ reasoning: { enabled: false } });
+    expect(recordedCall().settings.extraBody).toEqual({
+      reasoning: { enabled: false },
+      provider: { require_parameters: true },
+    });
+  });
+
+  // Without require_parameters OpenRouter is free to route to a provider that drops the
+  // reasoning field, which is exactly how a live "effort high" run came back with 0
+  // reasoning tokens.
+  it('restricts routing to providers that honour the reasoning field whenever reasoning is configured', async () => {
+    await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort: 'high' });
+    expect(recordedCall().settings.extraBody?.provider).toEqual({ require_parameters: true });
   });
 
   it('keeps the prompt-cache options and the reasoning body together on one call', async () => {
     await generateWith({ provider: 'openrouter', model: 'anthropic/claude-opus-5', effort: 'max' }, true);
     const call = recordedCall();
-    expect(call.settings.extraBody).toEqual({ reasoning: { effort: 'max' } });
+    expect(call.settings.extraBody).toEqual({
+      reasoning: { effort: 'max' },
+      provider: { require_parameters: true },
+    });
     expect(call.providerOptions).toEqual({ openrouter: { cacheControl: { type: 'ephemeral' } } });
   });
 });
 
+describe('AiSdkGenerator ignored-effort detection', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  async function generateReporting(
+    effort: Effort | undefined,
+    reasoningTokens: number | undefined,
+  ): Promise<ReturnType<typeof vi.fn>> {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({
+      object: { ok: true },
+      usage: { inputTokens: 10, outputTokens: 2, outputTokenDetails: { textTokens: 2, reasoningTokens } },
+    });
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort };
+    const onEffortIgnored = vi.fn();
+    await new AiSdkGenerator(() => cfg, NOOP_TRACER, onEffortIgnored).generate({
+      callsite: 'site-search',
+      schema,
+      system: 's',
+      prompt: 'p',
+    });
+    return onEffortIgnored;
+  }
+
+  it('reports callsite, model and effort when a requested effort came back with zero reasoning tokens', async () => {
+    expect(await generateReporting('high', 0)).toHaveBeenCalledWith({
+      callsite: 'site-search',
+      model: 'deepseek/deepseek-v4-flash-0731',
+      effort: 'high',
+    });
+  });
+
+  it('stays quiet when the model actually reasoned', async () => {
+    expect(await generateReporting('high', 77)).not.toHaveBeenCalled();
+  });
+
+  it('stays quiet for effort "none", where zero reasoning tokens is the point', async () => {
+    expect(await generateReporting('none', 0)).not.toHaveBeenCalled();
+  });
+
+  it('stays quiet when no effort was requested', async () => {
+    expect(await generateReporting(undefined, 0)).not.toHaveBeenCalled();
+  });
+
+  // No count reported is not a count of zero: there is nothing to conclude about the route.
+  it('stays quiet when the provider reported no reasoning-token count at all', async () => {
+    expect(await generateReporting('high', undefined)).not.toHaveBeenCalled();
+  });
+});
+
 describe('OpenRouter request body', () => {
-  it('carries reasoning from extraBody and cache_control from call providerOptions in the same body', async () => {
+  it('carries reasoning and the routing restriction from extraBody and cache_control from call providerOptions in the same body', async () => {
     // Pins the escape hatch this build relies on: extraBody is merged into the request body
     // verbatim, and call-level providerOptions are merged on top of it rather than replacing
     // it. A provider upgrade that changes either merge order breaks here, not in production.
@@ -341,7 +408,7 @@ describe('OpenRouter request body', () => {
       );
     };
     const model = createOpenRouter({ apiKey: 'k', fetch: fetchStub })('deepseek/deepseek-v4-flash-0731', {
-      extraBody: { reasoning: { effort: 'max' } },
+      extraBody: { reasoning: { effort: 'max' }, provider: { require_parameters: true } },
     });
     await model.doGenerate({
       prompt: [{ role: 'user', content: [{ type: 'text', text: 'p' }] }],
@@ -349,6 +416,9 @@ describe('OpenRouter request body', () => {
     });
 
     expect(body.reasoning).toEqual({ effort: 'max' });
+    // The routing restriction has to reach the wire intact, or reasoning silently becomes
+    // best-effort again.
+    expect(body.provider).toEqual({ require_parameters: true });
     expect(body.cache_control).toEqual({ type: 'ephemeral' });
   });
 });

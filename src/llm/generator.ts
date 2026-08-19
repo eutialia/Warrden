@@ -145,10 +145,13 @@ function createModel(cfg: Config, ref: ModelRef, callsite: string): LanguageMode
  * enabled by default still thinks (and bills for it) when the field is absent, so 'none' has
  * to send the explicit `enabled: false` toggle instead.
  */
-function reasoningSettings(effort?: Effort): { extraBody?: { reasoning: Record<string, unknown> } } {
+function reasoningSettings(effort?: Effort): { extraBody?: Record<string, unknown> } {
   if (effort === undefined) return {};
-  if (effort === 'none') return { extraBody: { reasoning: { enabled: false } } };
-  return { extraBody: { reasoning: { effort } } };
+  const reasoning = effort === 'none' ? { enabled: false } : { effort };
+  // require_parameters keeps OpenRouter from routing to a provider that silently drops
+  // the reasoning field: observed live as "effort high, 0 reasoning tokens" on a route
+  // that ignored it.
+  return { extraBody: { reasoning, provider: { require_parameters: true } } };
 }
 
 /**
@@ -186,6 +189,7 @@ export class AiSdkGenerator implements StructuredGenerator {
   constructor(
     private readonly getCfg: () => Config,
     private readonly trace: Tracer = NOOP_TRACER,
+    private readonly onEffortIgnored?: (info: { callsite: string; model: string; effort: Effort }) => void,
   ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
@@ -241,6 +245,12 @@ export class AiSdkGenerator implements StructuredGenerator {
         finishReason: result.finishReason,
         warnings: result.warnings,
       }));
+      // A reported count of zero against a requested effort means the route answered without
+      // reasoning at all; no count reported means the provider said nothing, which proves
+      // nothing either way.
+      if (ref.effort !== undefined && ref.effort !== 'none' && result.usage?.outputTokenDetails?.reasoningTokens === 0) {
+        this.onEffortIgnored?.({ callsite: opts.callsite, model: ref.model, effort: ref.effort });
+      }
       return result.object;
     } catch (err) {
       attempt.end('error', () => ({ provider: ref.provider, model: ref.model, error: errorMessage(err) }));
