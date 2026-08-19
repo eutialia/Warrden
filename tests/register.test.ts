@@ -39,12 +39,15 @@ describe('registerWebhooks', () => {
   ])(
     'skips creation but still records a pre-existing "Warrden" notification already subscribed to import events when $scenario',
     async ({ fields }) => {
-      const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden', onDownload: true, onUpgrade: true, fields }] });
+      const client = fakeArrClient({
+        notifications: [{ id: 7, name: 'Warrden', onSeriesAdd: true, onMovieAdded: true, onDownload: true, onUpgrade: true, fields }],
+      });
       const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
       await registerWebhooks(ctx);
 
       expect(client.createNotification).not.toHaveBeenCalled();
+      expect(client.updateNotification).not.toHaveBeenCalled();
       expect(client.deleteNotification).not.toHaveBeenCalled();
       expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 7, name: 'Warrden' }]);
     },
@@ -65,7 +68,17 @@ describe('registerWebhooks', () => {
     },
   ])('re-points a healthy "Warrden" notification whose url is stale because $scenario', async ({ config, registeredUrl, expectedUrl }) => {
     const client = fakeArrClient({
-      notifications: [{ id: 7, name: 'Warrden', onDownload: true, onUpgrade: true, fields: [{ name: 'url', value: registeredUrl }] }],
+      notifications: [
+        {
+          id: 7,
+          name: 'Warrden',
+          onSeriesAdd: true,
+          onMovieAdded: true,
+          onDownload: true,
+          onUpgrade: true,
+          fields: [{ name: 'url', value: registeredUrl }],
+        },
+      ],
     });
     const ctx = ctxWithClient('sonarr', client, { config });
     new ManagedObjects(ctx.db).insert({ arrInstance: 'sonarr', kind: 'notification', externalId: 7, name: 'Warrden' });
@@ -100,10 +113,15 @@ describe('registerWebhooks', () => {
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 7, name: 'Warrden' }]);
   });
 
+  const healthyNotification = { id: 7, name: 'Warrden', onSeriesAdd: true, onMovieAdded: true, onDownload: true, onUpgrade: true };
   it.each([
-    { name: 'onDownload false', notification: { id: 7, name: 'Warrden', onDownload: false, onUpgrade: true } },
-    { name: 'onUpgrade false', notification: { id: 7, name: 'Warrden', onDownload: true, onUpgrade: false } },
-    { name: 'both absent (Phase 1 registration)', notification: { id: 7, name: 'Warrden' } },
+    { name: 'onDownload false', notification: { ...healthyNotification, onDownload: false } },
+    { name: 'onUpgrade false', notification: { ...healthyNotification, onUpgrade: false } },
+    // A Download-only hook (what Phase 1 registered) never delivers SeriesAdd/MovieAdded, so
+    // nothing ever acquires from an arr-side add, and it used to be left standing forever.
+    { name: 'onSeriesAdd absent', notification: { ...healthyNotification, onSeriesAdd: undefined } },
+    { name: 'onMovieAdded false', notification: { ...healthyNotification, onMovieAdded: false } },
+    { name: 'every flag absent (Phase 1 registration)', notification: { id: 7, name: 'Warrden' } },
   ])('updates a stale "Warrden" notification missing import events in place ($name)', async ({ notification }) => {
     const client = fakeArrClient({ notifications: [notification] });
     const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });

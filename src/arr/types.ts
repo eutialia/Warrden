@@ -84,6 +84,11 @@ export interface ReleaseProfileResource {
 export interface NotificationSummary {
   id: number;
   name: string;
+  /** All four of the events Warrden's own registration subscribes to. Optional because an
+   * arr that predates one of them (or a Phase 1 Warrden registration) simply omits it:
+   * absent reads the same as `false` to `registerWebhooks`'s healthy-skip predicate. */
+  onSeriesAdd?: boolean;
+  onMovieAdded?: boolean;
   onDownload?: boolean;
   onUpgrade?: boolean;
   /** The implementation's own settings, as name/value pairs. Only `url` is read (see
