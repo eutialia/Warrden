@@ -193,7 +193,10 @@ export default function Activity() {
                       {day.jobs.map((job) => (
                         // The row is the hit area; the title is the actual link, so the
                         // job can be tabbed to, opened in a new tab, or copied.
-                        <TableRow key={job.id} className="relative cursor-pointer">
+                        // `relative` on <tr> is ignored, so the overlay would cover the
+                        // table and only the last row would receive clicks. A transform
+                        // contains it.
+                        <TableRow key={job.id} className="cursor-pointer [transform:translateZ(0)]">
                           <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
                             <Tooltip>
                               <TooltipTrigger render={<span>{formatTimeOfDay(job.updated_at)}</span>} />

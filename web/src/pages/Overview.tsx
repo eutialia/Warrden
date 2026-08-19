@@ -229,7 +229,9 @@ export default function Overview() {
                   {jobs.map((job) => (
                     // The whole row is the hit area, but the link is a real link: a row
                     // with an onClick can't be tabbed to, opened in a new tab, or copied.
-                    <TableRow key={job.id} className="relative cursor-pointer">
+                    // `relative` on <tr> is ignored, so the overlay would cover the table
+                    // and only the last row would receive clicks. A transform contains it.
+                    <TableRow key={job.id} className="cursor-pointer [transform:translateZ(0)]">
                       <TableCell className="max-w-0">
                         <Link to={`/jobs/${job.id}`} className="truncate font-medium after:absolute after:inset-0">
                           {jobTitle(job)}
