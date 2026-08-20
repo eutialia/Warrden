@@ -1,11 +1,11 @@
-import type { ArrApi, EpisodeResource, ReleaseCandidate, SeasonResource } from '../../arr/types.js';
+import type { ArrApi, EpisodeResource, MovieResource, ReleaseCandidate, SeasonResource } from '../../arr/types.js';
 import { traceArrClient } from '../../arr/traced.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
 import { AttentionItems } from '../../db/attention.js';
 import { targetEventData } from '../../events/target.js';
 import type { JobRow } from '../../jobs/queue.js';
-import { resolvePayloadTitle, resolveTargetTitle } from '../targetTitle.js';
+import { resolvePayloadTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { eligibleCandidates, pickRelease, resolveReleaseGroup } from './pick.js';
 import { pinReleaseGroup } from './pin.js';
@@ -96,8 +96,13 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
   const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   if (job.target_kind === 'movie') {
-    const title = await resolveTargetTitle(client, job);
-    await runMovieAcquire(ctx, job, client, title);
+    // Resolved here rather than through resolveTargetTitle so the one listMovies() call
+    // serves both the title and the hasFile check, matching what the series branch does
+    // with getSeries.
+    const movies = await client.listMovies();
+    const movie = movies.find((m) => m.id === job.target_id);
+    const title = resolvePayloadTitle(job) ?? movie?.title ?? `movie #${job.target_id}`;
+    await runMovieAcquire(ctx, job, client, title, movie);
   } else {
     const series = await client.getSeries(job.target_id);
     const title = resolvePayloadTitle(job) ?? series.title;
@@ -128,7 +133,13 @@ async function cachedSearch(
   return raw;
 }
 
-async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, title: string): Promise<void> {
+async function runMovieAcquire(
+  ctx: AppContext,
+  job: JobRow,
+  client: ArrApi,
+  title: string,
+  movie: MovieResource | undefined,
+): Promise<void> {
   if (alreadyGrabbed(ctx, job)) {
     ctx.events.append({
       kind: 'acquire.skip-already-grabbed',
@@ -136,6 +147,21 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
       message: `Skipped re-grab for "${title}" — a previous run of this job already grabbed a release`,
       data: targetEventData(job),
     });
+    return;
+  }
+
+  // Radarr answers this directly, so unlike a series there is never an "unknown" case
+  // here and the rejection-text fallback is not needed for movies at all. An absent movie
+  // (deleted between enqueue and run) is not satisfied: let the search decide as before.
+  if (movie?.hasFile === true) {
+    recordOutcome(ctx, job, { status: 'already-satisfied', candidates: { kept: [], dropped: [] } });
+    ctx.events.append({
+      kind: 'acquire.already-satisfied',
+      jobId: job.id,
+      message: `Nothing to grab for "${title}": the file is already in place`,
+      data: targetEventData(job),
+    });
+    settleSeasonAttention(ctx, job);
     return;
   }
 
@@ -160,6 +186,7 @@ async function runMovieAcquire(ctx: AppContext, job: JobRow, client: ArrApi, tit
       reasoning: result.reasoning,
       candidates: { kept: result.kept, dropped: result.dropped },
     });
+    settleSeasonAttention(ctx, job);
     ctx.events.append({
       kind: 'acquire.grabbed',
       jobId: job.id,

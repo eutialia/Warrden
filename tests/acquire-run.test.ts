@@ -1032,3 +1032,46 @@ describe('runAcquireJob: arr refused everything and we cannot see a file count',
     expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
   });
 });
+
+describe('runAcquireJob: a movie the arr already has', () => {
+  function movieSetup(hasFile: boolean) {
+    const client = fakeArrClient({
+      movies: [movieResource({ id: 7, title: 'Perfect Blue', hasFile })],
+      releases: [candidate({ guid: 'm1', title: 'Perfect Blue 1997 1080p' })],
+    });
+    const ctx = ctxWithClient('radarr', client, {
+      llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'GRP', confidence: 'high', reasoning: 'ok' })]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'movie', targetId: 7, arrInstance: 'radarr', payload: {} });
+    return { ctx, client, job };
+  }
+
+  it('does not search when the movie is already filed', async () => {
+    const { ctx, client, job } = movieSetup(true);
+    await runAcquireJob(ctx, job);
+    expect(client.searchReleases).not.toHaveBeenCalled();
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('already-satisfied');
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
+  });
+
+  it('closes an open review item for that movie', async () => {
+    const { ctx, job } = movieSetup(true);
+    const items = new AttentionItems(ctx.db);
+    items.open({
+      kind: 'acquire.none-viable',
+      message: 'nothing good for Perfect Blue',
+      data: { instance: 'radarr', targetKind: 'movie', targetId: 7 },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(items.list({ status: 'open' })).toHaveLength(0);
+  });
+
+  it('still searches when the movie has no file', async () => {
+    const { ctx, client, job } = movieSetup(false);
+    await runAcquireJob(ctx, job);
+    expect(client.searchReleases).toHaveBeenCalled();
+    expect(client.grabbed).toHaveLength(1);
+  });
+});
