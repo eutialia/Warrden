@@ -21,7 +21,7 @@ export function StatusBadge({ status }: { status: JobStatus }) {
 
 /**
  * A job's queue status alone can't distinguish a successful acquire from one that
- * "succeeded" by finding nothing. Renders next to StatusBadge for that case.
+ * "succeeded" by finding nothing. Design-system badge for that outcome.
  */
 export function AcquireOutcomeBadge({ outcome }: { outcome: AcquireStatus | null | undefined }) {
   if (!outcome) return null;
