@@ -3,6 +3,8 @@ import type {
   AccessTier,
   AcquireStatus,
   ArrCheck,
+  EventRow,
+  Job,
   JobStatus,
   ManagedObjectKind,
   StorageCheckStatus,
@@ -108,6 +110,43 @@ export function acquireOutcomeLabel(outcome: AcquireStatus): string {
  * want to act on. "Already have it" is neither: nothing is missing and nobody is needed. */
 export function acquireOutcomeTone(outcome: AcquireStatus): Tone {
   return outcome === 'grabbed' || outcome === 'already-satisfied' ? 'success' : 'warning';
+}
+
+/**
+ * What a run actually did, as one chip. Replaces showing queue status and acquire outcome
+ * side by side, which produced rows reading "Finished" next to "No releases found".
+ *
+ * `events` is optional because `GET /api/jobs` returns bare rows without them. Without
+ * events an ingest or subtitle run can only be described by its queue status, which is all
+ * the list needs: the row carries per-phase dots already, and the full sentence is one
+ * click away in the drawer. Do not push this computation into the server to avoid that.
+ */
+export function runOutcome(job: Job, events?: EventRow[]): { label: string; tone: Tone } {
+  if (job.status === 'failed') return { label: 'Failed', tone: 'danger' };
+  if (job.status === 'running') return { label: 'In progress', tone: 'info' };
+  if (job.status === 'pending') return { label: 'Waiting', tone: 'neutral' };
+
+  if (job.pipeline === 'acquire' && job.acquireOutcome) {
+    return { label: acquireOutcomeLabel(job.acquireOutcome), tone: acquireOutcomeTone(job.acquireOutcome) };
+  }
+
+  const spoken = events?.find((e) => e.kind === 'subtitle.complete' || e.kind === 'subtitle.unresolved');
+  if (spoken?.kind === 'subtitle.unresolved') return { label: 'No subtitle found', tone: 'warning' };
+  if (spoken?.kind === 'subtitle.complete') {
+    const placed = subtitlePlacedCount(spoken);
+    return placed > 0 ? { label: 'Subtitles added', tone: 'success' } : { label: 'Nothing missing', tone: 'success' };
+  }
+
+  return { label: 'Finished', tone: 'success' };
+}
+
+/** `subtitle.complete` carries `data.counts.placed`. Read defensively: `data` is a JSON
+ * column, so its shape is a convention rather than a guarantee. */
+function subtitlePlacedCount(event: EventRow): number {
+  const counts = event.data.counts;
+  if (typeof counts !== 'object' || counts === null) return 0;
+  const placed = (counts as Record<string, unknown>).placed;
+  return typeof placed === 'number' ? placed : 0;
 }
 
 /** Pack / multi / single as short sentence-case copy for release facts. */
