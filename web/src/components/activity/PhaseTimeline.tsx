@@ -1,0 +1,81 @@
+import { useState } from 'react';
+import { ChevronRight } from 'lucide-react';
+import type { Job } from '@/api';
+import { RunDetail } from '@/components/activity/RunDetail';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { jobDuration } from '@/lib/jobs';
+import { runOutcome } from '@/lib/labels';
+import { TONE_SOLID, TONE_TEXT } from '@/lib/tone';
+import { cn, formatRelativeTime } from '@/lib/utils';
+
+function RelativeTime({ ts }: { ts: number }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="text-xs text-muted-foreground">{formatRelativeTime(ts)}</span>} />
+      <TooltipContent>{new Date(ts).toLocaleString()}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Toggle set: comparing two runs means having both open at once, so never an accordion. */
+function useOpenSet(): [ReadonlySet<number>, (id: number) => void] {
+  const [open, setOpen] = useState<ReadonlySet<number>>(() => new Set());
+  return [
+    open,
+    (id: number) =>
+      setOpen((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }),
+  ];
+}
+
+/**
+ * One phase's runs as a vertical timeline, one node per run, no folding.
+ *
+ * An earlier draft collapsed consecutive same-outcome runs behind an `xN` chip, because
+ * this database held fifteen identical ingest runs for one season pack. Those predate
+ * `68270a7`, which debounces a webhook storm into a single run at the queue. Redundant
+ * runs are a queue bug, already fixed there; hiding them in the UI would only have made
+ * the next one harder to notice.
+ */
+export function PhaseTimeline({ runs }: { runs: Job[] }) {
+  const [open, toggle] = useOpenSet();
+  return (
+    <ol className="relative space-y-1 border-l pl-6">
+      {runs.map((job) => {
+        const { label, tone } = runOutcome(job);
+        const isOpen = open.has(job.id);
+        return (
+          <li key={job.id} className="relative">
+            <span className={cn('absolute top-3.5 -left-[1.7rem] size-2 rounded-full ring-4 ring-popover', TONE_SOLID[tone])} />
+            <Collapsible open={isOpen} onOpenChange={() => toggle(job.id)}>
+              <CollapsibleTrigger className="flex w-full items-center gap-2 py-2 text-left">
+                <ChevronRight
+                  className={cn(
+                    'size-3.5 shrink-0 text-muted-foreground transition-transform duration-240 ease-panel',
+                    isOpen && 'rotate-90',
+                  )}
+                />
+                <span className={cn('text-sm', tone === 'success' ? '' : TONE_TEXT[tone])}>{label}</span>
+                <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="font-mono tabular-nums">{jobDuration(job) ?? '—'}</span>
+                  <span>·</span>
+                  <RelativeTime ts={job.created_at} />
+                </span>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="overflow-hidden data-closed:animate-conceal data-open:animate-reveal">
+                {/* Mounted only while open so the detail fetch is still on demand; the
+                    panel measures its own height once the content lands. */}
+                {isOpen && <RunDetail jobId={job.id} />}
+              </CollapsibleContent>
+            </Collapsible>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
