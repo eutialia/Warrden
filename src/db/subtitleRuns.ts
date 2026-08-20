@@ -32,8 +32,8 @@ function parseRow(row: SubtitleRunRowRaw): SubtitleRunRow {
   return { ...row, transcript: JSON.parse(row.transcript) as TranscriptEntry[] };
 }
 
-/** Typed wrapper over `subtitle_runs` — the durable record of one site-search attempt's
- * step-by-step transcript, shown on the dashboard's job detail page. Transcript entries
+/** Typed wrapper over `subtitle_runs`. Durable record of one site-search attempt's
+ * step-by-step transcript, shown in the activity drawer's run detail. Transcript entries
  * append as JSON-array rewrites (runs are ≤ stepBudget entries, so this stays cheap). */
 export class SubtitleRuns {
   constructor(private readonly db: Database.Database) {}
