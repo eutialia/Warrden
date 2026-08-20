@@ -1,22 +1,13 @@
 import { useMemo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { Job } from '@/api';
+import { RelativeTime } from '@/components/activity/RelativeTime';
 import { ToneBadge } from '@/components/ToneBadge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { foldJobsByTarget, jobTitle, PHASES, phaseSummary, phaseTone, type TargetGroup } from '@/lib/jobs';
 import { pipelineLabel, runOutcome, targetKindLabel } from '@/lib/labels';
 import { TONE_SOLID } from '@/lib/tone';
-import { cn, formatRelativeTime } from '@/lib/utils';
-
-function RelativeTime({ ts }: { ts: number }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<span className="text-xs text-muted-foreground">{formatRelativeTime(ts)}</span>} />
-      <TooltipContent>{new Date(ts).toLocaleString()}</TooltipContent>
-    </Tooltip>
-  );
-}
+import { cn } from '@/lib/utils';
 
 function PhaseDots({ group }: { group: TargetGroup }) {
   return (

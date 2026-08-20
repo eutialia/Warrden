@@ -1,22 +1,13 @@
 import { useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { Job } from '@/api';
+import { RelativeTime } from '@/components/activity/RelativeTime';
 import { RunDetail } from '@/components/activity/RunDetail';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { jobDuration } from '@/lib/jobs';
 import { runOutcome } from '@/lib/labels';
 import { TONE_SOLID, TONE_TEXT } from '@/lib/tone';
-import { cn, formatRelativeTime } from '@/lib/utils';
-
-function RelativeTime({ ts }: { ts: number }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<span className="text-xs text-muted-foreground">{formatRelativeTime(ts)}</span>} />
-      <TooltipContent>{new Date(ts).toLocaleString()}</TooltipContent>
-    </Tooltip>
-  );
-}
+import { cn } from '@/lib/utils';
 
 /** Toggle set: comparing two runs means having both open at once, so never an accordion.
  * `initialId` is a deep link (`?run=`): start with that node open so RunDetail mounts

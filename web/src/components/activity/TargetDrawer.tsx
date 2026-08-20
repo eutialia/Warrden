@@ -4,7 +4,7 @@ import { apiErrorMessage, postAcquire, type Job } from '@/api';
 import { PhaseStepper } from '@/components/activity/PhaseStepper';
 import { PhaseTimeline } from '@/components/activity/PhaseTimeline';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { PHASES, jobTitle, type Phase, type TargetGroup } from '@/lib/jobs';
 import { pipelineLabel, targetKindLabel } from '@/lib/labels';
@@ -109,10 +109,10 @@ export function TargetDrawer({
         {group && (
           <div className="flex h-full flex-col gap-5 overflow-y-auto p-6">
             <div>
-              <h2 className="font-serif text-2xl">{jobTitle(group.latest)}</h2>
+              <SheetTitle className="font-serif text-2xl">{jobTitle(group.latest)}</SheetTitle>
               <p className="mt-1 text-sm text-muted-foreground">
-                {group.latest.arr_instance} · {targetKindLabel(group.latest.target_kind)} · {group.runs.length} runs ·
-                last {formatRelativeTime(group.lastTs)}
+                {group.latest.arr_instance} · {targetKindLabel(group.latest.target_kind)} · {group.runs.length}{' '}
+                run{group.runs.length === 1 ? '' : 's'} · last {formatRelativeTime(group.lastTs)}
               </p>
               <RepickAction group={group} />
             </div>
