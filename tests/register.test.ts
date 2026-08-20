@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { registerWebhooks, registerWebhooksInBackground } from '../src/arr/register.js';
+import { ArrApiError } from '../src/arr/client.js';
+import { classifyWebhook, registerWebhooks, registerWebhooksInBackground } from '../src/arr/register.js';
 import { makeCtx, configWithArrs, fakeArrClient, ctxWithClient } from './helpers.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { AttentionItems } from '../src/db/attention.js';
@@ -8,6 +9,42 @@ import type { ArrApi, NotificationSummary } from '../src/arr/types.js';
 function managedObjectRows(ctx: ReturnType<typeof makeCtx>) {
   return ctx.db.prepare(`SELECT arr_instance, kind, external_id, name FROM managed_objects`).all();
 }
+
+/** What a real arr actually echoes back, which is NOT what our body sends: the notification
+ * resource is per-app, so Sonarr returns `onSeriesAdd` and never `onMovieAdded`, and Radarr
+ * the reverse. A fixture carrying both flags is a shape no instance ever returns. */
+const healthyNotification = {
+  sonarr: { id: 7, name: 'Warrden', onSeriesAdd: true, onDownload: true, onUpgrade: true },
+  radarr: { id: 7, name: 'Warrden', onMovieAdded: true, onDownload: true, onUpgrade: true },
+} as const;
+
+describe('classifyWebhook', () => {
+  const url = 'http://localhost:9797/webhooks/sonarr';
+
+  it('reports missing when the Warrden notification is absent', () => {
+    expect(classifyWebhook(undefined, 'sonarr', url)).toBe('missing');
+  });
+
+  it('reports stale when the url field is absent, even if events are subscribed', () => {
+    expect(classifyWebhook({ ...healthyNotification.sonarr }, 'sonarr', url)).toBe('stale');
+  });
+
+  it('reports stale when the url points elsewhere', () => {
+    expect(
+      classifyWebhook(
+        { ...healthyNotification.sonarr, fields: [{ name: 'url', value: 'http://other:9797/webhooks/sonarr' }] },
+        'sonarr',
+        url,
+      ),
+    ).toBe('stale');
+  });
+
+  it('reports ok when url and events match', () => {
+    expect(
+      classifyWebhook({ ...healthyNotification.sonarr, fields: [{ name: 'url', value: url }] }, 'sonarr', url),
+    ).toBe('ok');
+  });
+});
 
 describe('registerWebhooks', () => {
   it('creates the notification and records it in managed_objects when none exists', async () => {
@@ -33,21 +70,11 @@ describe('registerWebhooks', () => {
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: 'sonarr', kind: 'notification', external_id: 1, name: 'Warrden' }]);
   });
 
-  /** What a real arr actually echoes back, which is NOT what our body sends: the notification
-   * resource is per-app, so Sonarr returns `onSeriesAdd` and never `onMovieAdded`, and Radarr
-   * the reverse. A fixture carrying both flags is a shape no instance ever returns. */
-  const healthyNotification = {
-    sonarr: { id: 7, name: 'Warrden', onSeriesAdd: true, onDownload: true, onUpgrade: true },
-    radarr: { id: 7, name: 'Warrden', onMovieAdded: true, onDownload: true, onUpgrade: true },
-  } as const;
-
-  it.each<{ kind: 'sonarr' | 'radarr'; scenario: string; fields: NotificationSummary['fields'] }>([
-    { kind: 'sonarr', scenario: 'the arr did not report a url field at all', fields: undefined },
-    { kind: 'sonarr', scenario: 'its url still points at us', fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }] },
-    { kind: 'radarr', scenario: 'the arr did not report a url field at all', fields: undefined },
-    { kind: 'radarr', scenario: 'its url still points at us', fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/radarr' }] },
+  it.each<{ kind: 'sonarr' | 'radarr'; fields: NotificationSummary['fields'] }>([
+    { kind: 'sonarr', fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }] },
+    { kind: 'radarr', fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/radarr' }] },
   ])(
-    'skips creation but still records a pre-existing $kind "Warrden" notification already subscribed to its own import events when $scenario',
+    'skips creation but still records a pre-existing $kind "Warrden" notification already subscribed when its url still points at us',
     async ({ kind, fields }) => {
       const client = fakeArrClient({ notifications: [{ ...healthyNotification[kind], fields }] });
       const ctx = ctxWithClient(kind, client, { config: configWithArrs(kind) });
@@ -61,6 +88,16 @@ describe('registerWebhooks', () => {
       expect(managedObjectRows(ctx)).toEqual([{ arr_instance: kind, kind: 'notification', external_id: 7, name: 'Warrden' }]);
     },
   );
+
+  it('updates a pre-existing "Warrden" notification that omitted the url field', async () => {
+    const client = fakeArrClient({ notifications: [{ ...healthyNotification.sonarr }] });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    await registerWebhooks(ctx);
+
+    expect(client.updateNotification).toHaveBeenCalledTimes(1);
+    expect(client.createNotification).not.toHaveBeenCalled();
+  });
 
   it.each([
     {
@@ -150,6 +187,56 @@ describe('registerWebhooks', () => {
     expect(managedObjectRows(ctx)).toEqual([{ arr_instance: kind, kind: 'notification', external_id: 7, name: 'Warrden' }]);
   });
 
+  it('force-updates a healthy "Warrden" notification even when url and events already match', async () => {
+    const client = fakeArrClient({
+      notifications: [{ ...healthyNotification.sonarr, fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }] }],
+    });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    await registerWebhooks(ctx, { force: true });
+
+    expect(client.updateNotification).toHaveBeenCalledTimes(1);
+    expect(client.createNotification).not.toHaveBeenCalled();
+    expect(ctx.events.list()).toContainEqual(
+      expect.objectContaining({ kind: 'webhook.registered', data: expect.objectContaining({ updated: true }) }),
+    );
+  });
+
+  it('force-updates a "Warrden" notification that omitted the url field', async () => {
+    const client = fakeArrClient({ notifications: [{ ...healthyNotification.sonarr }] });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    await registerWebhooks(ctx, { force: true });
+
+    expect(client.updateNotification).toHaveBeenCalledTimes(1);
+    expect(client.updateNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 7,
+        fields: [
+          { name: 'url', value: 'http://localhost:9797/webhooks/sonarr' },
+          { name: 'method', value: 1 },
+        ],
+      }),
+    );
+  });
+
+  it('closes the open register-failed attention row when a later pass succeeds', async () => {
+    const client = fakeArrClient();
+    client.createNotification = vi.fn().mockRejectedValueOnce(new Error('ECONNREFUSED')).mockImplementation(async (body: object) => {
+      const created = { id: 1, name: 'Warrden', ...(body as object) };
+      client.notifications.push(created as NotificationSummary);
+      return created as NotificationSummary;
+    });
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    await registerWebhooks(ctx);
+    expect(new AttentionItems(ctx.db).list({ status: 'open' })).toHaveLength(1);
+
+    await registerWebhooks(ctx);
+    expect(new AttentionItems(ctx.db).list({ status: 'open' })).toHaveLength(0);
+    expect(new AttentionItems(ctx.db).list({ status: 'resolved' })).toHaveLength(1);
+  });
+
   it('raises attention (and leaves the existing notification standing) when the in-place update fails', async () => {
     const client = fakeArrClient({ notifications: [{ id: 7, name: 'Warrden' }] });
     client.updateNotification = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
@@ -165,6 +252,29 @@ describe('registerWebhooks', () => {
     expect(attentionEvents[0]).toMatchObject({ kind: 'webhook.register-failed', data: { instance: 'sonarr', dedupeKey: 'sonarr' } });
     expect(attentionEvents[0]!.message).toContain('ECONNREFUSED');
     expect(new AttentionItems(ctx.db).list({ status: 'open' })).toHaveLength(1);
+  });
+
+  it("raises attention with the arr's short message and the webhook URL, not the stack", async () => {
+    const client = fakeArrClient({ notifications: [{ id: 3, name: 'Warrden' }] });
+    client.updateNotification = vi.fn().mockRejectedValue(
+      new ArrApiError(
+        'PUT',
+        '/notification/3',
+        500,
+        JSON.stringify({
+          message: 'Connection refused (localhost:9797)',
+          description: 'System.Net.Http.HttpRequestException: Connection refused\n at NzbDrone.Common.Http.Dispatchers.ManagedHttpDispatcher',
+        }),
+      ),
+    );
+    const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+
+    await registerWebhooks(ctx);
+
+    const message = ctx.events.list({ level: 'attention' })[0]!.message;
+    expect(message).toContain('Connection refused (localhost:9797)');
+    expect(message).toContain('http://localhost:9797/webhooks/sonarr');
+    expect(message).not.toContain('ManagedHttpDispatcher');
   });
 
   it('collapses a failure that repeats across passes into ONE open attention row per instance', async () => {

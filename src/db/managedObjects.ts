@@ -69,6 +69,13 @@ export class ManagedObjects {
     return row ? parseRow(row) : null;
   }
 
+  getByExternal(arrInstance: string, kind: ManagedObjectKind, externalId: number): ManagedObjectRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM managed_objects WHERE arr_instance = ? AND kind = ? AND external_id = ?`)
+      .get(arrInstance, kind, externalId) as ManagedObjectRowRaw | undefined;
+    return row ? parseRow(row) : null;
+  }
+
   list(opts?: { arrInstance?: string; kind?: ManagedObjectKind }): ManagedObjectRow[] {
     const clauses: string[] = [];
     const params: unknown[] = [];

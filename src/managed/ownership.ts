@@ -17,6 +17,14 @@ export function isWarrdenProfile(name: string): boolean {
   return name.startsWith(WARRDEN_PROFILE_PREFIX);
 }
 
+/** Group inside `warrden: [Trix]`, or undefined when the name isn't that shape. */
+export function groupFromWarrdenProfileName(name: string): string | undefined {
+  if (!isWarrdenProfile(name)) return undefined;
+  const rest = name.slice(WARRDEN_PROFILE_PREFIX.length);
+  if (rest.startsWith('[') && rest.endsWith(']') && rest.length >= 2) return rest.slice(1, -1);
+  return undefined;
+}
+
 /** Whether a tag's label is one Warrden itself would have created. */
 export function isWarrdenTag(label: string): boolean {
   return label.startsWith(WARRDEN_TAG_PREFIX);

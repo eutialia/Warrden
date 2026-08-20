@@ -12,7 +12,7 @@ export const WARRDEN_PROFILE_PREFIX = 'warrden: ';
 
 /** Lowercases and collapses every run of non-alphanumeric characters into a single
  * dash, trimming leading/trailing dashes — e.g. "SubsPlease" -> "subsplease". */
-function slugify(group: string): string {
+export function slugify(group: string): string {
   return group
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')

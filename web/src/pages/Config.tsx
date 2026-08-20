@@ -8,8 +8,10 @@ import {
   fetchArrHealth,
   fetchConfig,
   fetchStorageHealth,
+  registerArrWebhooks,
   saveConfig,
   type ArrCheck,
+  type WebhookRegisterResult,
   type ArrInstance,
   type ArrKind,
   type Config,
@@ -35,10 +37,20 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { useOverview } from '@/hooks/useOverview';
 import { arrStatusLabel, arrStatusTone, storageStatusLabel, storageStatusTone } from '@/lib/labels';
+import { isLoopbackPublicUrl, suggestPublicUrl } from '@/lib/publicUrl';
 import { TONE_TEXT } from '@/lib/tone';
 import { cn, formatUsage } from '@/lib/utils';
 
 const EMPTY_ARR: ArrInstance = { name: '', kind: 'sonarr', baseUrl: '', apiKey: '' };
+
+function applyRegisterResults(checks: ArrCheck[], results: WebhookRegisterResult[]): ArrCheck[] {
+  const byName = new Map(results.map((result) => [result.instance, result]));
+  return checks.map((check) => {
+    const result = byName.get(check.name);
+    if (!result) return check;
+    return { ...check, webhook: result.status === 'failed' ? 'failed' : 'ok' };
+  });
+}
 
 /** Mirrors server `standardMounts` — web has no shared package with the backend. */
 const STANDARD_MOUNT_ROWS = [
@@ -109,6 +121,7 @@ export default function ConfigPage() {
   // of data, not a verdict, so the rows stay quiet rather than accusing every instance of
   // being down.
   const [arrChecks, setArrChecks] = useState<ArrCheck[] | null>(null);
+  const [rechecking, setRechecking] = useState(false);
   const { theme, setTheme } = useTheme();
   const { refetch: refetchOverview, setDebugEnabled } = useOverview();
 
@@ -116,6 +129,26 @@ export default function ConfigPage() {
     fetchArrHealth()
       .then((res) => setArrChecks(res.checks))
       .catch(() => setArrChecks(null));
+  }, []);
+
+  const recheckArrs = useCallback(() => {
+    setRechecking(true);
+    void (async () => {
+      try {
+        const [health, registered] = await Promise.allSettled([fetchArrHealth(), registerArrWebhooks()]);
+        if (health.status !== 'fulfilled') {
+          setArrChecks(null);
+          return;
+        }
+        if (registered.status !== 'fulfilled') {
+          setArrChecks(health.value.checks);
+          return;
+        }
+        setArrChecks(applyRegisterResults(health.value.checks, registered.value.results));
+      } finally {
+        setRechecking(false);
+      }
+    })();
   }, []);
 
   const loadStorage = useCallback(() => {
@@ -171,6 +204,15 @@ export default function ConfigPage() {
     if (!draft || !baseline || !numeric || !baseNumeric) return false;
     return JSON.stringify(draft) !== JSON.stringify(baseline) || JSON.stringify(numeric) !== JSON.stringify(baseNumeric);
   }, [draft, baseline, numeric, baseNumeric]);
+
+  const originSuggestion = useMemo(() => {
+    if (!draft) return null;
+    return suggestPublicUrl({
+      publicUrl: draft.server.publicUrl,
+      origin: window.location.origin,
+      listenPort: draft.server.port,
+    });
+  }, [draft]);
 
   function patch(next: Partial<Config>): void {
     setDraft((prev) => (prev ? { ...prev, ...next } : prev));
@@ -351,9 +393,27 @@ export default function ConfigPage() {
                 placeholder="http://warrden.example:9797"
               />
               <p className="text-xs text-muted-foreground">
-                Must be reachable from Sonarr/Radarr. Changing it later means deleting the “Warrden” webhook in the arr
-                so it can re-register.
+                The address Sonarr and Radarr POST webhooks to. Same host: this machine's loopback. Docker Compose: the
+                service name. Another computer: a LAN address they can open. Reverse proxy: the https name, and do not
+                put auth on /webhooks.
               </p>
+              {isLoopbackPublicUrl(draft.server.publicUrl) && (
+                <p className="text-xs text-warning-foreground">
+                  localhost is the arr's own machine, not this one. Wrong unless Sonarr/Radarr run on the same host.
+                </p>
+              )}
+              {originSuggestion && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs text-muted-foreground">You opened this page at {originSuggestion}.</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => patch({ server: { ...draft.server, publicUrl: originSuggestion } })}
+                  >
+                    Use this address
+                  </Button>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3">
@@ -362,8 +422,8 @@ export default function ConfigPage() {
                 // typed, or renamed since the last save, matches nothing; with no probe
                 // answered at all there is nothing to say about any of them.
                 const check = arrChecks?.find((c) => c.name === arr.name.trim());
-                const tone = check ? arrStatusTone(check.status) : 'neutral';
-                const status = check ? arrStatusLabel(check.status) : arrChecks ? 'Not saved yet' : '';
+                const tone = check ? arrStatusTone(check) : 'neutral';
+                const status = check ? arrStatusLabel(check) : arrChecks ? 'Not saved yet' : '';
                 return (
                   <div key={i} className="space-y-2 border-t pt-3">
                     <div className="flex items-center gap-2">
@@ -439,7 +499,7 @@ export default function ConfigPage() {
                   <Plus />
                   Add instance
                 </Button>
-                <Button variant="outline" size="sm" onClick={loadArrHealth}>
+                <Button variant="outline" size="sm" onClick={recheckArrs} disabled={rechecking}>
                   Re-check now
                 </Button>
               </div>

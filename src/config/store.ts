@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { z } from 'zod';
+import { defaultPublicUrl } from '../arr/publicUrl.js';
 import { errorMessage } from '../util/errors.js';
 import { BootConfigSchema, ConfigSchema, type Config } from './schema.js';
 
@@ -39,6 +40,7 @@ export function loadConfig(dataDir: string): Config {
   const path = configPath(dataDir);
   if (!existsSync(path)) {
     const defaults = parseConfig({});
+    defaults.server.publicUrl = defaultPublicUrl(defaults.server.port);
     saveConfig(dataDir, defaults);
     return defaults;
   }

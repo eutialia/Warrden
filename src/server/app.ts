@@ -17,7 +17,8 @@ import {
   saveKnowledge,
   type SiteKnowledge,
 } from '../agent/siteKnowledge.js';
-import { registerWebhooksInBackground } from '../arr/register.js';
+import { probeWebhook, registerWebhooksInBackground, registerWebhooksNow } from '../arr/register.js';
+import { syncManagedObjects } from '../managed/sync.js';
 import { ArrApiError } from '../arr/client.js';
 import type { ArrApi, ManualImportFile } from '../arr/types.js';
 import { handleWebhook } from '../arr/webhooks.js';
@@ -1007,17 +1008,32 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         const clients = requireClients(ctx);
         // Concurrent, not sequential: this is one operator-facing page load, and four
         // dead instances at 4s each would otherwise take 16s to answer.
+        const config = requireConfig(ctx);
         const checks = await Promise.all(
-          requireConfig(ctx).arrs.map(async (arr) => {
+          config.arrs.map(async (arr) => {
             const client = clients.get(arr.name);
             // `applyConfig` builds `clients` straight from `config.arrs`, so a configured
             // instance without one is a desync bug: reporting it as 'unreachable' would
             // dress that up as an arr problem the operator can't fix.
             if (!client) throw new Error(`no arr client for configured instance "${arr.name}"`);
-            return { name: arr.name, kind: arr.kind, baseUrl: arr.baseUrl, status: await client.ping() };
+            const url = `${config.server.publicUrl}/webhooks/${arr.name}`;
+            const status = await client.ping();
+            // Skip the notification list when ping already failed: listNotifications uses
+            // the 30s pipeline timeout and would stall Settings on a down arr.
+            const webhook = status === 'ok' ? await probeWebhook(client, arr.kind, url) : 'unknown';
+            return { name: arr.name, kind: arr.kind, baseUrl: arr.baseUrl, status, webhook };
           }),
         );
         return c.json({ checks });
+      });
+
+      app.post('/api/webhooks/register', async (c) => {
+        const { db, events } = ctx;
+        if (!db || !events) throw new Error('webhook register route mounted without db/events');
+        const config = requireConfig(ctx);
+        const clients = requireClients(ctx);
+        const results = await registerWebhooksNow({ db, events, clients, config }, { force: true });
+        return c.json({ results });
       });
     }
 
@@ -1055,6 +1071,9 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // left alone by `registerWebhooks` itself. Background, so an unreachable arr can't
         // stall the operator's own save.
         registerWebhooksInBackground({ db, events, clients, config: result.data });
+      }
+      if (arrsChanged && db && events && clients) {
+        void syncManagedObjects({ db, events, clients, config: result.data });
       }
       return c.json({ saved: true });
     });

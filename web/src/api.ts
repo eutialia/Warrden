@@ -488,21 +488,42 @@ export function fetchStorageHealth(): Promise<{ checks: StorageCheck[] }> {
   return fetchJson('/api/health/storage');
 }
 
-/** One configured arr instance's reachability, as `client.ping()` reports it. Mirrors
- * `ArrPingStatus` in `src/arr/types.ts`. */
+/** One configured arr instance's reachability plus the live Warrden webhook. `status` is
+ * `client.ping()`. `webhook` is the notification inspect (`GET`) or the last force-register
+ * outcome (`failed` is client-applied after Re-check). */
+export type ArrWebhookStatus = 'ok' | 'missing' | 'stale' | 'unknown' | 'failed';
+
 export interface ArrCheck {
   name: string;
   kind: ArrKind;
   baseUrl: string;
   status: 'ok' | 'unauthorized' | 'unreachable';
+  webhook: ArrWebhookStatus;
+}
+
+export interface WebhookRegisterResult {
+  instance: string;
+  status: 'created' | 'updated' | 'skipped' | 'failed';
+  url: string;
+  error?: string;
 }
 
 /** `GET /api/health/arrs`: one live probe per configured instance, run concurrently
  * server-side. The route is always mounted: with no instances configured it answers
  * `{ checks: [] }` rather than 404ing, so a rejection here means the request itself
- * failed (network, or the server erroring), never "nothing to probe". */
+ * failed (network, or the server erroring), never "nothing to probe". Does not PUT the
+ * webhook. */
 export function fetchArrHealth(): Promise<{ checks: ArrCheck[] }> {
   return fetchJson('/api/health/arrs');
+}
+
+/** Force-PUT (or create) the Warrden webhook on every configured arr. */
+export function registerArrWebhooks(): Promise<{ results: WebhookRegisterResult[] }> {
+  return fetchJson('/api/webhooks/register', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
 }
 
 /** Everything the home screen needs in one request. Mirrors `OverviewCounts` in

@@ -1,7 +1,9 @@
 import type { AppContext } from '../context.js';
+import { AttentionItems } from '../db/attention.js';
 import { ManagedObjects } from '../db/managedObjects.js';
-import type { NotificationSummary } from './types.js';
+import type { ArrApi, NotificationSummary } from './types.js';
 import { errorMessage } from '../util/errors.js';
+import { webhookFailureDetail } from './webhookError.js';
 
 const NOTIFICATION_NAME = 'Warrden';
 
@@ -11,12 +13,46 @@ const NOTIFICATION_NAME = 'Warrden';
 type RegisterCtx = Pick<AppContext, 'db' | 'config' | 'clients' | 'events'>;
 
 /** The address an existing notification is currently POSTing to, or `undefined` when the arr
- * didn't return the field at all. Absent is deliberately not "wrong": a real Sonarr/Radarr
- * always includes its implementation's settings, so treating a missing `url` as stale would
- * only ever churn a webhook we can't actually prove anything about. */
+ * didn't return the field at all. Absent is stale: we cannot prove the hook points at us. */
 function notificationUrl(notification: NotificationSummary): string | undefined {
   const field = notification.fields?.find((f) => f.name === 'url');
   return typeof field?.value === 'string' ? field.value : undefined;
+}
+
+export type ArrWebhookStatus = 'ok' | 'missing' | 'stale' | 'unknown';
+
+/** Live arr notification vs the URL we currently serve. Missing `url` is stale: we cannot
+ * prove the hook points at us. */
+export function classifyWebhook(
+  found: NotificationSummary | undefined,
+  kind: 'sonarr' | 'radarr',
+  url: string,
+): Exclude<ArrWebhookStatus, 'unknown'> {
+  if (!found) return 'missing';
+  const registeredUrl = notificationUrl(found);
+  const addEvent = kind === 'sonarr' ? found.onSeriesAdd : found.onMovieAdded;
+  const subscribedToAll = addEvent === true && found.onDownload === true && found.onUpgrade === true;
+  if (!subscribedToAll || registeredUrl !== url) return 'stale';
+  return 'ok';
+}
+
+export async function probeWebhook(client: ArrApi, kind: 'sonarr' | 'radarr', url: string): Promise<ArrWebhookStatus> {
+  try {
+    const existing = await client.listNotifications();
+    const found = existing.find((n) => n.name === NOTIFICATION_NAME);
+    return classifyWebhook(found, kind, url);
+  } catch {
+    return 'unknown';
+  }
+}
+
+export type WebhookRegisterStatus = 'created' | 'updated' | 'skipped' | 'failed';
+
+export interface WebhookRegisterResult {
+  instance: string;
+  status: WebhookRegisterStatus;
+  url: string;
+  error?: string;
 }
 
 /**
@@ -24,11 +60,16 @@ function notificationUrl(notification: NotificationSummary): string | undefined 
  * doesn't already have a correct one: create when absent, PUT in place when present but
  * wrong. Idempotent (checks by name first) and fault-tolerant: an instance that errors
  * raises its own attention item and is skipped, it never stops the rest from registering.
+ * `force` PUTs even a healthy match, so Re-check can steal the hook for this process.
  */
-export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
+export async function registerWebhooks(ctx: RegisterCtx, opts?: { force?: boolean }): Promise<WebhookRegisterResult[]> {
   const managedObjects = new ManagedObjects(ctx.db);
+  const attention = new AttentionItems(ctx.db);
+  const force = opts?.force === true;
+  const results: WebhookRegisterResult[] = [];
 
   for (const arr of ctx.config.arrs) {
+    const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
     const client = ctx.clients.get(arr.name);
     if (!client) {
       ctx.events.append({
@@ -37,10 +78,9 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
         message: `Failed to register webhook on "${arr.name}": no ArrClient configured`,
         data: { instance: arr.name },
       });
+      results.push({ instance: arr.name, status: 'failed', url, error: 'no ArrClient configured' });
       continue;
     }
-
-    const url = `${ctx.config.server.publicUrl}/webhooks/${arr.name}`;
 
     try {
       const body = {
@@ -61,10 +101,6 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
       const found = existing.find((n) => n.name === NOTIFICATION_NAME);
       if (found) {
         const registeredUrl = notificationUrl(found);
-        // A rename of this instance, or a `server.publicUrl` change, moves the path we
-        // actually serve: the arr keeps POSTing to the old one and every event it sends is
-        // dropped on the floor, silently and for as long as nobody notices.
-        const pointsElsewhere = registeredUrl !== undefined && registeredUrl !== url;
         // Every flag that this app actually has, not every flag `body` sends: a hook
         // subscribed to Download alone still delivers nothing on the add event, so treating it
         // as healthy left it standing forever and no arr-side add ever reached Warrden. The
@@ -73,11 +109,15 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
         // permanently false and re-PUT an already-correct webhook on every single pass.
         const addEvent = arr.kind === 'sonarr' ? found.onSeriesAdd : found.onMovieAdded;
         const subscribedToAll = addEvent === true && found.onDownload === true && found.onUpgrade === true;
-        if (subscribedToAll && !pointsElsewhere) {
+        // Missing `url` is stale, same as a url that points elsewhere: we cannot prove the
+        // arr is POSTing at us, so a skip would leave Settings showing Webhook failed forever.
+        if (!force && subscribedToAll && registeredUrl === url) {
           // Already present in the arr and subscribed to everything we need, but the
           // local registry may have been reset (fresh db, restore) — re-record it so
           // GC (reconcile.ts's gc()) can still find it.
           managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: found.id, name: NOTIFICATION_NAME });
+          resolveRegisterFailure(attention, arr.name);
+          results.push({ instance: arr.name, status: 'skipped', url });
           continue;
         }
         // Missing import events (a Phase 1 registration), or pointing at an address that
@@ -87,45 +127,63 @@ export async function registerWebhooks(ctx: RegisterCtx): Promise<void> {
         // whereas a failed PUT leaves the old, wrong-but-present notification standing.
         const updated = await client.updateNotification({ ...body, id: found.id });
         managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: updated.id, name: NOTIFICATION_NAME });
+        resolveRegisterFailure(attention, arr.name);
         ctx.events.append({
           kind: 'webhook.registered',
           message: `Updated the "${NOTIFICATION_NAME}" webhook on "${arr.name}" in place`,
           data: { instance: arr.name, url, updated: true },
         });
+        results.push({ instance: arr.name, status: 'updated', url });
         continue;
       }
 
       const created = await client.createNotification(body);
       managedObjects.insert({ arrInstance: arr.name, kind: 'notification', externalId: created.id, name: NOTIFICATION_NAME });
+      resolveRegisterFailure(attention, arr.name);
 
       ctx.events.append({
         kind: 'webhook.registered',
         message: `Registered "${NOTIFICATION_NAME}" webhook on "${arr.name}"`,
         data: { instance: arr.name, url },
       });
+      results.push({ instance: arr.name, status: 'created', url });
     } catch (err) {
       // Attention, not warn: every path that lands here ends with the instance having no
       // webhook we can vouch for, and the symptom (nothing ever arrives from this arr) is
       // invisible until someone goes looking. `targetKind`/`targetId` are what
       // `AttentionItems.open` actually dedupes on, so a failure that repeats every startup
       // refreshes one open row per instance instead of piling up a new one per pass.
+      const error = webhookFailureDetail(err, url);
       ctx.events.append({
         kind: 'webhook.register-failed',
         level: 'attention',
-        message: `Failed to register the Warrden webhook on "${arr.name}" - the instance may not be delivering events: ${errorMessage(err)}`,
+        message: `Failed to register the Warrden webhook on "${arr.name}": ${error}`,
         data: { instance: arr.name, targetKind: 'notification', targetId: NOTIFICATION_NAME, dedupeKey: arr.name },
       });
+      results.push({ instance: arr.name, status: 'failed', url, error });
     }
   }
+  return results;
 }
 
-// One pass at a time, and at most one pass waiting behind it. Two rapid saves would
-// otherwise interleave their list-then-create against the same arr and register the webhook
-// twice, since neither sees the other's create in its own `listNotifications`. The wait
-// collapses to the latest ctx on purpose: an older config is exactly what the newer one
-// supersedes, so running both in turn would only re-point the webhook backwards first.
+function resolveRegisterFailure(attention: AttentionItems, instance: string): void {
+  attention.resolveForTarget({
+    kinds: ['webhook.register-failed'],
+    instance,
+    targetKind: 'notification',
+    targetId: NOTIFICATION_NAME,
+    dedupeKey: instance,
+  });
+}
+
+// One pass at a time so two callers cannot interleave list-then-create into a duplicate
+// webhook. Every enqueued pass still runs, including a force Re-check behind a save.
 let draining = false;
-let queued: RegisterCtx | null = null;
+const registerJobs: Array<{
+  ctx: RegisterCtx;
+  force: boolean;
+  resolve: (results: WebhookRegisterResult[]) => void;
+}> = [];
 
 /** Fires `registerWebhooks` in the background rather than blocking its caller on it: a
  * slow or unreachable arr instance would otherwise delay the HTTP server coming up at
@@ -133,10 +191,22 @@ let queued: RegisterCtx | null = null;
  * other arr's registration behind it. Passes are serialized (see above); the caller gets
  * no handle either way, so a queued pass is indistinguishable from an immediate one. */
 export function registerWebhooksInBackground(ctx: RegisterCtx): void {
-  queued = ctx;
-  if (draining) return;
-  draining = true;
-  void drainQueue();
+  void enqueueRegister(ctx, false);
+}
+
+/** Same queue as the background path, but the caller waits. Used by Re-check so the
+ * response carries this pass's per-instance results instead of racing a fire-and-forget. */
+export function registerWebhooksNow(ctx: RegisterCtx, opts?: { force?: boolean }): Promise<WebhookRegisterResult[]> {
+  return enqueueRegister(ctx, opts?.force === true);
+}
+
+function enqueueRegister(ctx: RegisterCtx, force: boolean): Promise<WebhookRegisterResult[]> {
+  return new Promise((resolve) => {
+    registerJobs.push({ ctx, force, resolve });
+    if (draining) return;
+    draining = true;
+    void drainQueue();
+  });
 }
 
 /** `registerWebhooks` already isolates per-instance failures internally; the `catch` here is
@@ -145,17 +215,18 @@ export function registerWebhooksInBackground(ctx: RegisterCtx): void {
  * failure) and never allowed to stall the queue behind it. */
 async function drainQueue(): Promise<void> {
   try {
-    while (queued) {
-      const ctx = queued;
-      queued = null;
+    while (registerJobs.length > 0) {
+      const job = registerJobs.shift();
+      if (!job) break;
       try {
-        await registerWebhooks(ctx);
+        job.resolve(await registerWebhooks(job.ctx, { force: job.force }));
       } catch (err) {
-        ctx.events.append({
+        job.ctx.events.append({
           kind: 'webhook.register-crashed',
           level: 'warn',
           message: `Webhook registration threw unexpectedly: ${errorMessage(err)}`,
         });
+        job.resolve([]);
       }
     }
   } finally {

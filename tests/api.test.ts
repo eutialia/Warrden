@@ -2,6 +2,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { ArrClient } from '../src/arr/client.js';
 import * as register from '../src/arr/register.js';
+import * as managedSync from '../src/managed/sync.js';
 import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { ConfigSchema } from '../src/config/schema.js';
@@ -227,6 +228,7 @@ describe('dashboard api', () => {
     let registerSpy: ReturnType<typeof stubRegistration>;
     beforeEach(() => {
       registerSpy = stubRegistration();
+      vi.spyOn(managedSync, 'syncManagedObjects').mockResolvedValue(undefined);
     });
 
     it('serves llm keys and arr apiKeys verbatim on GET, and a round-tripped PUT saves them back unchanged', async () => {
@@ -535,8 +537,8 @@ describe('dashboard api', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         checks: [
-          { name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:0', status: 'unauthorized' },
-          { name: 'radarr', kind: 'radarr', baseUrl: 'http://radarr:0', status: 'unreachable' },
+          { name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:0', status: 'unauthorized', webhook: 'unknown' },
+          { name: 'radarr', kind: 'radarr', baseUrl: 'http://radarr:0', status: 'unreachable', webhook: 'unknown' },
         ],
       });
       expect(sonarr.ping).toHaveBeenCalledTimes(1);
@@ -547,6 +549,82 @@ describe('dashboard api', () => {
       const res = await createApp(makeCtx()).request('/api/health/arrs');
 
       expect(await res.json()).toEqual({ checks: [] });
+    });
+
+    it('reports webhook ok when the live Warrden notification already points at us', async () => {
+      const sonarr = fakeArrClient({
+        notifications: [
+          {
+            id: 7,
+            name: 'Warrden',
+            onSeriesAdd: true,
+            onDownload: true,
+            onUpgrade: true,
+            fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }],
+          },
+        ],
+      });
+      const ctx = makeCtx({
+        config: configWithArrs('sonarr'),
+        clients: new Map([['sonarr', sonarr]]),
+      });
+
+      const res = await createApp(ctx).request('/api/health/arrs');
+
+      expect(await res.json()).toEqual({
+        checks: [{ name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:0', status: 'ok', webhook: 'ok' }],
+      });
+    });
+  });
+
+  describe('POST /api/webhooks/register', () => {
+    it('force-updates an already-healthy Warrden notification and returns updated', async () => {
+      const sonarr = fakeArrClient({
+        notifications: [
+          {
+            id: 7,
+            name: 'Warrden',
+            onSeriesAdd: true,
+            onDownload: true,
+            onUpgrade: true,
+            fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }],
+          },
+        ],
+      });
+      const ctx = ctxWithClient('sonarr', sonarr, { config: configWithArrs('sonarr') });
+
+      const res = await createApp(ctx).request('/api/webhooks/register', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        results: [{ instance: 'sonarr', status: 'updated', url: 'http://localhost:9797/webhooks/sonarr' }],
+      });
+      expect(sonarr.updateNotification).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not run on GET /api/health/arrs', async () => {
+      const sonarr = fakeArrClient({
+        notifications: [
+          {
+            id: 7,
+            name: 'Warrden',
+            onSeriesAdd: true,
+            onDownload: true,
+            onUpgrade: true,
+            fields: [{ name: 'url', value: 'http://localhost:9797/webhooks/sonarr' }],
+          },
+        ],
+      });
+      const ctx = ctxWithClient('sonarr', sonarr, { config: configWithArrs('sonarr') });
+
+      await createApp(ctx).request('/api/health/arrs');
+
+      expect(sonarr.updateNotification).not.toHaveBeenCalled();
+      expect(sonarr.createNotification).not.toHaveBeenCalled();
     });
   });
 

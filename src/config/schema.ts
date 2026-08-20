@@ -51,7 +51,7 @@ export const ConfigSchema = z
     server: z
       .object({
         port: z.number().int().min(1).max(65535).default(9797),
-        publicUrl: z.url().default('http://localhost:9797'), // used for webhook registration
+        publicUrl: z.url().default('http://localhost:9797'), // webhook address advertised to the arrs; first boot overwrites via defaultPublicUrl
       })
       .prefault({}),
     arrs: z.array(ArrInstanceSchema).default(() => []),

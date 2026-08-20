@@ -232,19 +232,28 @@ export function storageStatusTone(status: StorageCheckStatus): Tone {
   }
 }
 
-export function arrStatusLabel(status: ArrCheck['status']): string {
-  switch (status) {
-    case 'ok':
-      return 'Connected';
+export function arrCheckReady(check: ArrCheck): boolean {
+  return check.status === 'ok' && check.webhook === 'ok';
+}
+
+export function arrStatusLabel(check: ArrCheck): string {
+  switch (check.status) {
     case 'unauthorized':
       return 'Unauthorized';
-    default:
+    case 'unreachable':
       return 'Unreachable';
+    default:
+      if (check.webhook === 'ok') return 'Connected';
+      if (check.webhook === 'unknown') return 'Webhook unknown';
+      return 'Webhook failed';
   }
 }
 
-export function arrStatusTone(status: ArrCheck['status']): Tone {
-  return status === 'ok' ? 'success' : 'danger';
+export function arrStatusTone(check: ArrCheck): Tone {
+  if (check.status !== 'ok') return 'danger';
+  if (check.webhook === 'ok') return 'success';
+  if (check.webhook === 'unknown') return 'warning';
+  return 'danger';
 }
 
 /** Attention kind → short category chip (message body already holds the full story). */

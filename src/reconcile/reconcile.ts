@@ -6,6 +6,7 @@ import { SyncState } from '../db/syncState.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { traceTrigger } from '../trace/tracer.js';
 import { foreignProfilesCarryingTag, isWarrdenProfile, isWarrdenTag } from '../managed/ownership.js';
+import { syncManagedObjects } from '../managed/sync.js';
 import { errorMessage } from '../util/errors.js';
 
 const RECONCILE_SOURCE = 'reconcile';
@@ -69,6 +70,19 @@ export async function reconcile(ctx: AppContext): Promise<void> {
       kind: 'reconcile.gc-failed-global',
       level: 'warn',
       message: `GC pass crashed outright, before/beyond its own per-instance handling: ${errorMessage(err)}`,
+    });
+  }
+
+  // After GC so this pass cannot recreate a pin GC just removed. Adopt live leftovers
+  // and recreate registry rows the arr lost (a series still carrying the tag, profile
+  // deleted by hand) — Warrden owns the inventory, the arr must match it.
+  try {
+    await syncManagedObjects(ctx);
+  } catch (err) {
+    ctx.events.append({
+      kind: 'managed.sync-failed',
+      level: 'warn',
+      message: `Managed-object sync after reconcile crashed: ${errorMessage(err)}`,
     });
   }
 }

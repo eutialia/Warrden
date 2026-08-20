@@ -9,6 +9,7 @@ describe('config store', () => {
   it('creates defaults on first load', () => {
     const cfg = loadConfig(tmp());
     expect(cfg.server.port).toBe(9797);
+    expect(cfg.server.publicUrl).toMatch(/^https?:\/\/.+:9797$/);
     expect(cfg.arrs).toEqual([]);
     expect(cfg.llm.model).toBeUndefined();
     expect(cfg.reconcileIntervalMinutes).toBe(15);
