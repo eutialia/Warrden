@@ -130,6 +130,13 @@ export class EventLog {
     return rows.map(parseRow);
   }
 
+  /** One job's events, oldest first, so a run can narrate itself in the order it happened.
+   * `list()` is newest-first because it feeds a live feed; a single run reads as a story. */
+  listByJob(jobId: number): EventRow[] {
+    const rows = this.db.prepare('SELECT * FROM events WHERE job_id = ? ORDER BY id ASC').all(jobId) as EventRowRaw[];
+    return rows.map(parseRow);
+  }
+
   subscribe(fn: (e: EventRow) => void): () => void {
     this.subscribers.add(fn);
     return () => {

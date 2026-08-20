@@ -198,6 +198,25 @@ describe('dashboard api', () => {
         job_id: jobId,
       });
     });
+
+    it("returns the job's own events with the detail", async () => {
+      const ctx = makeCtx();
+      const { id } = ctx.queue.enqueue({ pipeline: 'subtitle', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });
+      ctx.events.append({
+        kind: 'subtitle.complete',
+        jobId: id!,
+        message: 'Nothing missing, every video already has subtitles for zh-Hans',
+        data: { counts: { missing: 0, placed: 0 } },
+      });
+      // Proves the query is scoped: a job-less event must not leak into any job's detail.
+      ctx.events.append({ kind: 'unrelated.thing', message: 'no job attached' });
+      const app = createApp(ctx);
+
+      const detail: any = await (await app.request(`/api/jobs/${id}`)).json();
+
+      expect(detail.events).toHaveLength(1);
+      expect(detail.events[0]).toMatchObject({ kind: 'subtitle.complete', job_id: id });
+    });
   });
 
   describe('GET/PUT /api/config', () => {

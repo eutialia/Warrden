@@ -412,6 +412,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         relatedJobs,
         attention: jobAttention.listByJob(job.id),
         placedFiles: placedFiles.listByJob(job.id),
+        // What the run said about itself. An ingest or subtitle run that placed no files
+        // has no other record of why it did nothing.
+        // This handler is mounted on queue+db, not the events block, so `events` is not in
+        // scope here; `ctx.events` is optional on Partial<AppContext>.
+        events: ctx.events?.listByJob(job.id) ?? [],
         // This job's own subtitle site-search runs, transcript included — the dashboard's
         // JobDetail "Subtitle runs" card renders these as a chronological step list.
         subtitleRuns: new SubtitleRuns(db).listByJob(job.id),

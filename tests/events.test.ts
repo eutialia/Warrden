@@ -178,3 +178,32 @@ describe('EventLog.broadcast', () => {
     expect(seen).toEqual([1]);
   });
 });
+
+describe('EventLog.listByJob', () => {
+  it("returns only that job's events, oldest first", () => {
+    const events = new EventLog(freshDb());
+    events.append({ kind: 'a.one', jobId: 1, message: 'first' });
+    events.append({ kind: 'b.other', jobId: 2, message: 'other job' });
+    events.append({ kind: 'a.two', jobId: 1, message: 'second' });
+
+    const rows = events.listByJob(1);
+
+    expect(rows.map((r) => r.message)).toEqual(['first', 'second']);
+  });
+
+  it('returns an empty array for a job that logged nothing', () => {
+    expect(new EventLog(freshDb()).listByJob(99)).toEqual([]);
+  });
+
+  it('never returns rows with no job attached', () => {
+    const events = new EventLog(freshDb());
+    events.append({ kind: 'global.thing', message: 'no job' });
+    expect(events.listByJob(1)).toEqual([]);
+  });
+
+  it('parses the data column, matching list()', () => {
+    const events = new EventLog(freshDb());
+    events.append({ kind: 'a.one', jobId: 1, message: 'm', data: { counts: { missing: 0 } } });
+    expect(events.listByJob(1)[0]!.data).toEqual({ counts: { missing: 0 } });
+  });
+});

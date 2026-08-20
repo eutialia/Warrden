@@ -88,6 +88,17 @@ export interface PlacedFile {
   created_at: number;
 }
 
+/** One `events` row. Hand-copied from `EventRow` in `src/events/log.ts`. */
+export interface EventRow {
+  id: number;
+  ts: number;
+  kind: string;
+  level: 'info' | 'warn' | 'attention';
+  job_id: number | null;
+  message: string;
+  data: Record<string, unknown>;
+}
+
 export interface JobDetailResponse {
   job: Job;
   acquireRecords: AcquireRecordDetail[];
@@ -96,6 +107,9 @@ export interface JobDetailResponse {
   /** Open attention items for this job only (same shape as AttentionItem). */
   attention: AttentionItem[];
   placedFiles: PlacedFile[];
+  /** This run's own events, oldest first. The only record of what a run that placed
+   * nothing actually did. */
+  events: EventRow[];
   // Per-site agent-run records for a subtitle job, empty for non-subtitle pipelines.
   // Fetched alongside the rest of the job detail; `subtitle.transcript` SSE events
   // trigger a wholesale refetch via `useSseRefetch` (see JobDetail.tsx), so the array
