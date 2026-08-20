@@ -206,4 +206,14 @@ describe('EventLog.listByJob', () => {
     events.append({ kind: 'a.one', jobId: 1, message: 'm', data: { counts: { missing: 0 } } });
     expect(events.listByJob(1)[0]!.data).toEqual({ counts: { missing: 0 } });
   });
+
+  it('caps at 100 by default, oldest first, and honours a smaller limit', () => {
+    const events = new EventLog(freshDb());
+    for (let i = 0; i < 101; i++) {
+      events.append({ kind: 'job.tick', jobId: 1, message: String(i) });
+    }
+
+    expect(events.listByJob(1).map((r) => r.message)).toEqual(Array.from({ length: 100 }, (_, i) => String(i)));
+    expect(events.listByJob(1, { limit: 2 }).map((r) => r.message)).toEqual(['0', '1']);
+  });
 });

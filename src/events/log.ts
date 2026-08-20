@@ -3,6 +3,10 @@ import { AttentionItems } from '../db/attention.js';
 
 type EventLevel = 'info' | 'warn' | 'attention';
 
+// Same ceiling GET /api/events uses as its default. Generous for one job: retries cap
+// at 3 and a webhook storm is one job, so hitting this means something else is wrong.
+const DEFAULT_LIST_BY_JOB_LIMIT = 100;
+
 interface AppendInput {
   kind: string;
   level?: EventLevel;
@@ -130,10 +134,19 @@ export class EventLog {
     return rows.map(parseRow);
   }
 
-  /** One job's events, oldest first, so a run can narrate itself in the order it happened.
-   * `list()` is newest-first because it feeds a live feed; a single run reads as a story. */
-  listByJob(jobId: number): EventRow[] {
-    const rows = this.db.prepare('SELECT * FROM events WHERE job_id = ? ORDER BY id ASC').all(jobId) as EventRowRaw[];
+  /**
+   * One job's events, oldest first, so a run can narrate itself in the order it happened.
+   * `list()` is newest-first because it feeds a live feed; a single run reads as a story.
+   *
+   * Always bounded: an uncapped SELECT is the same class of hole GET /api/events used
+   * to have. Payloads stay small in practice (retries cap at 3, webhook storms collapse
+   * to one job), so the default is defence in depth.
+   */
+  listByJob(jobId: number, opts?: { limit?: number }): EventRow[] {
+    const limit = opts?.limit ?? DEFAULT_LIST_BY_JOB_LIMIT;
+    const rows = this.db
+      .prepare('SELECT * FROM events WHERE job_id = ? ORDER BY id ASC LIMIT ?')
+      .all(jobId, limit) as EventRowRaw[];
     return rows.map(parseRow);
   }
 
