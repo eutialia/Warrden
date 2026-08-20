@@ -92,7 +92,6 @@ export interface EventRow {
 export interface JobDetailResponse {
   job: Job;
   acquireRecords: AcquireRecordDetail[];
-  acquireOutcome: AcquireStatus | null;
   /** Open attention items for this job only (same shape as AttentionItem). */
   attention: AttentionItem[];
   placedFiles: PlacedFile[];

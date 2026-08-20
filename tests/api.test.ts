@@ -160,6 +160,22 @@ describe('dashboard api', () => {
       expect(detail).not.toHaveProperty('relatedJobs');
     });
 
+    it('omits top-level acquireOutcome: the job row already carries it and nothing reads the duplicate', async () => {
+      const ctx = makeCtx();
+      const jobId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      new AcquireRecords(ctx.db).insert({
+        arrInstance: 'sonarr',
+        targetKind: 'series',
+        targetId: 42,
+        status: 'grabbed',
+      });
+      const app = createApp(ctx);
+
+      const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
+      expect(detail).not.toHaveProperty('acquireOutcome');
+      expect(detail.job.acquireOutcome).toBe('grabbed');
+    });
+
     it('includes open attention items for the job and excludes dismissed ones', async () => {
       const ctx = makeCtx();
       const jobId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;

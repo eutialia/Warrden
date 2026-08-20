@@ -397,7 +397,6 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       return c.json({
         job: { ...job, targetTitle, acquireOutcome: acquireOutcome(job) },
         acquireRecords: acquireRecordsForJob,
-        acquireOutcome: acquireOutcome(job),
         attention: jobAttention.listByJob(job.id),
         placedFiles: placedFiles.listByJob(job.id),
         // What the run said about itself. An ingest or subtitle run that placed no files
