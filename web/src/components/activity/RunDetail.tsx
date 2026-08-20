@@ -143,7 +143,7 @@ function ReleasePick({
       )}
       {!picked && record.status === 'grabbed' && record.release_group && (
         <p className="text-xs text-muted-foreground">
-          Grabbed without a resolved title. Release group {record.release_group}.
+          Grabbed without a resolved title.
         </p>
       )}
       {!picked && (record.release_group || record.source) && (
@@ -274,7 +274,15 @@ export function RunDetail({ jobId }: { jobId: number }) {
   // Several runs can be open at once, so filter to this job. A null frame is a
   // connection-level nudge (reconnect, heartbeat, malformed) that every caller refetches
   // on. debounceMs 0 because traffic about one job is never a burst worth coalescing.
-  useSseRefetch(load, 0, Boolean(jobId), (e) => e === null || e.job_id === jobId);
+  // A custom filter replaces defaultFilter rather than composing with it, so the
+  // trace.appended exclusion has to be repeated here; otherwise the per-step firehose
+  // refetches this drawer at debounceMs 0.
+  useSseRefetch(
+    load,
+    0,
+    Boolean(jobId),
+    (e) => e === null || (e.kind !== 'trace.appended' && e.job_id === jobId),
+  );
 
   if (error) {
     return (
