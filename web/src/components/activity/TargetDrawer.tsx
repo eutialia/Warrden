@@ -84,10 +84,14 @@ function TargetDrawerBody({ group, runId }: { group: TargetGroup; runId?: number
         <p className="mb-2 text-xs text-muted-foreground">
           {pipelineLabel(phase)} · {runs.length} run{runs.length === 1 ? '' : 's'}
         </p>
+        {/* phase is in PhaseTimeline's key so each phase owns its open set.
+            useOpenSet only reads expandRunId at mount; without a remount,
+            toggling a node in another phase then coming back leaves the
+            deep-linked run closed. */}
         {runs.length === 0 ? (
           <p className="text-sm text-muted-foreground">This phase has not run for this title.</p>
         ) : (
-          <PhaseTimeline runs={runs} expandRunId={expandRunId} />
+          <PhaseTimeline key={phase} runs={runs} expandRunId={expandRunId} />
         )}
       </div>
     </div>
