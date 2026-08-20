@@ -795,6 +795,79 @@ describe('runAcquireJob: interactive search cache across job retries', () => {
   });
 });
 
+describe('runAcquireJob: a season the arr already has', () => {
+  function satisfiedSetup() {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          title: 'Frieren',
+          seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 12 } }],
+        }),
+      ],
+      releases: [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
+    const job = enqueueAndClaim(ctx, {
+      pipeline: 'acquire',
+      targetKind: 'series',
+      targetId: 42,
+      arrInstance: 'sonarr',
+      payload: { title: 'Frieren' },
+    });
+    return { ctx, client, job };
+  }
+
+  it('does not search the indexers at all', async () => {
+    const { ctx, client, job } = satisfiedSetup();
+    await runAcquireJob(ctx, job);
+    expect(client.searchReleases).not.toHaveBeenCalled();
+    expect(client.grabbed).toHaveLength(0);
+  });
+
+  it('records already-satisfied rather than no-candidates', async () => {
+    const { ctx, job } = satisfiedSetup();
+    await runAcquireJob(ctx, job);
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('already-satisfied');
+  });
+
+  it('raises nothing for a human to review', async () => {
+    const { ctx, job } = satisfiedSetup();
+    await runAcquireJob(ctx, job);
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
+    expect(new AttentionItems(ctx.db).list({ status: 'open' })).toHaveLength(0);
+  });
+
+  it('says so in the event log at info level', async () => {
+    const { ctx, job } = satisfiedSetup();
+    await runAcquireJob(ctx, job);
+    const event = findEvent(ctx.events.list(), 'acquire.already-satisfied');
+    expect(event).toBeDefined();
+    expect(event!.message).toContain('Frieren');
+  });
+
+  it('still searches a season missing one aired episode', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 11 } }],
+        }),
+      ],
+      releases: [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' })]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.searchReleases).toHaveBeenCalled();
+    expect(client.grabbed).toHaveLength(1);
+  });
+});
+
 // The seam this whole mechanism exists for: the runner, the acquire pipeline and the cache
 // meeting on one real permanent provider error, rather than each half proved in isolation.
 describe('runAcquireJob under startRunner: a permanent LLM error', () => {

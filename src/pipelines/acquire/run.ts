@@ -10,6 +10,7 @@ import { eligibleCandidates, pickRelease, resolveReleaseGroup } from './pick.js'
 import { pinReleaseGroup } from './pin.js';
 import { capCandidates, dedupByInfoHash, prefilter, type DroppedCandidate } from './prefilter.js';
 import { classifySeason, type SeasonMode } from './seasonMode.js';
+import { seasonSatisfaction } from './satisfied.js';
 
 const DEFAULT_SOURCE = 'webhook';
 
@@ -210,6 +211,23 @@ async function runSeriesAcquire(
         kind: 'acquire.skip-unaired',
         jobId: job.id,
         message: `Skipped "${title}" Season ${season.seasonNumber} — no episodes have aired yet`,
+        data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+      });
+      continue;
+    }
+
+    // Ahead of the search, not after it: a satisfied season returns hundreds of
+    // candidates the arr will refuse one by one, and reading zero survivors as
+    // "no releases exist" is exactly the false alarm this guards.
+    if (seasonSatisfaction(season.statistics) === 'satisfied') {
+      recordOutcome(ctx, job, {
+        status: 'already-satisfied',
+        candidates: { seasonNumber: season.seasonNumber, kept: [], dropped: [] },
+      });
+      ctx.events.append({
+        kind: 'acquire.already-satisfied',
+        jobId: job.id,
+        message: `Nothing to grab for "${title}" Season ${season.seasonNumber}: every aired episode is already on disk`,
         data: targetEventData(job, { seasonNumber: season.seasonNumber }),
       });
       continue;
