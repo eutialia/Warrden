@@ -404,8 +404,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // This handler is mounted on queue+db, not the events block, so `events` is not in
         // scope here; `ctx.events` is optional on Partial<AppContext>.
         events: ctx.events?.listByJob(job.id) ?? [],
-        // This job's own subtitle site-search runs, transcript included — the dashboard's
-        // JobDetail "Subtitle runs" card renders these as a chronological step list.
+        // This job's own subtitle site-search runs, transcript included. The activity
+        // drawer's RunDetail renders them inline as a chronological step list.
         subtitleRuns: new SubtitleRuns(db).listByJob(job.id),
       });
     });
