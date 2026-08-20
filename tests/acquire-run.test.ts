@@ -953,3 +953,50 @@ describe('runAcquireJob under startRunner: a permanent LLM error', () => {
     expect(ctx.searchCache.get(id!, 'movie')).toEqual([candidate({ guid: 'g1' })]);
   });
 });
+
+describe('runAcquireJob: arr refused everything and we cannot see a file count', () => {
+  function noFileCountSetup(rejections: string[]) {
+    const client = fakeArrClient({
+      series: [seriesResource({ id: 42, seasons: [{ seasonNumber: 1, monitored: true }] })],
+      releases: [candidate({ guid: 'g1', title: 'Frieren S01', rejected: true, rejections })],
+    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+    return { ctx, client, job };
+  }
+
+  it('reads a cutoff rejection as already-satisfied rather than no-candidates', async () => {
+    const { ctx, job } = noFileCountSetup(['Existing file meets cutoff: SDTV']);
+    await runAcquireJob(ctx, job);
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('already-satisfied');
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
+  });
+
+  it('still reports no-candidates when the arr refused for reasons about the release', async () => {
+    const { ctx, job } = noFileCountSetup(['Does not contain one of the required terms: Trix']);
+    await runAcquireJob(ctx, job);
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('no-candidates');
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
+  });
+
+  it('trusts the file count over the rejection text when the arr reported one', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 11 } }],
+        }),
+      ],
+      releases: [candidate({ guid: 'g1', title: 'Frieren S01', rejected: true, rejections: ['Existing file meets cutoff: SDTV'] })],
+    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+
+    await runAcquireJob(ctx, job);
+
+    // Eleven of twelve aired episodes on disk: the twelfth is genuinely missing, so the
+    // cutoff rejections describe the eleven we have and must not silence the one we do not.
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('no-candidates');
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
+  });
+});

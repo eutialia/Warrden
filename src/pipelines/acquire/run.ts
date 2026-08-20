@@ -11,7 +11,7 @@ import { eligibleCandidates, pickRelease, resolveReleaseGroup } from './pick.js'
 import { pinReleaseGroup } from './pin.js';
 import { capCandidates, dedupByInfoHash, prefilter, type DroppedCandidate } from './prefilter.js';
 import { classifySeason, type SeasonMode } from './seasonMode.js';
-import { seasonSatisfaction } from './satisfied.js';
+import { anyDropSatisfied, seasonSatisfaction } from './satisfied.js';
 
 const DEFAULT_SOURCE = 'webhook';
 
@@ -255,12 +255,32 @@ async function runSeriesAcquire(
     const seasonLabel = `${title} Season ${season.seasonNumber}`;
 
     if (result.status !== 'grabbed') {
+      // Only when the arr gave us no file count to read. With a count in hand it is the
+      // better answer: on a part-filled season most candidates are refused as "existing
+      // file meets cutoff" for the episodes we DO have, and believing that text would
+      // report the season complete while an episode is still missing.
+      const satisfied =
+        result.status === 'no-candidates' &&
+        seasonSatisfaction(season.statistics) === 'unknown' &&
+        anyDropSatisfied(result.dropped);
+
       recordOutcome(ctx, job, {
-        status: result.status,
+        status: satisfied ? 'already-satisfied' : result.status,
         reasoning: result.reasoning,
         candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
       });
-      appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
+
+      if (satisfied) {
+        ctx.events.append({
+          kind: 'acquire.already-satisfied',
+          jobId: job.id,
+          message: `Nothing to grab for "${seasonLabel}": the arr refused every release because it already holds this`,
+          data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+        });
+        settleSeasonAttention(ctx, job, season.seasonNumber);
+      } else {
+        appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
+      }
       continue;
     }
 
