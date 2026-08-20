@@ -154,14 +154,10 @@ async function runMovieAcquire(
   // here and the rejection-text fallback is not needed for movies at all. An absent movie
   // (deleted between enqueue and run) is not satisfied: let the search decide as before.
   if (movie?.hasFile === true) {
-    recordOutcome(ctx, job, { status: 'already-satisfied', candidates: { kept: [], dropped: [] } });
-    ctx.events.append({
-      kind: 'acquire.already-satisfied',
-      jobId: job.id,
+    recordAlreadySatisfied(ctx, job, {
       message: `Nothing to grab for "${title}": the file is already in place`,
-      data: targetEventData(job),
+      candidates: { kept: [], dropped: [] },
     });
-    settleSeasonAttention(ctx, job);
     return;
   }
 
@@ -221,6 +217,8 @@ async function runSeriesAcquire(
 
   const grabbedSeasons = alreadyGrabbedSeasons(ctx, job);
   let pinnedGroup: string | null = null;
+  // True once any season stopped needing a human — see the target-level settle after the loop.
+  let anySeasonSettled = false;
 
   for (const season of monitoredSeasons) {
     if (grabbedSeasons.has(season.seasonNumber)) {
@@ -234,6 +232,9 @@ async function runSeriesAcquire(
     }
 
     const mode = classifySeason(season.statistics);
+    const satisfaction = seasonSatisfaction(season.statistics);
+    const seasonLabel = `${title} Season ${season.seasonNumber}`;
+
     if (mode === 'unaired') {
       ctx.events.append({
         kind: 'acquire.skip-unaired',
@@ -247,18 +248,13 @@ async function runSeriesAcquire(
     // Ahead of the search, not after it: a satisfied season returns hundreds of
     // candidates the arr will refuse one by one, and reading zero survivors as
     // "no releases exist" is exactly the false alarm this guards.
-    if (seasonSatisfaction(season.statistics) === 'satisfied') {
-      recordOutcome(ctx, job, {
-        status: 'already-satisfied',
+    if (satisfaction === 'satisfied') {
+      recordAlreadySatisfied(ctx, job, {
+        message: `Nothing to grab for "${seasonLabel}": every aired episode is already on disk`,
         candidates: { seasonNumber: season.seasonNumber, kept: [], dropped: [] },
+        seasonNumber: season.seasonNumber,
       });
-      ctx.events.append({
-        kind: 'acquire.already-satisfied',
-        jobId: job.id,
-        message: `Nothing to grab for "${title}" Season ${season.seasonNumber}: every aired episode is already on disk`,
-        data: targetEventData(job, { seasonNumber: season.seasonNumber }),
-      });
-      settleSeasonAttention(ctx, job, season.seasonNumber);
+      anySeasonSettled = true;
       continue;
     }
 
@@ -279,33 +275,33 @@ async function runSeriesAcquire(
       mode,
       missingEpisodeNumbers,
     });
-    const seasonLabel = `${title} Season ${season.seasonNumber}`;
 
     if (result.status !== 'grabbed') {
-      // Only when the arr gave us no file count to read. With a count in hand it is the
+      // Only when nothing better than the rejection text is on hand. A file count is the
       // better answer: on a part-filled season most candidates are refused as "existing
       // file meets cutoff" for the episodes we DO have, and believing that text would
-      // report the season complete while an episode is still missing.
+      // report the season complete while an episode is still missing. A known-missing
+      // aired episode (from episode-level `hasFile`) says the same thing structurally,
+      // so it vetoes the fallback too.
       const satisfied =
         result.status === 'no-candidates' &&
-        seasonSatisfaction(season.statistics) === 'unknown' &&
+        satisfaction === 'unknown' &&
+        (missingEpisodeNumbers?.length ?? 0) === 0 &&
         anyDropSatisfied(result.dropped);
 
-      recordOutcome(ctx, job, {
-        status: satisfied ? 'already-satisfied' : result.status,
-        reasoning: result.reasoning,
-        candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
-      });
-
       if (satisfied) {
-        ctx.events.append({
-          kind: 'acquire.already-satisfied',
-          jobId: job.id,
+        recordAlreadySatisfied(ctx, job, {
           message: `Nothing to grab for "${seasonLabel}": the arr refused every release because it already holds this`,
-          data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+          candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
+          seasonNumber: season.seasonNumber,
         });
-        settleSeasonAttention(ctx, job, season.seasonNumber);
+        anySeasonSettled = true;
       } else {
+        recordOutcome(ctx, job, {
+          status: result.status,
+          reasoning: result.reasoning,
+          candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
+        });
         appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
       }
       continue;
@@ -352,6 +348,7 @@ async function runSeriesAcquire(
         candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
       });
       settleSeasonAttention(ctx, job, season.seasonNumber);
+      anySeasonSettled = true;
       ctx.events.append({
         kind: 'acquire.grabbed',
         jobId: job.id,
@@ -362,6 +359,13 @@ async function runSeriesAcquire(
       appendRecordFailedEvent(ctx, job, seasonLabel, result.pickedTitle, err);
     }
   }
+
+  // A season-scoped settle carries a dedupe key, so it can only ever match a row that was
+  // stored with one — and the series-level item this function raises above ("no monitored
+  // seasons") carries none. Without this it would stay open forever once the operator
+  // monitors a season and the next run grabs it. The unkeyed settle matches exactly the
+  // rows stored without a key, so every still-broken season's own keyed item survives it.
+  if (anySeasonSettled) settleSeasonAttention(ctx, job);
 }
 
 /** Search → prefilter → cap → pick → grab for one target (a movie, or a single series
@@ -588,9 +592,11 @@ function resolveHint(job: JobRow): string | undefined {
   return typeof hint === 'string' && hint.length > 0 ? hint : undefined;
 }
 
-/** Retracts the review items this target raised, now that the season no longer needs one.
- * Scoped by the same season-level dedupe key `appendNonGrabAttentionEvent` emits with, so
- * settling season 1 never silences season 2. */
+/** Retracts the review items this target raised, now that it no longer needs one. With a
+ * `seasonNumber` it is scoped by the same season-level dedupe key
+ * `appendNonGrabAttentionEvent` emits with, so settling season 1 never silences season 2;
+ * without one it matches only the items stored with no key at all (a movie's, or the
+ * series-level "no monitored seasons"), which no season-scoped settle can reach. */
 function settleSeasonAttention(ctx: AppContext, job: JobRow, seasonNumber?: number): void {
   new AttentionItems(ctx.db).resolveForTarget({
     kinds: ['acquire.no-candidates', 'acquire.none-viable'],
@@ -599,6 +605,26 @@ function settleSeasonAttention(ctx: AppContext, job: JobRow, seasonNumber?: numb
     targetId: job.target_id,
     dedupeKey: seasonNumber === undefined ? undefined : String(seasonNumber),
   });
+}
+
+/** The three ways a target turns out to already hold what a search would go looking for
+ * (the movie's file is in place, the season's file count covers its aired episodes, or the
+ * arr refused every release because of what we already hold): record the outcome, say so at
+ * info level, and retract whatever review item is still open for it. Never raises attention —
+ * "we already have it" is the one outcome that needs nobody. */
+function recordAlreadySatisfied(
+  ctx: AppContext,
+  job: JobRow,
+  input: { message: string; candidates: object; seasonNumber?: number },
+): void {
+  recordOutcome(ctx, job, { status: 'already-satisfied', candidates: input.candidates });
+  ctx.events.append({
+    kind: 'acquire.already-satisfied',
+    jobId: job.id,
+    message: input.message,
+    data: targetEventData(job, input.seasonNumber === undefined ? {} : { seasonNumber: input.seasonNumber }),
+  });
+  settleSeasonAttention(ctx, job, input.seasonNumber);
 }
 
 function recordOutcome(ctx: AppContext, job: JobRow, input: RecordOutcomeInput): void {

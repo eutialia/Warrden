@@ -6,7 +6,7 @@ import { startRunner } from '../src/jobs/runner.js';
 import { LlmError } from '../src/llm/generator.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
 import { ForceGrabSchema } from '../src/server/app.js';
-import { candidate, seriesResource, movieResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, findEvent, pickResponse } from './helpers.js';
+import { candidate, seriesResource, movieResource, episodeResource, FakeGenerator, fakeArrClient, enqueueAndClaim, ctxWithClient, findEvent, pickResponse } from './helpers.js';
 
 function setup(pick: object, cands = [candidate({ guid: 'g1', title: '[SubsPlease] Frieren S01 1080p' })]) {
   const client = fakeArrClient({
@@ -868,6 +868,70 @@ describe('runAcquireJob: a season the arr already has', () => {
   });
 });
 
+/** One job over a series whose season 1 needs nothing (its files cover every aired episode)
+ * and whose season 2 the model vetoes: the mixed run that pins both the outcome ladder and
+ * how far each settle reaches. */
+function mixedSeasonSetup() {
+  const client = fakeArrClient({
+    series: [
+      seriesResource({
+        id: 42,
+        title: 'Frieren',
+        seasons: [
+          { seasonNumber: 1, monitored: true, statistics: { episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 12 } },
+          { seasonNumber: 2, monitored: true, statistics: { episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 0 } },
+        ],
+      }),
+    ],
+    releases: [candidate({ guid: 'g2', fullSeason: true, title: '[Trix] Frieren S02 1080p' })],
+  });
+  const ctx = ctxWithClient('sonarr', client, {
+    llm: new FakeGenerator([
+      pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'every S02 pack is the broadcast cut' }),
+    ]),
+  });
+  const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
+  return { ctx, client, job };
+}
+
+describe('runAcquireJob: one job, one satisfied season and one broken one', () => {
+  it('records each season its own way and searches only the season that needs it', async () => {
+    const { ctx, client, job } = mixedSeasonSetup();
+
+    await runAcquireJob(ctx, job);
+
+    expect(client.searchReleases).toHaveBeenCalledTimes(1);
+    expect(client.searchReleases).toHaveBeenCalledWith({ seriesId: 42, seasonNumber: 2 });
+    expect(client.grabbed).toHaveLength(0);
+    const records: any[] = ctx.db.prepare('SELECT * FROM acquire_records ORDER BY id').all();
+    expect(records.map((r) => [JSON.parse(r.candidates_json).seasonNumber, r.status])).toEqual([
+      [1, 'already-satisfied'],
+      [2, 'none-viable'],
+    ]);
+  });
+
+  it('lets the season that still wants a human outrank the one that needs nothing', async () => {
+    const { ctx, job } = mixedSeasonSetup();
+
+    await runAcquireJob(ctx, job);
+
+    expect(new AcquireRecords(ctx.db).outcomeForJob('sonarr', 'series', 42, job.created_at)).toBe('none-viable');
+  });
+
+  it('raises attention for the vetoed season and none for the satisfied one', async () => {
+    const { ctx, job } = mixedSeasonSetup();
+
+    await runAcquireJob(ctx, job);
+
+    const open = new AttentionItems(ctx.db).list({ status: 'open' });
+    expect(open).toHaveLength(1);
+    expect(open[0]!.kind).toBe('acquire.none-viable');
+    expect(open[0]!.message).toContain('Season 2');
+    expect(open[0]!.data).toMatchObject({ seasonNumber: 2, dedupeKey: '2' });
+    expect(findEvent(ctx.events.list(), 'acquire.already-satisfied')!.message).toContain('Frieren Season 1');
+  });
+});
+
 describe('runAcquireJob: settling stale review items', () => {
   it('closes the open no-candidates item once the season turns out to be satisfied', async () => {
     const client = fakeArrClient({
@@ -905,6 +969,40 @@ describe('runAcquireJob: settling stale review items', () => {
     await runAcquireJob(ctx, job);
 
     expect(items.list({ status: 'open' })).toHaveLength(0);
+  });
+
+  it('retracts a series-level item stored without a dedupe key, which no season-scoped settle can reach', async () => {
+    const { ctx, job } = mixedSeasonSetup();
+    const items = new AttentionItems(ctx.db);
+    // Exactly what runSeriesAcquire raises for "no monitored seasons": a target-level item
+    // with no dedupeKey, left behind once the operator monitored a season.
+    items.open({
+      kind: 'acquire.no-candidates',
+      message: 'Nothing to grab for "Frieren" — no monitored seasons (specials alone don\'t count)',
+      data: { instance: 'sonarr', targetKind: 'series', targetId: 42, title: 'Frieren' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(items.list({ status: 'open' }).filter((r) => r.kind === 'acquire.no-candidates')).toHaveLength(0);
+  });
+
+  it("keeps the still-broken season's own keyed item open through that same target-level settle", async () => {
+    const { ctx, job } = mixedSeasonSetup();
+    const items = new AttentionItems(ctx.db);
+    items.open({
+      kind: 'acquire.no-candidates',
+      message: 'no monitored seasons',
+      data: { instance: 'sonarr', targetKind: 'series', targetId: 42, title: 'Frieren' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    // Season 1 settling must not take season 2's fresh veto down with it.
+    const open = items.list({ status: 'open' });
+    expect(open).toHaveLength(1);
+    expect(open[0]!.kind).toBe('acquire.none-viable');
+    expect(open[0]!.message).toContain('Season 2');
   });
 
   it("leaves another season's open item alone", async () => {
@@ -1007,6 +1105,30 @@ describe('runAcquireJob: arr refused everything and we cannot see a file count',
   it('still reports no-candidates when the arr refused for reasons about the release', async () => {
     const { ctx, job } = noFileCountSetup(['Does not contain one of the required terms: Trix']);
     await runAcquireJob(ctx, job);
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('no-candidates');
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
+  });
+
+  it('trusts a known-missing aired episode over the rejection text, even with no file count to read', async () => {
+    const client = fakeArrClient({
+      series: [
+        // No episodeFileCount, so the text fallback is live; six of twelve aired, so the
+        // season is 'airing' and the run reads episode-level hasFile instead.
+        seriesResource({ id: 42, seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeCount: 6, totalEpisodeCount: 12 } }] }),
+      ],
+      releases: [candidate({ guid: 'g1', title: 'Frieren S01E01', rejected: true, rejections: ['Existing file meets cutoff: SDTV'] })],
+      episodes: [
+        episodeResource({ id: 1, episodeNumber: 1, hasFile: true, airDateUtc: '2026-01-01T00:00:00Z' }),
+        episodeResource({ id: 6, episodeNumber: 6, hasFile: false, episodeFileId: 0, airDateUtc: '2026-02-05T00:00:00Z' }),
+      ],
+    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+
+    await runAcquireJob(ctx, job);
+
+    // Episode 6 aired and has no file: the cutoff rejections describe the five we hold and
+    // must not report the season complete over an episode we can see is missing.
     expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('no-candidates');
     expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
   });
