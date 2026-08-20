@@ -67,12 +67,19 @@ export function foldJobsByTarget(jobs: Job[]): TargetGroup[] {
   });
 }
 
-/** Worst state across a phase's runs - that is what a human needs to see first. */
+/** Current state of a phase, not its history. Failures stay on the individual
+ * run nodes inside the drawer; the dot answers "where is this now?".
+ *
+ * Acquire latches on any settled outcome because a grab is a possession, not a
+ * moment: a later retry that finds nothing does not give the file back. Ingest
+ * and subtitle have no equivalent latch, so they fall through to the latest run. */
 export function phaseTone(runs: Job[]): Tone {
   if (runs.length === 0) return 'neutral';
-  if (runs.some((r) => r.status === 'failed')) return 'danger';
   if (runs.some((r) => r.status === 'running' || r.status === 'pending')) return 'info';
-  if (runs.some((r) => r.acquireOutcome && !SETTLED_OUTCOMES.has(r.acquireOutcome))) return 'warning';
+  if (runs.some((r) => r.acquireOutcome != null && SETTLED_OUTCOMES.has(r.acquireOutcome))) return 'success';
+  const latest = runs.reduce((a, b) => (a.updated_at >= b.updated_at ? a : b));
+  if (latest.status === 'failed') return 'danger';
+  if (latest.acquireOutcome && !SETTLED_OUTCOMES.has(latest.acquireOutcome)) return 'warning';
   return 'success';
 }
 
