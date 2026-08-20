@@ -1,5 +1,6 @@
-import type { Job } from '@/api';
+import type { AcquireStatus, Job } from '@/api';
 import { targetKindLabel } from '@/lib/labels';
+import type { Tone } from '@/lib/tone';
 
 /**
  * Best available human name for a job's target. The API resolves real titles from
@@ -14,51 +15,71 @@ export function jobTitle(job: Job): string {
   return `${targetKindLabel(job.target_kind)} #${job.target_id}`;
 }
 
-/** One day's worth of runs, newest day first. */
-export interface JobDay {
-  /** Midnight of the day, so the caller can key and format it. */
-  key: number;
-  label: string;
-  jobs: Job[];
-  failed: number;
+export type Phase = 'acquire' | 'ingest' | 'subtitle';
+export const PHASES: readonly Phase[] = ['acquire', 'ingest', 'subtitle'];
+
+/** Outcomes that need nobody. A bare `!== 'grabbed'` test paints already-satisfied
+ * amber, putting it in the same class as the false alarm it replaced. */
+const SETTLED_OUTCOMES = new Set<AcquireStatus>(['grabbed', 'already-satisfied']);
+
+export function jobTargetKey(job: { arr_instance: string; target_kind: string; target_id: number }): string {
+  return `${job.arr_instance}\0${job.target_kind}\0${job.target_id}`;
 }
 
-/**
- * Splits a newest-first job list into calendar days. History reads as a diary —
- * "today, then yesterday" — which a single unbroken table of timestamps does not
- * give you, and it lets each day carry its own run and failure count.
- */
-export function groupJobsByDay(jobs: Job[]): JobDay[] {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  // Stepping the date, not subtracting 24 hours: on the two days a year a local day is
-  // 23 or 25 hours long, arithmetic on milliseconds lands on no day at all.
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
+export interface TargetGroup {
+  key: string;
+  latest: Job;
+  runs: Job[];
+  byPhase: Record<Phase, Job[]>;
+  lastTs: number;
+}
 
-  const days = new Map<number, Job[]>();
-  for (const job of jobs) {
-    const midnight = new Date(job.updated_at);
-    midnight.setHours(0, 0, 0, 0);
-    const key = midnight.getTime();
-    const list = days.get(key);
-    if (list) list.push(job);
-    else days.set(key, [job]);
+export function foldJobsByTarget(jobs: Job[]): TargetGroup[] {
+  const map = new Map<string, Job[]>();
+  const order: string[] = [];
+  for (const j of jobs) {
+    const k = jobTargetKey(j);
+    const list = map.get(k);
+    if (list) list.push(j);
+    else {
+      map.set(k, [j]);
+      order.push(k);
+    }
   }
-
-  return [...days.entries()]
-    .sort(([a], [b]) => b - a)
-    .map(([key, dayJobs]) => ({
+  return order.map((key) => {
+    const runs = map.get(key) ?? [];
+    const byPhase: Record<Phase, Job[]> = {
+      acquire: runs.filter((r) => r.pipeline === 'acquire'),
+      ingest: runs.filter((r) => r.pipeline === 'ingest'),
+      subtitle: runs.filter((r) => r.pipeline === 'subtitle'),
+    };
+    return {
       key,
-      label:
-        key === today.getTime()
-          ? 'Today'
-          : key === yesterday.getTime()
-            ? 'Yesterday'
-            : new Date(key).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }),
-      jobs: dayJobs,
-      failed: dayJobs.filter((j) => j.status === 'failed').length,
-    }));
+      runs,
+      byPhase,
+      latest: runs.reduce((a, b) => (a.updated_at >= b.updated_at ? a : b)),
+      lastTs: Math.max(...runs.map((r) => r.updated_at)),
+    };
+  });
+}
+
+/** Worst state across a phase's runs - that is what a human needs to see first. */
+export function phaseTone(runs: Job[]): Tone {
+  if (runs.length === 0) return 'neutral';
+  if (runs.some((r) => r.status === 'failed')) return 'danger';
+  if (runs.some((r) => r.status === 'running' || r.status === 'pending')) return 'info';
+  if (runs.some((r) => r.acquireOutcome && !SETTLED_OUTCOMES.has(r.acquireOutcome))) return 'warning';
+  return 'success';
+}
+
+export function phaseSummary(phase: Phase, runs: Job[]): string {
+  if (runs.length === 0) return 'not run';
+  if (phase === 'acquire') {
+    const grabbed = runs.filter((r) => r.acquireOutcome === 'grabbed').length;
+    if (grabbed > 0) return `grabbed after ${runs.length} ${runs.length === 1 ? 'try' : 'tries'}`;
+    return `${runs.length} ${runs.length === 1 ? 'try' : 'tries'}, nothing grabbed`;
+  }
+  return `${runs.length} run${runs.length === 1 ? '' : 's'}`;
 }
 
 /** How long a job took (or has been going). `null` when the timestamps can't say
