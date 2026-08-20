@@ -22,6 +22,9 @@ export const PHASES: readonly Phase[] = ['acquire', 'ingest', 'subtitle'];
  * amber, putting it in the same class as the false alarm it replaced. */
 const SETTLED_OUTCOMES = new Set<AcquireStatus>(['grabbed', 'already-satisfied']);
 
+/** Composite key for grouping jobs by arr target. NUL is the separator because
+ * an instance named `a` with kind `b:c` must not collide with one named `a:b`
+ * with kind `c`, which a printable separator like `:` or `-` would allow. */
 export function jobTargetKey(job: { arr_instance: string; target_kind: string; target_id: number }): string {
   return `${job.arr_instance}\0${job.target_kind}\0${job.target_id}`;
 }
