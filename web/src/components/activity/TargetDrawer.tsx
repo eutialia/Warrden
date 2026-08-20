@@ -3,12 +3,12 @@ import { toast } from 'sonner';
 import { apiErrorMessage, postAcquire, type Job } from '@/api';
 import { PhaseStepper } from '@/components/activity/PhaseStepper';
 import { PhaseTimeline } from '@/components/activity/PhaseTimeline';
+import { RelativeTime } from '@/components/activity/RelativeTime';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { PHASES, jobTitle, type Phase, type TargetGroup } from '@/lib/jobs';
 import { pipelineLabel, targetKindLabel } from '@/lib/labels';
-import { formatRelativeTime } from '@/lib/utils';
 
 function latestAcquire(group: TargetGroup): Job | undefined {
   const runs = group.byPhase.acquire;
@@ -116,7 +116,7 @@ export function TargetDrawer({
               <SheetTitle className="font-serif text-2xl">{jobTitle(group.latest)}</SheetTitle>
               <p className="mt-1 text-sm text-muted-foreground">
                 {group.latest.arr_instance} · {targetKindLabel(group.latest.target_kind)} · {group.runs.length}{' '}
-                run{group.runs.length === 1 ? '' : 's'} · last {formatRelativeTime(group.lastTs)}
+                run{group.runs.length === 1 ? '' : 's'} · last <RelativeTime ts={group.lastTs} />
               </p>
               <RepickAction group={group} />
             </div>
