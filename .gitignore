@@ -3,6 +3,10 @@ dist/
 data/
 web/node_modules/
 web/dist/
+
+# TypeScript build-mode cache. tsc -b writes one next to the config it builds,
+# and neither root config sets tsBuildInfoFile, so it lands at the repo root.
+*.tsbuildinfo
 .env
 compose.override.yaml
 
