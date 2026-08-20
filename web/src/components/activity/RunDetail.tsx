@@ -135,6 +135,7 @@ function ReleasePick({
             {picked.shape && <Fact label="Shape">{releaseShapeLabel(picked.shape)}</Fact>}
             {picked.seasonNumber !== null && <Fact label="Season">{picked.seasonNumber}</Fact>}
             {record.release_group && <Fact label="Group">{record.release_group}</Fact>}
+            {record.source && <Fact label="Source">{record.source}</Fact>}
             {picked.languages.length > 0 && <Fact label="Languages">{picked.languages.join(', ')}</Fact>}
           </dl>
         </div>
@@ -143,6 +144,11 @@ function ReleasePick({
         <p className="text-xs text-muted-foreground">
           Grabbed without a resolved title. Release group {record.release_group}.
         </p>
+      )}
+      {!picked && record.source && (
+        <dl className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
+          <Fact label="Source">{record.source}</Fact>
+        </dl>
       )}
       {record.reasoning && (
         <p className="border-l pl-3 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
