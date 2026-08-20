@@ -153,7 +153,7 @@ function ReleasePick({
         </dl>
       )}
       <p className="border-l pl-3 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
-        {record.reasoning ?? 'No reasoning recorded.'}
+        {record.reasoning || 'No reasoning recorded.'}
       </p>
       {(kept.length > 0 || dropped.length > 0) && (
         <div className="text-xs">
