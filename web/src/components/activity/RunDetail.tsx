@@ -18,6 +18,7 @@ import { TierBadge } from '@/components/TierBadge';
 import { ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
 import { acquireOutcomeLabel, releaseShapeLabel, siteLabel, subtitleRunLabel, subtitleRunTone } from '@/lib/labels';
 import { TONE_SOFT, TONE_SOLID, TONE_TEXT } from '@/lib/tone';
@@ -145,16 +146,15 @@ function ReleasePick({
           Grabbed without a resolved title. Release group {record.release_group}.
         </p>
       )}
-      {!picked && record.source && (
+      {!picked && (record.release_group || record.source) && (
         <dl className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
-          <Fact label="Source">{record.source}</Fact>
+          {record.release_group && <Fact label="Group">{record.release_group}</Fact>}
+          {record.source && <Fact label="Source">{record.source}</Fact>}
         </dl>
       )}
-      {record.reasoning && (
-        <p className="border-l pl-3 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
-          {record.reasoning}
-        </p>
-      )}
+      <p className="border-l pl-3 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
+        {record.reasoning ?? 'No reasoning recorded.'}
+      </p>
       {(kept.length > 0 || dropped.length > 0) && (
         <div className="text-xs">
           <button
@@ -249,44 +249,37 @@ function SubtitleRun({ run }: { run: SubtitleRunRow }) {
 export function RunDetail({ jobId }: { jobId: number }) {
   const [data, setData] = useState<JobDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const beginFetch = useFetchGeneration();
 
-  const load = useCallback(
-    (opts?: { isStale: () => boolean }) => {
-      fetchJob(jobId)
-        .then((result) => {
-          if (opts?.isStale()) return;
-          setData(result);
-          setError(null);
-        })
-        .catch((err: unknown) => {
-          if (opts?.isStale()) return;
-          setError(apiErrorMessage(err, 'Failed to load job'));
-        });
-    },
-    [jobId],
-  );
+  const load = useCallback(() => {
+    const isStale = beginFetch();
+    fetchJob(jobId)
+      .then((result) => {
+        if (isStale()) return;
+        setData(result);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (isStale()) return;
+        setError(apiErrorMessage(err, 'Failed to load job'));
+      });
+  }, [beginFetch, jobId]);
 
   useEffect(() => {
-    let stale = false;
     setData(null);
     setError(null);
-    load({ isStale: () => stale });
-    return () => {
-      stale = true;
-    };
+    load();
   }, [jobId, load]);
 
-  // Any event can mean this job (or its acquire record) changed. Refetch wholesale rather
-  // than trying to reconcile individual fields. debounceMs 0 because traffic about one job
-  // is never a burst worth coalescing. load() is called with no staleness guard: the
-  // per-jobId guard in the effect is what actually matters, and a late-resolving
-  // SSE-triggered load for the same job is harmless to apply.
-  useSseRefetch(() => load(), 0, Boolean(jobId));
+  // Several runs can be open at once, so filter to this job. A null frame is a
+  // connection-level nudge (reconnect, heartbeat, malformed) that every caller refetches
+  // on. debounceMs 0 because traffic about one job is never a burst worth coalescing.
+  useSseRefetch(load, 0, Boolean(jobId), (e) => e === null || e.job_id === jobId);
 
   if (error) {
     return (
       <div className="pb-3 pl-5">
-        <StatusNotice message={error} onRetry={() => load()} />
+        <StatusNotice message={error} onRetry={load} />
       </div>
     );
   }
