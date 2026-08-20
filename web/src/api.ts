@@ -96,7 +96,7 @@ export interface JobDetailResponse {
   /** Open attention items for this job only (same shape as AttentionItem). */
   attention: AttentionItem[];
   placedFiles: PlacedFile[];
-  // Per-site agent-run records for a subtitle job — empty for non-subtitle pipelines.
+  // Per-site agent-run records for a subtitle job, empty for non-subtitle pipelines.
   // Fetched alongside the rest of the job detail; `subtitle.transcript` SSE events
   // trigger a wholesale refetch via `useSseRefetch` (see JobDetail.tsx), so the array
   // stays live as each site's transcript grows.

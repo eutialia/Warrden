@@ -55,7 +55,7 @@ function parseRow(row: AcquireRecordRowRaw): AcquireRecordRow {
 }
 
 /**
- * Typed wrapper over the `acquire_records` table — one append-only audit row per acquire
+ * Typed wrapper over the `acquire_records` table: one append-only audit row per acquire
  * job outcome (`no-candidates` / `none-viable` / `grabbed` / `already-satisfied`), written by `runAcquireJob`
  * and read by the dashboard (`GET /api/jobs`). Kept alongside `ManagedObjects` as the one place
  * that owns this table's SQL.

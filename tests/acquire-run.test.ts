@@ -978,7 +978,7 @@ describe('runAcquireJob: settling stale review items', () => {
     // with no dedupeKey, left behind once the operator monitored a season.
     items.open({
       kind: 'acquire.no-candidates',
-      message: 'Nothing to grab for "Frieren" — no monitored seasons (specials alone don\'t count)',
+      message: 'Nothing to grab for "Frieren": no monitored seasons (specials alone don\'t count)',
       data: { instance: 'sonarr', targetKind: 'series', targetId: 42, title: 'Frieren' },
     });
 

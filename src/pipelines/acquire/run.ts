@@ -64,7 +64,7 @@ interface RecordOutcomeInput {
  * picks up the remaining seasons; the double-grab guard (`alreadyGrabbedSeasons` below) is what
  * keeps that retry from re-grabbing the season(s) that already succeeded.
  *
- * A movie searches (and grabs) once, exactly as before. A Sonarr series searches and grabs
+ * A movie searches (and grabs) at most once, and not at all when its file is already in place. A Sonarr series searches and grabs
  * **per monitored season** (`{seriesId, seasonNumber}` — Sonarr's own `ReleaseController`
  * falls back to its full RSS feed, `GetRss()`, and returns unrelated candidates when
  * `seasonNumber` is omitted from a series search), so each season gets its own pick against
@@ -92,7 +92,7 @@ export async function runAcquireJob(ctx: AppContext, job: JobRow): Promise<void>
     throw new Error(`No arr client configured for instance "${job.arr_instance}"`);
   }
   // Wrapped once here so every downstream arr call (including the ones inside
-  // resolveTargetTitle and pinReleaseGroup) traces without each site opting in.
+  // pinReleaseGroup) traces without each site opting in.
   const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   if (job.target_kind === 'movie') {
@@ -217,7 +217,7 @@ async function runSeriesAcquire(
 
   const grabbedSeasons = alreadyGrabbedSeasons(ctx, job);
   let pinnedGroup: string | null = null;
-  // True once any season stopped needing a human — see the target-level settle after the loop.
+  // True once any season stopped needing a human. See the target-level settle after the loop.
   let anySeasonSettled = false;
 
   for (const season of monitoredSeasons) {
@@ -361,7 +361,7 @@ async function runSeriesAcquire(
   }
 
   // A season-scoped settle carries a dedupe key, so it can only ever match a row that was
-  // stored with one — and the series-level item this function raises above ("no monitored
+  // stored with one, and the series-level item this function raises above ("no monitored
   // seasons") carries none. Without this it would stay open forever once the operator
   // monitors a season and the next run grabs it. The unkeyed settle matches exactly the
   // rows stored without a key, so every still-broken season's own keyed item survives it.
@@ -610,7 +610,7 @@ function settleSeasonAttention(ctx: AppContext, job: JobRow, seasonNumber?: numb
 /** The three ways a target turns out to already hold what a search would go looking for
  * (the movie's file is in place, the season's file count covers its aired episodes, or the
  * arr refused every release because of what we already hold): record the outcome, say so at
- * info level, and retract whatever review item is still open for it. Never raises attention —
+ * info level, and retract whatever review item is still open for it. Never raises attention:
  * "we already have it" is the one outcome that needs nobody. */
 function recordAlreadySatisfied(
   ctx: AppContext,
