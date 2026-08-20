@@ -97,15 +97,17 @@ export function acquireOutcomeLabel(outcome: AcquireStatus): string {
       return 'Nothing good enough';
     case 'no-candidates':
       return 'No releases found';
+    case 'already-satisfied':
+      return 'Already have it';
     default:
       return outcome;
   }
 }
 
-/** A finished acquire that grabbed nothing isn't a failure — it's a dead end a
- * human may want to act on, so it reads as a warning rather than an error. */
+/** A finished acquire that grabbed nothing is not a failure, it is a dead end a human may
+ * want to act on. "Already have it" is neither: nothing is missing and nobody is needed. */
 export function acquireOutcomeTone(outcome: AcquireStatus): Tone {
-  return outcome === 'grabbed' ? 'success' : 'warning';
+  return outcome === 'grabbed' || outcome === 'already-satisfied' ? 'success' : 'warning';
 }
 
 /** Pack / multi / single as short sentence-case copy for release facts. */

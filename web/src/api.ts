@@ -29,7 +29,7 @@ export interface Job {
   targetTitle?: string;
 }
 
-export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
+export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed' | 'already-satisfied';
 
 /** Human summary of the release a job actually picked. Mirrors `PickedRelease` in
  * `src/pipelines/acquire/picked.ts`. */
