@@ -40,9 +40,9 @@ export function formatTimeOfDay(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-/** Compact relative time for a past epoch-ms — "just now", "5m ago", "3h ago", "2d ago".
- * Falls back to a locale string past 7 days, where "12d ago" stops being more useful than
- * the actual date. Returns '—' for null (the site-profiles table's never-seen columns). */
+/** Compact relative time for a past epoch-ms: "just now", "5m ago", "3h ago", "2d ago".
+ * Falls back to a locale string past 30 days, where "45d ago" stops being more useful than
+ * the actual date. Returns an em dash for null (the site-profiles table's never-seen columns). */
 export function formatRelativeTime(ts: number | null): string {
   if (ts === null) return '—';
   const seconds = Math.round((Date.now() - ts) / 1000);
@@ -52,7 +52,7 @@ export function formatRelativeTime(ts: number | null): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   const days = Math.round(hours / 24);
-  if (days <= 7) return `${days}d ago`;
+  if (days <= 30) return `${days}d ago`;
   return new Date(ts).toLocaleDateString();
 }
 
