@@ -64,10 +64,19 @@ function RepickAction({ group }: { group: TargetGroup }) {
   );
 }
 
-function TargetDrawerBody({ group }: { group: TargetGroup }) {
+function phaseOfRun(group: TargetGroup, runId?: number): Phase | undefined {
+  if (runId === undefined) return undefined;
+  const linked = group.runs.find((r) => r.id === runId);
+  if (!linked) return undefined;
+  return PHASES.find((p) => p === linked.pipeline);
+}
+
+function TargetDrawerBody({ group, runId }: { group: TargetGroup; runId?: number }) {
   const firstWithRuns = PHASES.find((p) => group.byPhase[p].length > 0) ?? 'acquire';
-  const [phase, setPhase] = useState<Phase>(firstWithRuns);
+  const linkedPhase = phaseOfRun(group, runId);
+  const [phase, setPhase] = useState<Phase>(linkedPhase ?? firstWithRuns);
   const runs = group.byPhase[phase];
+  const expandRunId = linkedPhase === phase ? runId : undefined;
   return (
     <div className="space-y-5">
       <PhaseStepper group={group} selected={phase} onSelect={setPhase} />
@@ -78,14 +87,22 @@ function TargetDrawerBody({ group }: { group: TargetGroup }) {
         {runs.length === 0 ? (
           <p className="text-sm text-muted-foreground">This phase has not run for this title.</p>
         ) : (
-          <PhaseTimeline runs={runs} />
+          <PhaseTimeline runs={runs} expandRunId={expandRunId} />
         )}
       </div>
     </div>
   );
 }
 
-export function TargetDrawer({ group, onClose }: { group: TargetGroup | null; onClose: () => void }) {
+export function TargetDrawer({
+  group,
+  onClose,
+  runId,
+}: {
+  group: TargetGroup | null;
+  onClose: () => void;
+  runId?: number;
+}) {
   return (
     <Sheet open={group !== null} onOpenChange={(open) => !open && onClose()}>
       <SheetContent side="right" className="w-full sm:max-w-3xl!">
@@ -99,7 +116,9 @@ export function TargetDrawer({ group, onClose }: { group: TargetGroup | null; on
               </p>
               <RepickAction group={group} />
             </div>
-            <TargetDrawerBody key={group.key} group={group} />
+            {/* runId is in the key so a second deep link on the same target remounts
+                onto that run instead of leaving the first phase selected. */}
+            <TargetDrawerBody key={`${group.key}:${runId ?? ''}`} group={group} runId={runId} />
           </div>
         )}
       </SheetContent>

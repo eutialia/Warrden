@@ -37,6 +37,12 @@ const STATUS_ITEMS: Record<string, string> = {
   ...Object.fromEntries(STATUSES.map((s) => [s, jobStatusLabel(s)])),
 };
 
+function parseRunId(value: string | null): number | undefined {
+  if (value === null || value === '') return undefined;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -95,6 +101,8 @@ export default function Activity() {
     if (!target) return null;
     return foldJobsByTarget(jobs).find((g) => g.key === target) ?? null;
   }, [jobs, searchParams]);
+
+  const runId = parseRunId(searchParams.get('run'));
 
   const onOpen = useCallback(
     (group: TargetGroup) => {
@@ -212,7 +220,7 @@ export default function Activity() {
         </div>
       )}
 
-      <TargetDrawer group={openGroup} onClose={onClose} />
+      <TargetDrawer group={openGroup} runId={runId} onClose={onClose} />
     </div>
   );
 }

@@ -18,9 +18,13 @@ function RelativeTime({ ts }: { ts: number }) {
   );
 }
 
-/** Toggle set: comparing two runs means having both open at once, so never an accordion. */
-function useOpenSet(): [ReadonlySet<number>, (id: number) => void] {
-  const [open, setOpen] = useState<ReadonlySet<number>>(() => new Set());
+/** Toggle set: comparing two runs means having both open at once, so never an accordion.
+ * `initialId` is a deep link (`?run=`): start with that node open so RunDetail mounts
+ * for the run the operator clicked, rather than waiting for a second click. */
+function useOpenSet(initialId?: number): [ReadonlySet<number>, (id: number) => void] {
+  const [open, setOpen] = useState<ReadonlySet<number>>(
+    () => (initialId === undefined ? new Set() : new Set([initialId])),
+  );
   return [
     open,
     (id: number) =>
@@ -42,8 +46,8 @@ function useOpenSet(): [ReadonlySet<number>, (id: number) => void] {
  * runs are a queue bug, already fixed there; hiding them in the UI would only have made
  * the next one harder to notice.
  */
-export function PhaseTimeline({ runs }: { runs: Job[] }) {
-  const [open, toggle] = useOpenSet();
+export function PhaseTimeline({ runs, expandRunId }: { runs: Job[]; expandRunId?: number }) {
+  const [open, toggle] = useOpenSet(expandRunId);
   return (
     <ol className="relative space-y-1 border-l pl-6">
       {runs.map((job) => {
