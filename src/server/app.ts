@@ -394,22 +394,10 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         targetId: job.target_id,
         payload: job.payload,
       });
-      const relatedJobs = queue
-        .listByTarget({ arrInstance: job.arr_instance, targetKind: job.target_kind, targetId: job.target_id })
-        .filter((sibling) => sibling.id !== job.id)
-        .map((sibling) => ({
-          id: sibling.id,
-          pipeline: sibling.pipeline,
-          status: sibling.status,
-          created_at: sibling.created_at,
-          updated_at: sibling.updated_at,
-          acquireOutcome: acquireOutcome(sibling),
-        }));
       return c.json({
         job: { ...job, targetTitle, acquireOutcome: acquireOutcome(job) },
         acquireRecords: acquireRecordsForJob,
         acquireOutcome: acquireOutcome(job),
-        relatedJobs,
         attention: jobAttention.listByJob(job.id),
         placedFiles: placedFiles.listByJob(job.id),
         // What the run said about itself. An ingest or subtitle run that placed no files

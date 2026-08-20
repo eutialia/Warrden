@@ -148,34 +148,16 @@ describe('dashboard api', () => {
       });
     });
 
-    it('relatedJobs lists sibling jobs for the same target and excludes the job being viewed', async () => {
+    it("omits relatedJobs: the drawer already has a target's sibling runs by construction", async () => {
       const ctx = makeCtx();
       const acquireId = ctx.queue.enqueue({ pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
       ctx.queue.claim();
       ctx.queue.complete(acquireId);
-      const ingestId = ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });
       const app = createApp(ctx);
 
-      const acquireDetail: any = await (await app.request(`/api/jobs/${acquireId}`)).json();
-      expect(acquireDetail.relatedJobs).toHaveLength(1);
-      expect(acquireDetail.relatedJobs[0]).toMatchObject({
-        id: ingestId,
-        pipeline: 'ingest',
-        status: 'pending',
-      });
-      expect(acquireDetail.relatedJobs[0]).toHaveProperty('acquireOutcome');
-      expect(acquireDetail.relatedJobs[0]).toHaveProperty('created_at');
-      expect(acquireDetail.relatedJobs[0]).toHaveProperty('updated_at');
-      expect(acquireDetail.relatedJobs.map((j: { id: number }) => j.id)).not.toContain(acquireId);
-
-      const ingestDetail: any = await (await app.request(`/api/jobs/${ingestId}`)).json();
-      expect(ingestDetail.relatedJobs).toHaveLength(1);
-      expect(ingestDetail.relatedJobs[0]).toMatchObject({
-        id: acquireId,
-        pipeline: 'acquire',
-        status: 'done',
-      });
-      expect(ingestDetail.relatedJobs.map((j: { id: number }) => j.id)).not.toContain(ingestId);
+      const detail: any = await (await app.request(`/api/jobs/${acquireId}`)).json();
+      expect(detail).not.toHaveProperty('relatedJobs');
     });
 
     it('includes open attention items for the job and excludes dismissed ones', async () => {

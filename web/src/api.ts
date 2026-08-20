@@ -62,16 +62,6 @@ export interface AcquireRecord {
 /** One acquire_records row for this job's run window, with a resolved `picked` summary. */
 export type AcquireRecordDetail = AcquireRecord & { picked: PickedRelease | null };
 
-/** Sibling job for the same target, excluding the job being viewed. */
-export interface RelatedJob {
-  id: number;
-  pipeline: string;
-  status: JobStatus;
-  created_at: number;
-  updated_at: number;
-  acquireOutcome: AcquireStatus | null;
-}
-
 export type PlacedFileKind = 'audio' | 'subtitle';
 
 export interface PlacedFile {
@@ -103,7 +93,6 @@ export interface JobDetailResponse {
   job: Job;
   acquireRecords: AcquireRecordDetail[];
   acquireOutcome: AcquireStatus | null;
-  relatedJobs: RelatedJob[];
   /** Open attention items for this job only (same shape as AttentionItem). */
   attention: AttentionItem[];
   placedFiles: PlacedFile[];
