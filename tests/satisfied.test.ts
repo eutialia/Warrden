@@ -8,27 +8,27 @@ describe('seasonSatisfaction', () => {
   });
 
   it('is unknown when the arr reported no file count, so the text fallback may run', () => {
-    expect(seasonSatisfaction({ episodeCount: 12, totalEpisodeCount: 12 })).toBe('unknown');
+    expect(seasonSatisfaction({ episodeCount: 12 })).toBe('unknown');
   });
 
   it('is satisfied when files cover every aired episode', () => {
-    expect(seasonSatisfaction({ episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 12 })).toBe('satisfied');
+    expect(seasonSatisfaction({ episodeCount: 12, episodeFileCount: 12 })).toBe('satisfied');
   });
 
   it('is satisfied when files exceed the aired count, which happens mid-season after a pack lands', () => {
-    expect(seasonSatisfaction({ episodeCount: 6, totalEpisodeCount: 12, episodeFileCount: 12 })).toBe('satisfied');
+    expect(seasonSatisfaction({ episodeCount: 6, episodeFileCount: 12 })).toBe('satisfied');
   });
 
   it('is unsatisfied when even one aired episode has no file', () => {
-    expect(seasonSatisfaction({ episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 11 })).toBe('unsatisfied');
+    expect(seasonSatisfaction({ episodeCount: 12, episodeFileCount: 11 })).toBe('unsatisfied');
   });
 
   it('is unknown for an unaired season, so the existing unaired skip decides instead', () => {
-    expect(seasonSatisfaction({ episodeCount: 0, totalEpisodeCount: 12, episodeFileCount: 0 })).toBe('unknown');
+    expect(seasonSatisfaction({ episodeCount: 0, episodeFileCount: 0 })).toBe('unknown');
   });
 
   it('is unknown when the counts are present but not numbers', () => {
-    expect(seasonSatisfaction({ episodeCount: Number.NaN, totalEpisodeCount: 12, episodeFileCount: 12 })).toBe('unknown');
+    expect(seasonSatisfaction({ episodeCount: Number.NaN, episodeFileCount: 12 })).toBe('unknown');
   });
 });
 

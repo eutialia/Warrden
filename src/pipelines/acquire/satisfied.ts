@@ -5,7 +5,6 @@ export type Satisfaction = 'satisfied' | 'unsatisfied' | 'unknown';
  * `episodeFileCount` is optional because older payloads and fixtures omit it. */
 export interface SeasonFileStats {
   episodeCount: number;
-  totalEpisodeCount: number;
   episodeFileCount?: number;
 }
 
