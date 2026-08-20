@@ -13,6 +13,7 @@ import {
   type SubtitleRunRow,
   type TranscriptEntry,
 } from '@/api';
+import { RelativeTime } from '@/components/activity/RelativeTime';
 import { StatusNotice } from '@/components/StatusNotice';
 import { TierBadge } from '@/components/TierBadge';
 import { ToneBadge } from '@/components/ToneBadge';
@@ -98,9 +99,13 @@ function QuietRun({ job, events }: { job: Job; events: EventRow[] }) {
     );
   }
   if (job.pipeline === 'acquire') {
-    return <p className="text-xs text-muted-foreground">No pick record for this job yet.</p>;
+    return <MissingPickNote />;
   }
   return <p className="text-xs text-muted-foreground">No files placed for this run.</p>;
+}
+
+function MissingPickNote() {
+  return <p className="text-xs text-muted-foreground">No pick record for this job yet.</p>;
 }
 
 function ReleasePick({
@@ -335,10 +340,16 @@ export function RunDetail({ jobId }: { jobId: number }) {
         </Link>
       ))}
       {quiet && <QuietRun job={job} events={events} />}
+      {!quiet && job.pipeline === 'acquire' && acquireRecords.length === 0 && <MissingPickNote />}
       <dl className="grid grid-cols-3 gap-2.5">
         <Fact label="Job">#{job.id}</Fact>
         <Fact label="Attempts">{job.attempts}</Fact>
         {source && <Fact label="Source">{source}</Fact>}
+        {(job.status === 'done' || job.status === 'failed') && (
+          <Fact label="Finished">
+            <RelativeTime ts={job.updated_at} />
+          </Fact>
+        )}
       </dl>
       {hint && (
         <div>
