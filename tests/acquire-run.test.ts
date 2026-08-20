@@ -965,11 +965,43 @@ describe('runAcquireJob: arr refused everything and we cannot see a file count',
     return { ctx, client, job };
   }
 
-  it('reads a cutoff rejection as already-satisfied rather than no-candidates', async () => {
+  it('reads a cutoff rejection as already-satisfied rather than no-candidates, resolving a stale attention item and logging the event', async () => {
     const { ctx, job } = noFileCountSetup(['Existing file meets cutoff: SDTV']);
+    const items = new AttentionItems(ctx.db);
+    items.open({
+      kind: 'acquire.no-candidates',
+      message: 'No usable releases found for "Frieren S01 Season 1"',
+      data: { instance: 'sonarr', targetKind: 'series', targetId: 42, seasonNumber: 1, dedupeKey: '1' },
+    });
+
     await runAcquireJob(ctx, job);
+
     expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('already-satisfied');
     expect(ctx.events.list({ level: 'attention' })).toHaveLength(0);
+    expect(findEvent(ctx.events.list(), 'acquire.already-satisfied')).toBeDefined();
+    expect(items.list({ status: 'open' })).toHaveLength(0);
+    expect(items.list({ status: 'resolved' })).toHaveLength(1);
+  });
+
+  it('does not read a cutoff rejection as satisfaction when a model veto is what actually blocked the season', async () => {
+    const client = fakeArrClient({
+      series: [seriesResource({ id: 42, seasons: [{ seasonNumber: 1, monitored: true }] })],
+      releases: [
+        candidate({ guid: 'g1', title: 'Frieren S01 clean', rejected: false }),
+        candidate({ guid: 'g2', title: 'Frieren S01 stale copy', rejected: true, rejections: ['Existing file meets cutoff: SDTV'] }),
+      ],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'not a match for policy' })]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+
+    await runAcquireJob(ctx, job);
+
+    // The model vetoed the one viable candidate; a sibling being cutoff-rejected describes
+    // that sibling, not the season, and must not silence the veto a human needs to overrule.
+    expect((ctx.db.prepare('SELECT status FROM acquire_records').get() as any).status).toBe('none-viable');
+    expect(ctx.events.list({ level: 'attention' })).toHaveLength(1);
   });
 
   it('still reports no-candidates when the arr refused for reasons about the release', async () => {
