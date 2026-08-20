@@ -23,6 +23,8 @@ import { foldJobsByTarget, jobTitle, type TargetGroup } from '@/lib/jobs';
 import { jobStatusLabel, pipelineLabel } from '@/lib/labels';
 
 const PAGE_SIZE = 50;
+// One widened fetch is the most a bookmark can ask for. Matches MAX_LIMIT in src/server/app.ts.
+const DEEP_LINK_LIMIT = 1000;
 const PIPELINES = ['acquire', 'ingest', 'subtitle'] as const;
 const STATUSES: JobStatus[] = ['running', 'pending', 'done', 'failed'];
 
@@ -52,6 +54,7 @@ export default function Activity() {
   const [pipeline, setPipeline] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [widenedForTarget, setWidenedForTarget] = useState<string | null>(null);
 
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
@@ -101,6 +104,18 @@ export default function Activity() {
     if (!target) return null;
     return foldJobsByTarget(jobs).find((g) => g.key === target) ?? null;
   }, [jobs, searchParams]);
+
+  // A /jobs/:id redirect or bookmark can name a job older than the newest 50.
+  // Widen once after the first window comes back empty for that target. Skip when
+  // the window was not full (the server had nothing more) or we already tried this
+  // target, so a missing job cannot loop.
+  useEffect(() => {
+    if (loading) return;
+    const target = searchParams.get('target');
+    if (!target || openGroup || widenedForTarget === target || jobs.length < limit) return;
+    setWidenedForTarget(target);
+    setLimit((n) => Math.max(n, DEEP_LINK_LIMIT));
+  }, [loading, searchParams, openGroup, widenedForTarget, jobs.length, limit]);
 
   const runId = parseRunId(searchParams.get('run'));
 
