@@ -47,7 +47,7 @@ function parseRunId(value: string | null): number | undefined {
 
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [limit, setLimit] = useState(PAGE_SIZE);
+  const [userLimit, setUserLimit] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -55,6 +55,13 @@ export default function Activity() {
   const [status, setStatus] = useState<string>(ALL);
   const [searchParams, setSearchParams] = useSearchParams();
   const [widenedForTarget, setWidenedForTarget] = useState<string | null>(null);
+
+  // The bookmark's 1000-row window is not the operator's "Load older jobs"
+  // count. Deriving keeps closing the drawer from leaving every SSE refetch
+  // at 1000, without throwing away a limit they chose themselves.
+  const targetParam = searchParams.get('target');
+  const widened = targetParam !== null && widenedForTarget === targetParam;
+  const limit = widened ? DEEP_LINK_LIMIT : userLimit;
 
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
@@ -114,7 +121,6 @@ export default function Activity() {
     const target = searchParams.get('target');
     if (!target || openGroup || widenedForTarget === target || jobs.length < limit) return;
     setWidenedForTarget(target);
-    setLimit((n) => Math.max(n, DEEP_LINK_LIMIT));
   }, [loading, searchParams, openGroup, widenedForTarget, jobs.length, limit]);
 
   const runId = parseRunId(searchParams.get('run'));
@@ -229,7 +235,7 @@ export default function Activity() {
           demonstrably nothing more to fetch. */}
       {jobs.length >= limit && (
         <div className="flex justify-center">
-          <Button variant="outline" onClick={() => setLimit((n) => n + PAGE_SIZE)}>
+          <Button variant="outline" onClick={() => setUserLimit((n) => n + PAGE_SIZE)}>
             Load older jobs
           </Button>
         </div>
