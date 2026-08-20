@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Bug, ChevronRight, FileCheck2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import {
+  apiErrorMessage,
   fetchJob,
   type AcquireRecordDetail,
   type EventRow,
@@ -12,11 +13,13 @@ import {
   type SubtitleRunRow,
   type TranscriptEntry,
 } from '@/api';
+import { StatusNotice } from '@/components/StatusNotice';
 import { TierBadge } from '@/components/TierBadge';
 import { ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { releaseShapeLabel, siteLabel, subtitleRunLabel, subtitleRunTone } from '@/lib/labels';
+import { useSseRefetch } from '@/hooks/useSseRefetch';
+import { acquireOutcomeLabel, releaseShapeLabel, siteLabel, subtitleRunLabel, subtitleRunTone } from '@/lib/labels';
 import { TONE_SOFT, TONE_SOLID, TONE_TEXT } from '@/lib/tone';
 import { cn, formatRelativeTime, formatReleaseSize } from '@/lib/utils';
 
@@ -55,7 +58,7 @@ function TranscriptTimeline({ entries }: { entries: TranscriptEntry[] }): ReactN
           <li key={i} className="relative">
             <span
               className={cn(
-                'absolute top-1.5 -left-[1.6rem] size-2 rounded-full ring-4 ring-card',
+                'absolute top-1.5 -left-[1.6rem] size-2 rounded-full ring-4 ring-popover',
                 TONE_SOLID[attention ? 'warning' : i === entries.length - 1 ? 'brand' : 'neutral'],
               )}
             />
@@ -80,7 +83,9 @@ function TranscriptTimeline({ entries }: { entries: TranscriptEntry[] }): ReactN
  * in its own completion event; ingest emits none, so it falls back to the copy the
  * job-detail page used rather than having something invented for it. */
 function QuietRun({ job, events }: { job: Job; events: EventRow[] }) {
-  const spoken = events.find((e) => e.kind.endsWith('.complete') || e.kind.endsWith('.skip'));
+  // Real skip kinds are `acquire.skip-already-grabbed` / `acquire.skip-unaired`: a
+  // `.skip-` segment, not a `.skip` suffix, so `endsWith('.skip')` matches nothing.
+  const spoken = events.find((e) => e.kind.endsWith('.complete') || e.kind.includes('.skip-'));
   if (spoken) return <p className="text-xs text-muted-foreground">{spoken.message}</p>;
   if (job.pipeline === 'ingest') {
     return (
@@ -90,6 +95,9 @@ function QuietRun({ job, events }: { job: Job; events: EventRow[] }) {
           : 'Waiting to settle, or nothing to place yet.'}
       </p>
     );
+  }
+  if (job.pipeline === 'acquire') {
+    return <p className="text-xs text-muted-foreground">No pick record for this job yet.</p>;
   }
   return <p className="text-xs text-muted-foreground">No files placed for this run.</p>;
 }
@@ -101,6 +109,11 @@ function ReleasePick({ record }: { record: AcquireRecordDetail }) {
 
   return (
     <div className="space-y-3">
+      {record.status && (
+        <dl className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
+          <Fact label="Outcome">{acquireOutcomeLabel(record.status)}</Fact>
+        </dl>
+      )}
       {picked && (
         <div className="space-y-2.5 rounded-lg border border-success-border bg-success-muted p-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -146,7 +159,7 @@ function ReleasePick({ record }: { record: AcquireRecordDetail }) {
                 const isPicked = record.picked_guid !== null && c.guid === record.picked_guid;
                 return (
                   <li key={c.guid} className={cn('font-mono break-all', isPicked ? 'text-foreground' : '')}>
-                    {c.title}
+                    {formatKeptLine(c)}
                     {isPicked && <span className="ml-2 font-sans text-[0.7rem] text-muted-foreground">picked</span>}
                   </li>
                 );
@@ -223,23 +236,54 @@ function SubtitleRun({ run }: { run: SubtitleRunRow }) {
 
 export function RunDetail({ jobId }: { jobId: number }) {
   const [data, setData] = useState<JobDetailResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(
+    (opts?: { isStale: () => boolean }) => {
+      fetchJob(jobId)
+        .then((result) => {
+          if (opts?.isStale()) return;
+          setData(result);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (opts?.isStale()) return;
+          setError(apiErrorMessage(err, 'Failed to load job'));
+        });
+    },
+    [jobId],
+  );
+
   useEffect(() => {
     let stale = false;
-    void fetchJob(jobId)
-      .then((d) => {
-        if (!stale) setData(d);
-      })
-      .catch(() => undefined);
+    setData(null);
+    setError(null);
+    load({ isStale: () => stale });
     return () => {
       stale = true;
     };
-  }, [jobId]);
+  }, [jobId, load]);
+
+  // Any event can mean this job (or its acquire record) changed. Refetch wholesale rather
+  // than trying to reconcile individual fields. debounceMs 0 because traffic about one job
+  // is never a burst worth coalescing. load() is called with no staleness guard: the
+  // per-jobId guard in the effect is what actually matters, and a late-resolving
+  // SSE-triggered load for the same job is harmless to apply.
+  useSseRefetch(() => load(), 0, Boolean(jobId));
+
+  if (error) {
+    return (
+      <div className="pb-3 pl-5">
+        <StatusNotice message={error} onRetry={() => load()} />
+      </div>
+    );
+  }
   if (!data) return <p className="pb-3 text-xs text-muted-foreground">Loading…</p>;
 
   const { job, placedFiles, attention, events } = data;
   const acquireRecords = sortAcquireRecords(data.acquireRecords);
   const subtitleRuns = data.subtitleRuns ?? [];
-  const showError = Boolean(job.error) && (job.status === 'failed' || job.status === 'running');
+  const showError = job.status === 'failed' || (Boolean(job.error) && job.status === 'running');
   const source = payloadString(job.payload.source);
   const hint = payloadString(job.payload.hint);
   const quiet =
@@ -254,8 +298,8 @@ export function RunDetail({ jobId }: { jobId: number }) {
     // Indented to line up under the run label above it, not the chevron. Without this the
     // detail sits left of its own parent and the nesting reads as a flat list.
     <div className="space-y-3 pb-5 pl-5">
-      {showError && job.error && (
-        <p className={cn('rounded-lg border p-2.5 text-xs', TONE_SOFT.danger)}>{job.error}</p>
+      {showError && (
+        <p className={cn('rounded-lg border p-2.5 text-xs', TONE_SOFT.danger)}>{job.error ?? 'Failed'}</p>
       )}
       {acquireRecords.map((rec) => (
         <ReleasePick key={rec.id} record={rec} />
@@ -323,24 +367,45 @@ function formatDriftLabel(drift: string, offsetMs: number | null): string {
   return drift;
 }
 
+interface KeptCandidateView {
+  guid: string;
+  title: string;
+  indexer: string | null;
+  size: number | null;
+  seeders: number | null;
+  quality: string | null;
+}
+
+interface DroppedCandidateView {
+  title: string;
+  reason: string;
+}
+
 function parseCandidates(candidatesJson: Record<string, unknown> | null): {
-  kept: { guid: string; title: string }[];
-  dropped: { title: string; reason: string }[];
+  kept: KeptCandidateView[];
+  dropped: DroppedCandidateView[];
 } {
   if (!candidatesJson) return { kept: [], dropped: [] };
 
-  const kept: { guid: string; title: string }[] = [];
+  const kept: KeptCandidateView[] = [];
   const rawKept = candidatesJson.kept;
   if (Array.isArray(rawKept)) {
     for (const raw of rawKept) {
       if (typeof raw !== 'object' || raw === null) continue;
       const entry = raw as Record<string, unknown>;
       if (typeof entry.title !== 'string' || typeof entry.guid !== 'string') continue;
-      kept.push({ guid: entry.guid, title: entry.title });
+      kept.push({
+        guid: entry.guid,
+        title: entry.title,
+        indexer: typeof entry.indexer === 'string' ? entry.indexer : null,
+        size: typeof entry.size === 'number' ? entry.size : null,
+        seeders: typeof entry.seeders === 'number' ? entry.seeders : null,
+        quality: qualityNameOf(entry),
+      });
     }
   }
 
-  const dropped: { title: string; reason: string }[] = [];
+  const dropped: DroppedCandidateView[] = [];
   const rawDropped = candidatesJson.dropped;
   if (Array.isArray(rawDropped)) {
     for (const raw of rawDropped) {
@@ -360,4 +425,22 @@ function parseCandidates(candidatesJson: Record<string, unknown> | null): {
   }
 
   return { kept, dropped };
+}
+
+function qualityNameOf(entry: Record<string, unknown>): string | null {
+  const quality = entry.quality;
+  if (typeof quality !== 'object' || quality === null) return null;
+  const inner = Reflect.get(quality, 'quality');
+  if (typeof inner !== 'object' || inner === null) return null;
+  const name = Reflect.get(inner, 'name');
+  return typeof name === 'string' ? name : null;
+}
+
+function formatKeptLine(c: KeptCandidateView): string {
+  const parts = [c.title];
+  if (c.quality) parts.push(c.quality);
+  if (c.size !== null) parts.push(formatReleaseSize(c.size));
+  if (c.seeders !== null) parts.push(`${c.seeders} seeders`);
+  if (c.indexer) parts.push(c.indexer);
+  return parts.join(' · ');
 }
