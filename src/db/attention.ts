@@ -160,6 +160,45 @@ export class AttentionItems {
     return tx();
   }
 
+  /**
+   * Closes every open row of `kinds` whose data points at this target, using exactly the
+   * key `open()` dedupes on, so a per-season item resolves per season and its siblings
+   * stay put.
+   *
+   * The first resolution path that is not a human clicking something. Until this existed
+   * nothing in the pipelines could retract an item, so a season that later turned out to
+   * be fine left its "no releases found" sitting open forever.
+   */
+  resolveForTarget(input: {
+    kinds: string[];
+    instance: unknown;
+    targetKind: unknown;
+    targetId: unknown;
+    dedupeKey?: string;
+  }): number {
+    if (input.kinds.length === 0) return 0;
+    const key: TargetKey = {
+      instance: input.instance,
+      targetKind: input.targetKind,
+      targetId: input.targetId,
+      dedupeKey: normalizeDedupeKey(input.dedupeKey),
+    };
+    const placeholders = input.kinds.map(() => '?').join(', ');
+    const tx = this.db.transaction((): number => {
+      const rows = this.db
+        .prepare(`SELECT id, data FROM attention_items WHERE status = 'open' AND kind IN (${placeholders})`)
+        .all(...input.kinds) as { id: number; data: string }[];
+      const matching = rows.filter((r) => sameTarget(JSON.parse(r.data) as Record<string, unknown>, key));
+      for (const row of matching) {
+        this.db
+          .prepare(`UPDATE attention_items SET status = 'resolved', resolved_at = ? WHERE id = ? AND status = 'open'`)
+          .run(Date.now(), row.id);
+      }
+      return matching.length;
+    });
+    return tx();
+  }
+
   list(opts?: { status?: AttentionStatus }): AttentionRow[] {
     let sql = 'SELECT * FROM attention_items';
     const params: unknown[] = [];

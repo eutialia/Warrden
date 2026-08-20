@@ -279,4 +279,82 @@ describe('AttentionItems', () => {
       expect(items.listByJob(99)).toEqual([]);
     });
   });
+
+  it('resolveForTarget closes matching open rows and reports how many', () => {
+    const items = new AttentionItems(freshDb());
+    items.open({
+      kind: 'acquire.no-candidates',
+      message: 'nothing for season 1',
+      jobId: 1,
+      data: { instance: 'Sonarr', targetKind: 'series', targetId: 142, dedupeKey: '1' },
+    });
+
+    const closed = items.resolveForTarget({
+      kinds: ['acquire.no-candidates', 'acquire.none-viable'],
+      instance: 'Sonarr',
+      targetKind: 'series',
+      targetId: 142,
+      dedupeKey: '1',
+    });
+
+    expect(closed).toBe(1);
+    expect(items.list({ status: 'open' })).toHaveLength(0);
+    expect(items.list({ status: 'resolved' })).toHaveLength(1);
+  });
+
+  it('resolveForTarget leaves another season of the same series alone', () => {
+    const items = new AttentionItems(freshDb());
+    const base = { instance: 'Sonarr', targetKind: 'series', targetId: 142 };
+    items.open({ kind: 'acquire.no-candidates', message: 's1', data: { ...base, dedupeKey: '1' } });
+    items.open({ kind: 'acquire.no-candidates', message: 's2', data: { ...base, dedupeKey: '2' } });
+
+    expect(items.resolveForTarget({ kinds: ['acquire.no-candidates'], ...base, dedupeKey: '1' })).toBe(1);
+
+    const open = items.list({ status: 'open' });
+    expect(open).toHaveLength(1);
+    expect(open[0]!.message).toBe('s2');
+  });
+
+  it('resolveForTarget leaves a different target alone', () => {
+    const items = new AttentionItems(freshDb());
+    items.open({
+      kind: 'acquire.no-candidates',
+      message: 'other series',
+      data: { instance: 'Sonarr', targetKind: 'series', targetId: 999, dedupeKey: '1' },
+    });
+
+    expect(
+      items.resolveForTarget({ kinds: ['acquire.no-candidates'], instance: 'Sonarr', targetKind: 'series', targetId: 142, dedupeKey: '1' }),
+    ).toBe(0);
+    expect(items.list({ status: 'open' })).toHaveLength(1);
+  });
+
+  it('resolveForTarget ignores kinds it was not asked about', () => {
+    const items = new AttentionItems(freshDb());
+    items.open({
+      kind: 'ingest.settle-timeout',
+      message: 'stuck',
+      data: { instance: 'Sonarr', targetKind: 'series', targetId: 142 },
+    });
+
+    expect(
+      items.resolveForTarget({ kinds: ['acquire.no-candidates'], instance: 'Sonarr', targetKind: 'series', targetId: 142 }),
+    ).toBe(0);
+    expect(items.list({ status: 'open' })).toHaveLength(1);
+  });
+
+  it('resolveForTarget does not reopen a row someone already dismissed', () => {
+    const items = new AttentionItems(freshDb());
+    const row = items.open({
+      kind: 'acquire.no-candidates',
+      message: 'dismissed already',
+      data: { instance: 'Sonarr', targetKind: 'series', targetId: 142 },
+    });
+    items.setStatus(row.id, 'dismissed');
+
+    expect(
+      items.resolveForTarget({ kinds: ['acquire.no-candidates'], instance: 'Sonarr', targetKind: 'series', targetId: 142 }),
+    ).toBe(0);
+    expect(items.list({ status: 'dismissed' })).toHaveLength(1);
+  });
 });
