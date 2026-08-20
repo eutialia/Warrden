@@ -23,8 +23,9 @@ export const PHASES: readonly Phase[] = ['acquire', 'ingest', 'subtitle'];
 const SETTLED_OUTCOMES = new Set<AcquireStatus>(['grabbed', 'already-satisfied']);
 
 /** Composite key for grouping jobs by arr target. NUL is the separator because
- * an instance named `a` with kind `b:c` must not collide with one named `a:b`
- * with kind `c`, which a printable separator like `:` or `-` would allow. */
+ * `arr_instance` is free text and could contain a printable delimiter.
+ * `target_kind` is a closed two-value enum and `target_id` is numeric, so those
+ * cannot contribute a collision. */
 export function jobTargetKey(job: { arr_instance: string; target_kind: string; target_id: number }): string {
   return `${job.arr_instance}\0${job.target_kind}\0${job.target_id}`;
 }
@@ -78,9 +79,10 @@ export function phaseTone(runs: Job[]): Tone {
 export function phaseSummary(phase: Phase, runs: Job[]): string {
   if (runs.length === 0) return 'not run';
   if (phase === 'acquire') {
-    const grabbed = runs.filter((r) => r.acquireOutcome === 'grabbed').length;
-    if (grabbed > 0) return `grabbed after ${runs.length} ${runs.length === 1 ? 'try' : 'tries'}`;
-    return `${runs.length} ${runs.length === 1 ? 'try' : 'tries'}, nothing grabbed`;
+    const tries = `${runs.length} ${runs.length === 1 ? 'try' : 'tries'}`;
+    const settled = runs.some((r) => r.acquireOutcome != null && SETTLED_OUTCOMES.has(r.acquireOutcome));
+    if (settled) return `settled after ${tries}`;
+    return `${tries}, nothing grabbed`;
   }
   return `${runs.length} run${runs.length === 1 ? '' : 's'}`;
 }
