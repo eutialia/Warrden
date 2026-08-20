@@ -868,6 +868,60 @@ describe('runAcquireJob: a season the arr already has', () => {
   });
 });
 
+describe('runAcquireJob: settling stale review items', () => {
+  it('closes the open no-candidates item once the season turns out to be satisfied', async () => {
+    const client = fakeArrClient({
+      series: [
+        seriesResource({
+          id: 42,
+          seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeCount: 12, totalEpisodeCount: 12, episodeFileCount: 12 } }],
+        }),
+      ],
+    });
+    const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([]) });
+    const items = new AttentionItems(ctx.db);
+    items.open({
+      kind: 'acquire.no-candidates',
+      message: 'No usable releases found for "Frieren Season 1"',
+      data: { instance: 'sonarr', targetKind: 'series', targetId: 42, seasonNumber: 1, dedupeKey: '1' },
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+
+    await runAcquireJob(ctx, job);
+
+    expect(items.list({ status: 'open' })).toHaveLength(0);
+    expect(items.list({ status: 'resolved' })).toHaveLength(1);
+  });
+
+  it('closes the open item once a grab lands', async () => {
+    const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
+    const items = new AttentionItems(ctx.db);
+    items.open({
+      kind: 'acquire.none-viable',
+      message: "Couldn't pick a release",
+      data: { instance: 'sonarr', targetKind: 'series', targetId: 42, seasonNumber: 1, dedupeKey: '1' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(items.list({ status: 'open' })).toHaveLength(0);
+  });
+
+  it("leaves another season's open item alone", async () => {
+    const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
+    const items = new AttentionItems(ctx.db);
+    items.open({
+      kind: 'acquire.none-viable',
+      message: 'season 2 still stuck',
+      data: { instance: 'sonarr', targetKind: 'series', targetId: 42, seasonNumber: 2, dedupeKey: '2' },
+    });
+
+    await runAcquireJob(ctx, job);
+
+    expect(items.list({ status: 'open' })).toHaveLength(1);
+  });
+});
+
 // The seam this whole mechanism exists for: the runner, the acquire pipeline and the cache
 // meeting on one real permanent provider error, rather than each half proved in isolation.
 describe('runAcquireJob under startRunner: a permanent LLM error', () => {

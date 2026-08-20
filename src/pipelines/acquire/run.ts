@@ -2,6 +2,7 @@ import type { ArrApi, EpisodeResource, ReleaseCandidate, SeasonResource } from '
 import { traceArrClient } from '../../arr/traced.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
+import { AttentionItems } from '../../db/attention.js';
 import { targetEventData } from '../../events/target.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolvePayloadTitle, resolveTargetTitle } from '../targetTitle.js';
@@ -230,6 +231,7 @@ async function runSeriesAcquire(
         message: `Nothing to grab for "${title}" Season ${season.seasonNumber}: every aired episode is already on disk`,
         data: targetEventData(job, { seasonNumber: season.seasonNumber }),
       });
+      settleSeasonAttention(ctx, job, season.seasonNumber);
       continue;
     }
 
@@ -302,6 +304,7 @@ async function runSeriesAcquire(
         reasoning: result.reasoning,
         candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
       });
+      settleSeasonAttention(ctx, job, season.seasonNumber);
       ctx.events.append({
         kind: 'acquire.grabbed',
         jobId: job.id,
@@ -536,6 +539,19 @@ function resolveSource(job: JobRow): string {
 function resolveHint(job: JobRow): string | undefined {
   const hint = job.payload.hint;
   return typeof hint === 'string' && hint.length > 0 ? hint : undefined;
+}
+
+/** Retracts the review items this target raised, now that the season no longer needs one.
+ * Scoped by the same season-level dedupe key `appendNonGrabAttentionEvent` emits with, so
+ * settling season 1 never silences season 2. */
+function settleSeasonAttention(ctx: AppContext, job: JobRow, seasonNumber?: number): void {
+  new AttentionItems(ctx.db).resolveForTarget({
+    kinds: ['acquire.no-candidates', 'acquire.none-viable'],
+    instance: job.arr_instance,
+    targetKind: job.target_kind,
+    targetId: job.target_id,
+    dedupeKey: seasonNumber === undefined ? undefined : String(seasonNumber),
+  });
 }
 
 function recordOutcome(ctx: AppContext, job: JobRow, input: RecordOutcomeInput): void {
