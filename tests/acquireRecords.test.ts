@@ -99,4 +99,29 @@ describe('AcquireRecords', () => {
       });
     });
   });
+
+  describe('outcomeForJob with already-satisfied', () => {
+    it('reports already-satisfied when that is the only thing the job recorded', () => {
+      const db = freshDb();
+      const records = new AcquireRecords(db);
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'already-satisfied' });
+      expect(records.outcomeForJob('sonarr', 'series', 42, 0)).toBe('already-satisfied');
+    });
+
+    it('prefers a grab, because one season landing matters more than another needing nothing', () => {
+      const db = freshDb();
+      const records = new AcquireRecords(db);
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'already-satisfied' });
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'grabbed' });
+      expect(records.outcomeForJob('sonarr', 'series', 42, 0)).toBe('grabbed');
+    });
+
+    it('ranks already-satisfied below every outcome that wants a human', () => {
+      const db = freshDb();
+      const records = new AcquireRecords(db);
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'already-satisfied' });
+      records.insert({ arrInstance: 'sonarr', targetKind: 'series', targetId: 42, status: 'no-candidates' });
+      expect(records.outcomeForJob('sonarr', 'series', 42, 0)).toBe('no-candidates');
+    });
+  });
 });

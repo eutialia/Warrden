@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { TargetKind } from '../jobs/queue.js';
 
-export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed';
+export type AcquireStatus = 'no-candidates' | 'none-viable' | 'grabbed' | 'already-satisfied';
 
 interface InsertAcquireRecordInput {
   arrInstance: string;
@@ -111,12 +111,12 @@ export class AcquireRecords {
   /**
    * Aggregate outcome for one job's own run against this target: `'grabbed'` if any record
    * that job itself produced (`created_at >= sinceCreatedAt`, the job's own `created_at`) is
-   * `'grabbed'`, else `'none-viable'` if any is that, else `'no-candidates'` if any record
-   * exists at all, else `null` (no record yet — the job hasn't run, or crashed before
-   * recording anything). Needed because a multi-season series job (`runAcquireJob`'s series
-   * branch, `src/pipelines/acquire/run.ts`) writes one row per season: the single latest row
-   * alone doesn't tell you "did *any* season grab" when a later season's own outcome was
-   * worse than an earlier one's.
+   * `'grabbed'`, else `'none-viable'` if any is that, else `'no-candidates'` if any is that,
+   * else `'already-satisfied'` if any record exists at all, else `null` (no record yet - the
+   * job hasn't run, or crashed before recording anything). Needed because a multi-season
+   * series job (`runAcquireJob`'s series branch, `src/pipelines/acquire/run.ts`) writes one
+   * row per season: the single latest row alone doesn't tell you "did *any* season grab"
+   * when a later season's own outcome was worse than an earlier one's.
    */
   outcomeForJob(
     arrInstance: string,
@@ -139,6 +139,9 @@ export class AcquireRecords {
     if (rows.some((r) => r.status === 'grabbed')) return 'grabbed';
     if (rows.some((r) => r.status === 'none-viable')) return 'none-viable';
     if (rows.some((r) => r.status === 'no-candidates')) return 'no-candidates';
+    // Last on purpose: "we already had it" is the least noteworthy thing a run can
+    // report, so any season that actually wants attention outranks it.
+    if (rows.some((r) => r.status === 'already-satisfied')) return 'already-satisfied';
     return null;
   }
 }
