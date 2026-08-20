@@ -1,26 +1,26 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'lucide-react';
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
+import { ActivityList } from '@/components/activity/ActivityList';
+import { TargetDrawer } from '@/components/activity/TargetDrawer';
 import { MountHealth, unreachableCount } from '@/components/MountHealth';
 import { PageHeader } from '@/components/PageHeader';
 import { StatBand, StatTile } from '@/components/StatTile';
-import { StatusBadge, PipelineBadge } from '@/components/StatusBadge';
 import { StatusNotice } from '@/components/StatusNotice';
 import { StatusDot } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { jobTitle } from '@/lib/jobs';
-import { storageStatusLabel, storageStatusTone, targetKindLabel } from '@/lib/labels';
+import { foldJobsByTarget } from '@/lib/jobs';
+import { storageStatusLabel, storageStatusTone } from '@/lib/labels';
 import { TONE_SOFT, TONE_TEXT, type Tone } from '@/lib/tone';
-import { cn, formatElapsed, formatUsage } from '@/lib/utils';
+import { cn, formatUsage } from '@/lib/utils';
 
-const RECENT_JOBS = 6;
+const RECENT_JOBS = 40;
 
 interface Verdict {
   tone: Tone;
@@ -80,6 +80,11 @@ export default function Overview() {
   const { data, error, loading, refetch } = useOverview();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobsLoaded, setJobsLoaded] = useState(false);
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const openGroup = useMemo(() => {
+    if (openKey === null) return null;
+    return foldJobsByTarget(jobs).find((g) => g.key === openKey) ?? null;
+  }, [jobs, openKey]);
 
   const beginFetch = useFetchGeneration();
   const loadJobs = useCallback(() => {
@@ -216,43 +221,7 @@ export default function Overview() {
                 Nothing yet. Add a series or movie in Sonarr/Radarr and Warrden will pick it up.
               </p>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead>Title</TableHead>
-                    <TableHead className="w-36">Work</TableHead>
-                    <TableHead className="w-32">State</TableHead>
-                    <TableHead className="w-16 text-right">Age</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {jobs.map((job) => (
-                    // The whole row is the hit area, but the link is a real link: a row
-                    // with an onClick can't be tabbed to, opened in a new tab, or copied.
-                    // `relative` on <tr> is ignored, so the overlay would cover the table
-                    // and only the last row would receive clicks. A transform contains it.
-                    <TableRow key={job.id} className="cursor-pointer [transform:translateZ(0)]">
-                      <TableCell className="max-w-0">
-                        <Link to={`/jobs/${job.id}`} className="truncate font-medium after:absolute after:inset-0">
-                          {jobTitle(job)}
-                        </Link>
-                        <div className="truncate text-xs text-muted-foreground">
-                          {job.arr_instance} · {targetKindLabel(job.target_kind)}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <PipelineBadge pipeline={job.pipeline} />
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={job.status} />
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs text-muted-foreground tabular-nums">
-                        {formatElapsed(job.created_at)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <ActivityList jobs={jobs} dense limit={5} onOpen={(g) => setOpenKey(g.key)} />
             )}
           </CardContent>
         </Card>
@@ -316,6 +285,8 @@ export default function Overview() {
         </Card>
         </div>
       </div>
+
+      <TargetDrawer group={openGroup} onClose={() => setOpenKey(null)} />
     </div>
   );
 }

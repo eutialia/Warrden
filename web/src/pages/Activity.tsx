@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { ListChecks, Search } from 'lucide-react';
 import { apiErrorMessage, fetchJobs, type Job, type JobStatus } from '@/api';
-import { AcquireOutcomeBadge, PipelineBadge, StatusBadge } from '@/components/StatusBadge';
+import { ActivityList } from '@/components/activity/ActivityList';
+import { TargetDrawer } from '@/components/activity/TargetDrawer';
 import { PageHeader } from '@/components/PageHeader';
-import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Button } from '@/components/ui/button';
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
@@ -17,13 +17,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { groupJobsByDay, jobDuration, jobTitle } from '@/lib/jobs';
-import { jobStatusLabel, pipelineLabel, targetKindLabel } from '@/lib/labels';
-import { formatTimeOfDay } from '@/lib/utils';
+import { foldJobsByTarget, jobTitle, type TargetGroup } from '@/lib/jobs';
+import { jobStatusLabel, pipelineLabel } from '@/lib/labels';
 
 const PAGE_SIZE = 50;
 const PIPELINES = ['acquire', 'ingest', 'subtitle'] as const;
@@ -40,6 +37,12 @@ const STATUS_ITEMS: Record<string, string> = {
   ...Object.fromEntries(STATUSES.map((s) => [s, jobStatusLabel(s)])),
 };
 
+function parseRunId(value: string | null): number | null {
+  if (value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -48,6 +51,7 @@ export default function Activity() {
   const [query, setQuery] = useState('');
   const [pipeline, setPipeline] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
@@ -85,14 +89,46 @@ export default function Activity() {
     });
   }, [jobs, query, pipeline, status]);
 
-  const days = useMemo(() => groupJobsByDay(visible), [visible]);
   const filtered = query.trim() !== '' || pipeline !== ALL || status !== ALL;
+
+  // Resolve against the unfiltered window so a deep link still opens after the
+  // list is narrowed, and so the drawer shows every run for that target.
+  const openGroup = useMemo(() => {
+    const target = searchParams.get('target');
+    if (!target) return null;
+    const group = foldJobsByTarget(jobs).find((g) => g.key === target);
+    if (!group) return null;
+    const runId = parseRunId(searchParams.get('run'));
+    if (runId !== null && !group.runs.some((job) => job.id === runId)) return null;
+    return group;
+  }, [jobs, searchParams]);
+
+  const onOpen = useCallback(
+    (group: TargetGroup) => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('target', group.key);
+        next.delete('run');
+        return next;
+      });
+    },
+    [setSearchParams],
+  );
+
+  const onClose = useCallback(() => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('target');
+      next.delete('run');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
 
   return (
     <div className="space-y-4">
       <PageHeader
         title="Activity"
-        description="Every job Warrden has run — finding releases, cleaning up imports, and fetching subtitles. Select a row for the full story."
+        description="One row per title, covering every find, import, and subtitle run. Select a row for the full story."
       />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -133,107 +169,47 @@ export default function Activity() {
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       <div>
-          {loading && jobs.length === 0 ? (
-            <div className="space-y-3 py-4">
-              {Array.from({ length: 6 }, (_, i) => (
-                <Skeleton key={i} className="h-12 w-full" />
-              ))}
-            </div>
-          ) : visible.length === 0 ? (
-            <Empty className="py-12">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <ListChecks />
-                </EmptyMedia>
-                <EmptyTitle>{filtered ? 'No jobs match those filters' : 'No jobs yet'}</EmptyTitle>
-                <EmptyDescription>
-                  {filtered
-                    ? 'Try widening the search or clearing the filters.'
-                    : 'Add a series or movie in Sonarr/Radarr, or wait for the next import to land.'}
-                </EmptyDescription>
-              </EmptyHeader>
-              {filtered && (
-                <EmptyContent>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setQuery('');
-                      setPipeline(ALL);
-                      setStatus(ALL);
-                    }}
-                  >
-                    Clear filters
-                  </Button>
-                </EmptyContent>
-              )}
-            </Empty>
-          ) : (
-            <SectionStack>
-              {days.map((day) => (
-                <div key={day.key}>
-                  <div className="flex items-baseline justify-between gap-4">
-                    <h2 className="font-serif text-xl">{day.label}</h2>
-                    <span className="text-xs text-muted-foreground">
-                      {day.jobs.length} run{day.jobs.length === 1 ? '' : 's'}
-                      {day.failed > 0 ? ` · ${day.failed} failed` : ''}
-                    </span>
-                  </div>
-                  <Table className="mt-3">
-                    <TableHeader>
-                      <TableRow className="hover:bg-transparent">
-                        <TableHead className="w-16">Time</TableHead>
-                        <TableHead>Title</TableHead>
-                        <TableHead className="w-40">Work</TableHead>
-                        <TableHead className="w-56">Status</TableHead>
-                        <TableHead className="w-20 text-right">Took</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {day.jobs.map((job) => (
-                        // The row is the hit area; the title is the actual link, so the
-                        // job can be tabbed to, opened in a new tab, or copied.
-                        // `relative` on <tr> is ignored, so the overlay would cover the
-                        // table and only the last row would receive clicks. A transform
-                        // contains it.
-                        <TableRow key={job.id} className="cursor-pointer [transform:translateZ(0)]">
-                          <TableCell className="font-mono text-xs text-muted-foreground tabular-nums">
-                            <Tooltip>
-                              <TooltipTrigger render={<span>{formatTimeOfDay(job.updated_at)}</span>} />
-                              <TooltipContent>{new Date(job.updated_at).toLocaleString()}</TooltipContent>
-                            </Tooltip>
-                          </TableCell>
-                          <TableCell>
-                            <Link to={`/jobs/${job.id}`} className="font-medium after:absolute after:inset-0">
-                              {jobTitle(job)}
-                            </Link>
-                            <div className="text-xs text-muted-foreground">
-                              {job.arr_instance} · {targetKindLabel(job.target_kind)}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <PipelineBadge pipeline={job.pipeline} />
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <StatusBadge status={job.status} />
-                              <AcquireOutcomeBadge outcome={job.acquireOutcome} />
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground tabular-nums">
-                            {jobDuration(job) ?? '—'}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              ))}
-            </SectionStack>
-          )}
+        {loading && jobs.length === 0 ? (
+          <div className="space-y-3 py-4">
+            {Array.from({ length: 6 }, (_, i) => (
+              <Skeleton key={i} className="h-12 w-full" />
+            ))}
+          </div>
+        ) : visible.length === 0 ? (
+          <Empty className="py-12">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <ListChecks />
+              </EmptyMedia>
+              <EmptyTitle>{filtered ? 'No titles match those filters' : 'No activity yet'}</EmptyTitle>
+              <EmptyDescription>
+                {filtered
+                  ? 'Try widening the search or clearing the filters.'
+                  : 'Add a series or movie in Sonarr/Radarr, or wait for the next import to land.'}
+              </EmptyDescription>
+            </EmptyHeader>
+            {filtered && (
+              <EmptyContent>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setQuery('');
+                    setPipeline(ALL);
+                    setStatus(ALL);
+                  }}
+                >
+                  Clear filters
+                </Button>
+              </EmptyContent>
+            )}
+          </Empty>
+        ) : (
+          <ActivityList jobs={visible} onOpen={onOpen} />
+        )}
       </div>
 
-      {/* Only offered when the server actually filled the window — otherwise there is
+      {/* Only offered when the server actually filled the window. Otherwise there is
           demonstrably nothing more to fetch. */}
       {jobs.length >= limit && (
         <div className="flex justify-center">
@@ -242,6 +218,8 @@ export default function Activity() {
           </Button>
         </div>
       )}
+
+      <TargetDrawer group={openGroup} onClose={onClose} />
     </div>
   );
 }
