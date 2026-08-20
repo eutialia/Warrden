@@ -37,12 +37,6 @@ const STATUS_ITEMS: Record<string, string> = {
   ...Object.fromEntries(STATUSES.map((s) => [s, jobStatusLabel(s)])),
 };
 
-function parseRunId(value: string | null): number | null {
-  if (value === null || value === '') return null;
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
 export default function Activity() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [limit, setLimit] = useState(PAGE_SIZE);
@@ -93,14 +87,13 @@ export default function Activity() {
 
   // Resolve against the unfiltered window so a deep link still opens after the
   // list is narrowed, and so the drawer shows every run for that target.
+  // A stale `run` is ignored: a job can be pruned while a link to it survives,
+  // and the drawer should still open at its default phase. An unknown `target`
+  // opens nothing.
   const openGroup = useMemo(() => {
     const target = searchParams.get('target');
     if (!target) return null;
-    const group = foldJobsByTarget(jobs).find((g) => g.key === target);
-    if (!group) return null;
-    const runId = parseRunId(searchParams.get('run'));
-    if (runId !== null && !group.runs.some((job) => job.id === runId)) return null;
-    return group;
+    return foldJobsByTarget(jobs).find((g) => g.key === target) ?? null;
   }, [jobs, searchParams]);
 
   const onOpen = useCallback(

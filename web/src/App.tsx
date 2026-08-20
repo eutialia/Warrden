@@ -1,20 +1,54 @@
+import { useEffect } from 'react';
 import { ThemeProvider } from 'next-themes';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { fetchJob } from '@/api';
 import { AppHeader } from '@/components/AppHeader';
 import { AppSidebar } from '@/components/AppSidebar';
 import { DebugFrame } from '@/components/DebugFrame';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Toaster } from '@/components/ui/sonner';
 import { OverviewProvider } from '@/hooks/useOverview';
+import { jobTargetKey } from '@/lib/jobs';
 import Activity from '@/pages/Activity';
 import Attention from '@/pages/Attention';
 import ConfigPage from '@/pages/Config';
 import DebugPage from '@/pages/Debug';
-import JobDetail from '@/pages/JobDetail';
 import ManagedObjects from '@/pages/ManagedObjects';
 import NotFound from '@/pages/NotFound';
 import Overview from '@/pages/Overview';
 import Sites from '@/pages/Sites';
+
+/** Needs review still links by job id, and bookmarks exist. Fetch the job, fold it
+ * into the target key the drawer already understands, then replace this URL so
+ * back does not restage the hop. A missing job goes to the list, not an error. */
+function JobRedirect() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!id) {
+      navigate('/activity', { replace: true });
+      return;
+    }
+    fetchJob(id)
+      .then((result) => {
+        if (cancelled) return;
+        const key = jobTargetKey(result.job);
+        navigate(`/activity?target=${encodeURIComponent(key)}&run=${id}`, { replace: true });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        navigate('/activity', { replace: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, navigate]);
+
+  return <Skeleton className="h-40 w-full" />;
+}
 
 export default function App() {
   return (
@@ -34,7 +68,7 @@ export default function App() {
                     <Route path="/" element={<Overview />} />
                     <Route path="/activity" element={<Activity />} />
                     <Route path="/attention" element={<Attention />} />
-                    <Route path="/jobs/:id" element={<JobDetail />} />
+                    <Route path="/jobs/:id" element={<JobRedirect />} />
                     <Route path="/managed" element={<ManagedObjects />} />
                     <Route path="/sites" element={<Sites />} />
                     <Route path="/config" element={<ConfigPage />} />

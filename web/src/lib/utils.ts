@@ -35,11 +35,6 @@ export function formatElapsed(ts: number): string {
   return `${Math.round(hours / 24)}d`;
 }
 
-/** Clock time for a row inside a day-grouped list, where the day is already the heading. */
-export function formatTimeOfDay(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-}
-
 /** Compact relative time for a past epoch-ms: "just now", "5m ago", "3h ago", "2d ago".
  * Falls back to a locale string past 30 days, where "45d ago" stops being more useful than
  * the actual date. Returns an em dash for null (the site-profiles table's never-seen columns). */

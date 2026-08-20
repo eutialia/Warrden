@@ -102,14 +102,20 @@ function QuietRun({ job, events }: { job: Job; events: EventRow[] }) {
   return <p className="text-xs text-muted-foreground">No files placed for this run.</p>;
 }
 
-function ReleasePick({ record }: { record: AcquireRecordDetail }) {
+function ReleasePick({
+  record,
+  showOutcome,
+}: {
+  record: AcquireRecordDetail;
+  showOutcome: boolean;
+}) {
   const picked = record.picked;
   const [open, setOpen] = useState(false);
   const { kept, dropped } = parseCandidates(record.candidates_json);
 
   return (
     <div className="space-y-3">
-      {record.status && (
+      {showOutcome && record.status && (
         <dl className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
           <Fact label="Outcome">{acquireOutcomeLabel(record.status)}</Fact>
         </dl>
@@ -302,7 +308,9 @@ export function RunDetail({ jobId }: { jobId: number }) {
         <p className={cn('rounded-lg border p-2.5 text-xs', TONE_SOFT.danger)}>{job.error ?? 'Failed'}</p>
       )}
       {acquireRecords.map((rec) => (
-        <ReleasePick key={rec.id} record={rec} />
+        // A single record's Outcome is the same sentence as the node headline.
+        // The fact exists for multi-season jobs, where each row can differ.
+        <ReleasePick key={rec.id} record={rec} showOutcome={acquireRecords.length > 1} />
       ))}
       {placedFiles.map((f) => (
         <PlacedFile key={f.id} file={f} />
