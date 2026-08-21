@@ -33,7 +33,7 @@ interface Verdict {
 
 /**
  * The one sentence the home screen exists to produce. Ordered by how much a human
- * needs to act: a broken mount stops all filesystem work, a review backlog is
+ * needs to act: a broken storage path stops all filesystem work, a review backlog is
  * waiting on a decision, failures are informational after the fact.
  */
 function verdictOf(data: OverviewData): Verdict {
@@ -41,9 +41,9 @@ function verdictOf(data: OverviewData): Verdict {
   if (bad > 0) {
     return {
       tone: 'danger',
-      headline: `${bad} storage ${bad === 1 ? 'mount is' : 'mounts are'} unreachable`,
-      detail: 'Warrden pauses filesystem work until the mounts come back. Check the container bind mounts.',
-      action: { label: 'Check mounts', to: '/config#storage' },
+      headline: `${bad} storage ${bad === 1 ? 'path is' : 'paths are'} unreachable`,
+      detail: 'Warrden pauses filesystem work until the paths come back. Check the paths under Settings, Storage.',
+      action: { label: 'Check storage', to: '/config#storage' },
     };
   }
   if (data.attention.open > 0) {
@@ -72,7 +72,7 @@ function verdictOf(data: OverviewData): Verdict {
   return {
     tone: 'success',
     headline: 'Everything is running clean',
-    detail: 'Nothing needs review, the queue is empty, and every mount is reachable.',
+    detail: 'Nothing needs review, the queue is empty, and every storage path is reachable.',
   };
 }
 

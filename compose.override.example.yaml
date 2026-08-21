@@ -1,6 +1,16 @@
-# Per-machine mounts. Copy to compose.override.yaml (git-ignored) and point the host
-# paths at this machine's NAS mounts. The container paths are fixed: Warrden always
-# expects exactly these four (see README, "Quickstart").
+# Only Docker on Linux needs this file. The Docker daemon runs as root and cannot read a
+# GVFS mount, which belongs to your user session, so Docker mounts the SMB shares itself
+# and needs SMB_USERNAME and SMB_PASSWORD in .env.
+#
+# To drop the credentials, mount the shares system-wide with /etc/fstab or a systemd
+# .mount unit, then bind-mount the resulting host path here instead.
+#
+# Running Warrden directly, or in an LXC where the shares are already in the filesystem,
+# needs neither this file nor .env. Set the four paths under Settings, Storage.
+#
+# Copy this file to compose.override.yaml (git-ignored) and point the host paths at
+# this machine's NAS mounts. The container paths are fixed: Warrden always expects
+# exactly these four (see README, "Quickstart").
 #
 #   /tv        Sonarr Series root folder
 #   /anime     Sonarr Anime root folder

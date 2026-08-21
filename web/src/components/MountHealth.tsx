@@ -10,7 +10,8 @@ export function unreachableCount(checks: { status: string }[]): number {
 }
 
 /**
- * The one-line verdict on the mounts, shown by both the home screen and Settings.
+ * The one-line verdict on the storage roles, shown by both the home screen and
+ * Settings.
  *
  * Renders nothing until a probe has actually answered: "All reachable" over an empty
  * list is a claim about something nobody measured, and it sat above rows saying the
@@ -19,5 +20,8 @@ export function unreachableCount(checks: { status: string }[]): number {
 export function MountHealth({ checks }: { checks: StorageCheck[] }) {
   if (checks.length === 0) return null;
   const bad = unreachableCount(checks);
-  return <ToneBadge tone={bad > 0 ? 'danger' : 'success'}>{bad > 0 ? `${bad} unreachable` : 'All reachable'}</ToneBadge>;
+  const configured = checks.filter((c) => c.status !== 'not-configured').length;
+  if (bad > 0) return <ToneBadge tone="danger">{`${bad} unreachable`}</ToneBadge>;
+  if (configured === 0) return <ToneBadge tone="neutral">No storage set</ToneBadge>;
+  return <ToneBadge tone="success">All reachable</ToneBadge>;
 }
