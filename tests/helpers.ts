@@ -675,8 +675,8 @@ export function ingestFixture(opts?: {
         { from: libraryDir, to: libraryDir },
       ],
       // The fixture's tmpdirs stand in for the real libraries so a test never depends on
-      // /tv or /downloads existing on the machine running it. Series and Movies are blank
-      // because this fixture has one library dir, and a blank role is simply not checked.
+      // /tv or /downloads existing on the machine running it. Series, Anime and Movies are
+      // blank because this fixture has one library dir, and a blank role is not checked.
       storage: opts?.storage ?? { series: '', anime: '', movies: '', downloads: downloadsDir },
     }),
     // Ingest now enqueues a follow-on subtitle job for series targets; the real runner

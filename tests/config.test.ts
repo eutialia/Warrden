@@ -25,9 +25,6 @@ describe('config store', () => {
     cfg.pathMappings.push({ from: '/mnt/nas/downloads', to: '/downloads' });
     saveConfig(dir, cfg);
     expect(loadConfig(dir)).toEqual(cfg);
-    // A fresh parse must not see the mutation above: proves pathMappings' default isn't
-    // a shared reference across parses.
-    expect(loadConfig(tmp()).pathMappings).toEqual([]);
   });
 
   it('does not share nested default structure across parses', () => {
@@ -136,6 +133,18 @@ describe('config store', () => {
     // unknown keys, so they degrade to "no model configured". No migration code.
     const cfg = ConfigSchema.parse({ llm: { activeProfile: 'prod', profiles: { prod: { 'release-pick': { provider: 'openrouter', model: 'x' } } } } });
     expect(cfg.llm).toEqual({ keys: {} });
+  });
+
+  it('drops the legacy `ingest` block and fills storage with the container defaults', () => {
+    // The boot path for every install that predates configurable paths: those files carry
+    // `ingest.mountMarkers` / `ingest.downloadRoots` and no `storage` key at all. Unknown
+    // keys are stripped, and the defaults are the paths that config already behaved as if
+    // it had, so an existing Docker install keeps working with nothing edited.
+    const cfg = ConfigSchema.parse({
+      ingest: { mountMarkers: ['/tv', '/downloads'], downloadRoots: ['/downloads'] },
+    });
+    expect(cfg).not.toHaveProperty('ingest');
+    expect(cfg.storage).toEqual({ series: '/tv', anime: '/anime', movies: '/movies', downloads: '/downloads' });
   });
 
   it('drops the legacy `picking.tags` list rather than failing to load', () => {

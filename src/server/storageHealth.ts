@@ -1,7 +1,7 @@
 import { accessSync, constants, existsSync, statfsSync } from 'node:fs';
 import type { Config } from '../config/schema.js';
 import { storageRoles, type StorageRoleId } from '../config/storage.js';
-import { containingMount, isEmptyDir } from '../fs/mountPoint.js';
+import { containingMount, isEmptyDir, type StatDev } from '../fs/mountPoint.js';
 
 export type StorageCheckStatus = 'ok' | 'not-configured' | 'missing' | 'looks-unmounted' | 'unreadable';
 
@@ -27,9 +27,9 @@ let cached: { at: number; checks: StorageCheck[] } | null = null;
  * syscall against a network path, and Node has one thread: a hung NFS share would stall
  * webhooks and the job queue behind it, once per poll per open tab.
  */
-export function cachedStorage(config: Config, now = Date.now()): StorageCheck[] {
+export function cachedStorage(config: Config, now = Date.now(), stat?: StatDev): StorageCheck[] {
   if (cached && now - cached.at < CACHE_MS) return cached.checks;
-  const checks = probeStorage(config);
+  const checks = probeStorage(config, stat);
   cached = { at: now, checks };
   return checks;
 }
@@ -40,7 +40,10 @@ export function resetStorageCache(): void {
   cached = null;
 }
 
-export function probeStorage(config: Config): StorageCheck[] {
+/** `stat` is injectable so a test can prove the classification rather than the disk layout
+ * of the machine running it: whether a temp directory shares a device id with `/` differs
+ * between a Mac, CI, and a container. */
+export function probeStorage(config: Config, stat?: StatDev): StorageCheck[] {
   return storageRoles(config).map((role) => {
     if (!role.configured) {
       return {
@@ -51,7 +54,7 @@ export function probeStorage(config: Config): StorageCheck[] {
         detail: `No path set. Warrden skips ${role.label} entirely.`,
       };
     }
-    const access = probeAccess(role.path, role.label);
+    const access = probeAccess(role.path, role.label, stat);
     return {
       id: role.id,
       label: role.label,
@@ -93,7 +96,7 @@ function diskUsage(p: string): StorageCheck['usage'] {
  * is a directory inside the share, not the share itself. A directory on the root filesystem
  * with files in it passes too, which is media on a laptop's own disk.
  */
-function probeAccess(path: string, label: string): Pick<StorageCheck, 'status' | 'detail'> {
+function probeAccess(path: string, label: string, stat?: StatDev): Pick<StorageCheck, 'status' | 'detail'> {
   if (!existsSync(path)) {
     return { status: 'missing', detail: `${label} not found at ${path}` };
   }
@@ -104,7 +107,7 @@ function probeAccess(path: string, label: string): Pick<StorageCheck, 'status' |
     return { status: 'unreadable', detail: `${path} exists but Warrden cannot read it` };
   }
 
-  if (containingMount(path) === '/' && isEmptyDir(path)) {
+  if (containingMount(path, stat) === '/' && isEmptyDir(path)) {
     return {
       status: 'looks-unmounted',
       detail: `${path} is an empty directory on this machine's own filesystem, not a mounted share`,
