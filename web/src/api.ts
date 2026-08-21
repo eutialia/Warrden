@@ -209,6 +209,9 @@ export interface LlmModel {
   provider: Provider;
   model: string;
   effort?: Effort;
+  /** Operator-pinned request shape for a model whose catalog entry or route misbehaves. Set
+   * by hand in config.json; the settings page only has to carry it back unchanged. */
+  structuredOutput?: 'native' | 'json_object' | 'none';
 }
 
 /** One OpenRouter model as the picker needs it. Hand-copied from `CatalogModel` in

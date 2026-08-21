@@ -119,6 +119,25 @@ describe('config store', () => {
     );
   });
 
+  it.each(['native', 'json_object', 'none'] as const)('keeps llm.model.structuredOutput "%s" through a round-trip', (structuredOutput) => {
+    const dir = tmp();
+    const cfg = loadConfig(dir);
+    cfg.llm.model = { provider: 'openrouter', model: 'stealth/ox-alpha', structuredOutput };
+    saveConfig(dir, cfg);
+    expect(loadConfig(dir).llm.model).toEqual({ provider: 'openrouter', model: 'stealth/ox-alpha', structuredOutput });
+  });
+
+  it('leaves structuredOutput unset when the config does not pin one', () => {
+    const cfg = ConfigSchema.parse({ llm: { model: { provider: 'openrouter', model: 'x' } } });
+    expect(cfg.llm.model?.structuredOutput).toBeUndefined();
+  });
+
+  it('rejects a structuredOutput tier that is not one of the three request shapes', () => {
+    expect(ConfigSchema.safeParse({ llm: { model: { provider: 'openrouter', model: 'x', structuredOutput: 'json_schema' } } }).success).toBe(
+      false,
+    );
+  });
+
   it('drops the legacy `fallback` model rather than failing to load', () => {
     // Same shape as the `profiles` case below: an unknown key is stripped, not an error,
     // so a config still carrying the removed fallback model keeps its primary model.

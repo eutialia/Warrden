@@ -10,6 +10,13 @@ const LlmModelSchema = z.object({
   provider: ProviderSchema,
   model: z.string().min(1),
   effort: EffortSchema.optional(),
+  /**
+   * Pins the request shape for a model whose catalog entry or route misbehaves, overriding
+   * what OpenRouter declares about it. Unset is the normal case: the catalog decides. Set it
+   * when the declared shape is a lie, such as a route that answers `json_object` by stripping
+   * every literal "json" out of the text it returns.
+   */
+  structuredOutput: z.enum(['native', 'json_object', 'none']).optional(),
 });
 const ArrInstanceSchema = z.object({
   name: z.string().min(1),

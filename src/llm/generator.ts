@@ -80,6 +80,8 @@ export interface ModelRef {
   provider: Provider;
   model: string;
   effort?: Effort;
+  /** Operator-pinned request shape, overriding the catalog's for this model. */
+  structuredOutput?: StructuredOutputTier;
 }
 
 /**
@@ -281,6 +283,17 @@ export interface EffortIgnoredInfo {
   route: string | undefined;
 }
 
+/**
+ * What a failed parse leaves behind, for the trace payload. `errorMessage` alone reports that
+ * the answer didn't validate and nothing about the answer, so a route that mangles its own
+ * output reads exactly like a model that rambled. Empty for every other kind of failure,
+ * which has no generated text to show.
+ */
+function parseFailureDetail(err: unknown): Record<string, unknown> {
+  if (!NoObjectGeneratedError.isInstance(err)) return {};
+  return { text: err.text, finishReason: err.finishReason, usage: err.usage };
+}
+
 /** The routed upstream provider out of one `generateObject` result's provider metadata. */
 function routeOf(providerMetadata: unknown): string | undefined {
   const openrouter = (providerMetadata as { openrouter?: { provider?: unknown } } | undefined)?.openrouter;
@@ -338,10 +351,12 @@ export class AiSdkGenerator implements StructuredGenerator {
     capabilities: ModelCapabilities | undefined,
     call: StepHandle,
   ): Promise<T> {
-    // Nothing known falls back to the shape that works for the 336 models declaring
-    // structured_outputs. Safe only because `routingGuardBody` refuses to assert
-    // require_parameters on a guess.
-    const tier = capabilities?.structuredOutput ?? 'native';
+    // A pinned tier wins outright: it exists for the models whose declared shape is wrong, so
+    // deferring to the catalog there would defeat it. Nothing known at all falls back to the
+    // shape that works for the 336 models declaring structured_outputs. Safe only because
+    // `routingGuardBody` refuses to assert require_parameters on a guess, and an override is
+    // not catalog knowledge either: it says what to send, never what the endpoint declares.
+    const tier = ref.structuredOutput ?? capabilities?.structuredOutput ?? 'native';
     const attempt: StepHandle = opts.trace
       ? this.trace.begin({
           jobId: opts.trace.jobId,
@@ -388,7 +403,7 @@ export class AiSdkGenerator implements StructuredGenerator {
       }
       return result.object;
     } catch (err) {
-      attempt.end('error', () => ({ provider: ref.provider, model: ref.model, error: errorMessage(err) }));
+      attempt.end('error', () => ({ provider: ref.provider, model: ref.model, error: errorMessage(err), ...parseFailureDetail(err) }));
       throw err;
     }
   }

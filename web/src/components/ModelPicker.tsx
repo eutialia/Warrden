@@ -193,7 +193,10 @@ export function ModelPicker({
           }}
           onValueChange={(row) => {
             if (!row) return;
-            onChange({ provider: 'openrouter', model: row.model, ...(row.effort ? { effort: row.effort } : {}) });
+            // A pinned request shape belongs to one model: an effort change on the same
+            // model keeps it, picking another model drops it.
+            const pin = value?.model === row.model && value.structuredOutput ? { structuredOutput: value.structuredOutput } : {};
+            onChange({ provider: 'openrouter', model: row.model, ...(row.effort ? { effort: row.effort } : {}), ...pin });
           }}
         >
           <ComboboxTrigger id="llm-model" disabled={loading}>

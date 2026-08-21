@@ -462,6 +462,58 @@ describe('AiSdkGenerator structured-output tiers', () => {
   });
 });
 
+describe('AiSdkGenerator configured structured-output override', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  async function generateWithOverride(
+    capabilities: ModelCapabilities | undefined,
+    structuredOutput?: StructuredOutputTier,
+  ): Promise<ReturnType<typeof recordedCall>> {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({ object: { ok: true } });
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'stealth/ox-alpha', ...(structuredOutput ? { structuredOutput } : {}) };
+    await new AiSdkGenerator(() => cfg, NOOP_TRACER, undefined, async () => capabilities).generate({
+      callsite: 'release-pick',
+      schema,
+      system: 'Pick one option.',
+      prompt: 'p',
+    });
+    return recordedCall();
+  }
+
+  const jsonObject: ModelCapabilities = { structuredOutput: 'json_object', mandatoryReasoning: false };
+
+  // The reason the override exists: ox-alpha's route declares response_format, so the catalog
+  // says json_object, and under that shape it strips every literal "json" out of the answer.
+  it('sends no response_format and restates the schema when the config pins "none" over a json_object catalog entry', async () => {
+    const call = await generateWithOverride(jsonObject, 'none');
+    expect('response_format' in (call.settings.extraBody ?? {})).toBe(true);
+    expect(call.settings.extraBody?.response_format).toBeUndefined();
+    const system = String(call.instructions);
+    expect(system.startsWith('Pick one option.')).toBe(true);
+    expect(system).toContain(JSON.stringify(z.toJSONSchema(schema), null, 2));
+  });
+
+  it('leaves the catalog tier in charge when nothing is pinned', async () => {
+    const call = await generateWithOverride(jsonObject);
+    expect(call.settings.extraBody?.response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('pins the request shape over a catalog that would have sent json_schema', async () => {
+    const native: ModelCapabilities = { structuredOutput: 'native', mandatoryReasoning: false };
+    const call = await generateWithOverride(native, 'json_object');
+    expect(call.settings.extraBody?.response_format).toEqual({ type: 'json_object' });
+  });
+
+  // An override says what to send, not what the endpoint declares. require_parameters is an
+  // assertion about the latter, so pinning a tier must not start making it.
+  it('still sends no routing guard when the catalog knows nothing about the model', async () => {
+    const call = await generateWithOverride(undefined, 'json_object');
+    expect(call.settings.extraBody?.provider).toBeUndefined();
+  });
+});
+
 type EffortIgnoredMock = Mock<(info: EffortIgnoredInfo) => void>;
 
 describe('AiSdkGenerator ignored-effort detection', () => {
@@ -731,5 +783,63 @@ describe('AiSdkGenerator tracing', () => {
     generateObjectMock.mockResolvedValueOnce({ object: { pick: 'a' } });
     await gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p' });
     expect(new TraceEntries(db).summaries()).toHaveLength(0);
+  });
+
+  // A parse failure is the one error where the useful evidence is the answer itself: without
+  // the raw text there is no way to tell a truncated response from a route that mangled it.
+  it('carries the unparseable text, finish reason and usage into the failed llm.attempt payload', async () => {
+    generateObjectMock.mockReset();
+    const db = freshDb();
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'stealth/ox-alpha' };
+    const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
+    const usage = {
+      inputTokens: 12,
+      outputTokens: 3,
+      totalTokens: 15,
+      inputTokenDetails: { noCacheTokens: 12, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      outputTokenDetails: { textTokens: 3, reasoningTokens: 0 },
+    };
+    generateObjectMock.mockRejectedValue(
+      new NoObjectGeneratedError({
+        message: 'no object generated',
+        text: '{"contentType": "application/"}',
+        response: { id: 'r1', timestamp: new Date(0), modelId: 'stealth/ox-alpha' },
+        usage,
+        finishReason: 'stop',
+      }),
+    );
+
+    await expect(
+      gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p', trace: { jobId: 9 } }),
+    ).rejects.toThrow();
+
+    const attempt = new TraceEntries(db).listByJob(9).find((r) => r.kind === 'llm.attempt');
+    expect(JSON.parse(attempt?.payload ?? '')).toMatchObject({
+      provider: 'openrouter',
+      model: 'stealth/ox-alpha',
+      text: '{"contentType": "application/"}',
+      finishReason: 'stop',
+      usage,
+    });
+  });
+
+  // Everything else throws without a `text` to report, and the payload must not sprout empty
+  // keys for it.
+  it('leaves the raw-text fields off the payload for an error that is not a parse failure', async () => {
+    generateObjectMock.mockReset();
+    const db = freshDb();
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
+    const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
+    generateObjectMock.mockRejectedValue(new Error('socket hang up'));
+
+    await expect(
+      gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p', trace: { jobId: 11 } }),
+    ).rejects.toThrow();
+
+    const attempt = new TraceEntries(db).listByJob(11).find((r) => r.kind === 'llm.attempt');
+    const payload = JSON.parse(attempt?.payload ?? '') as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual(['error', 'model', 'provider']);
   });
 });
