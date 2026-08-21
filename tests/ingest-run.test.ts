@@ -483,7 +483,7 @@ describe('runIngestJob — sidecar sweep and placement', () => {
   it('stale cleanup namespace mismatch: the arr\'s path is in a different namespace from video_path, but relativePath matches its tail -> nothing is cleaned', async () => {
     // This is the case the whole design turns on: the arr reports its own layout
     // ('/downloads-side/...'), video_path was recorded in Warrden's ('/mnt/library/...'),
-    // and only the tail below the library root — relativePath — is guaranteed to agree.
+    // and only the tail below the library root, relativePath, is guaranteed to agree.
     const relativePath = 'Season 01/Show - S01E05.mkv';
     const fx = ingestFixture({
       episodeFiles: [{ id: 100, seriesId: 42, seasonNumber: 1, relativePath, path: '/downloads-side/Show/Season 01/Show - S01E05.mkv' }],
@@ -512,7 +512,7 @@ describe('runIngestJob — sidecar sweep and placement', () => {
 
   it('stale cleanup: the video is absent from the arr\'s file list -> the row and file are removed and ingest.stale-cleaned fires', async () => {
     // An empty arr file list is itself a legitimate answer (the target has no files at
-    // all), so every row for it is stale — no special-casing needed.
+    // all), so every row for it is stale, with no special-casing needed.
     const fx = ingestFixture({ episodeFiles: [] });
     const placedFiles = new PlacedFiles(fx.ctx.db);
 

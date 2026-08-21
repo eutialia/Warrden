@@ -329,7 +329,7 @@ function siblingVideosInDir(dir: string): string[] {
 }
 
 /** Deletes provenance (and the placed file itself) for any sidecar whose video has
- * disappeared — a re-imported/upgraded/deleted episode or movie takes its sidecar with
+ * disappeared. A re-imported, upgraded or deleted episode or movie takes its sidecar with
  * it, since a sidecar with no video beside it is just orphaned clutter. Only rows this
  * job's target owns are considered, and only `placed_files`-recorded paths are ever
  * touched, per the destruction limit: Warrden never deletes a file it didn't place.
@@ -337,13 +337,13 @@ function siblingVideosInDir(dir: string): string[] {
  * Staleness is decided from the arr's own file list (`target`'s `episodeFiles`/
  * `movieFiles`, already fetched by `resolveTarget`), not the filesystem. Sonarr/Radarr own
  * the library and are the authority on whether a file still exists, and they already
- * decline to drop their own file records when a root folder is unreachable — so Warrden
- * doesn't have to guess "genuinely deleted" from "share unmounted" itself.
+ * decline to drop their own file records when a root folder is unreachable, so Warrden
+ * doesn't have to tell "genuinely deleted" from "share unmounted" itself.
  *
  * A row matches a live file when its `video_path` equals the file's `path` outright, or
  * when it ends with `/` plus the file's `relativePath`. The arr reports paths in its own
  * layout while `video_path` was stored in Warrden's, and the two differ only in the root
- * prefix, so the tail below the library root is identical either way — matching on that
+ * prefix, so the tail below the library root is identical either way. Matching on that
  * tail needs no `pathMappings` translation at all. A false match can only make this check
  * keep a row it might have cleaned, which is the safe direction. An empty file list (the
  * target has no files at all right now) is a legitimate answer, not a special case: every
@@ -351,7 +351,7 @@ function siblingVideosInDir(dir: string): string[] {
  *
  * One row's `rmSync` failure (a permission error, the path being a directory, ...) is
  * contained per-row (same shape as `tryPlace`'s containment) rather than aborting the rest
- * of the cleanup pass — and the row is deliberately kept, not deleted, on failure: the file
+ * of the cleanup pass, and the row is deliberately kept, not deleted, on failure: the file
  * is still sitting there unremoved, so dropping provenance for it now would misrepresent
  * reality and drop it from being retried next run. */
 function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, target: TargetContext): void {
@@ -379,7 +379,7 @@ function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: Place
     ctx.events.append({
       kind: 'ingest.stale-cleaned',
       jobId: job.id,
-      message: `Removed "${row.placed_path}" — its video no longer exists`,
+      message: `Removed "${row.placed_path}": its video no longer exists`,
       data: targetEventData(job, { placedPath: row.placed_path, videoPath: row.video_path }),
     });
   }
