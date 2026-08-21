@@ -3,24 +3,28 @@
 # systemd .mount unit. No .env, no credentials in this repo.
 #
 # If you instead let Docker mount the shares itself (see the "Let Docker mount the
-# shares itself" variant below), you need SMB_USERNAME and SMB_PASSWORD in .env.
-# Only Docker on Linux needs that: the daemon runs as root and cannot read a GVFS
-# mount, which belongs to your user session.
+# shares itself" variant below), you need SMB_USERNAME and SMB_PASSWORD in .env. Any
+# Docker install where the shares are not already mounted system-wide needs those
+# credentials, on Linux and on macOS alike: the daemon runs as root and cannot read an
+# SMB or GVFS mount that belongs to your user session.
 #
 # Running Warrden directly, or in an LXC where the shares are already in the filesystem,
 # needs neither this file nor .env. Set the four paths under Settings, Storage.
 #
 # Copy this file to compose.override.yaml (git-ignored) and point the host paths at
-# this machine's NAS mounts. The container paths are fixed: Warrden always expects
-# exactly these four (see README, "Quickstart").
+# this machine's NAS mounts. The container paths below are the defaults Warrden ships
+# with; you can change them under Settings, Storage, but there is no reason to under
+# Docker, where you choose what each one binds to anyway.
 #
 #   /tv        Sonarr Series root folder
 #   /anime     Sonarr Anime root folder
 #   /movies    Radarr library root
 #   /downloads Torrent client download / completed root
 #
-# Leave a line out if this machine genuinely lacks that mount; the Storage health
-# panel will report it as missing.
+# Lacking one of these libraries: leave its line out here and blank the matching field
+# under Settings, Storage. Blank disables the role. Leaving the path set with nothing
+# bound to it reports as Missing, which is right for a mount you forgot and wrong for a
+# library you do not have.
 services:
   warrden:
     volumes:

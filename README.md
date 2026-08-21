@@ -163,6 +163,7 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | `arrs[].kind` | — | `sonarr` or `radarr`. |
 | `arrs[].baseUrl` | — | Base URL of the arr instance. |
 | `arrs[].apiKey` | — | API key for the arr instance. |
+| `storage.series` / `.anime` / `.movies` / `.downloads` | `/tv`, `/anime`, `/movies`, `/downloads` | Where Warrden looks for each library: container paths under Docker, paths on this machine in an LXC or a direct run. Must be absolute, or blank to say you do not have that library, in which case Warrden skips it everywhere. Editable under Settings, Storage. |
 | `pathMappings[].from` / `.to` | `[]` | config.json only. Translates a path the arr reports into Warrden's storage path; `to` should be one of the four paths set under Settings, Storage. Empty means the arrs already use those paths. |
 | `subtitle.languages` | `[]` | Target languages, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). A video counts as covered only with every one present. |
 | `subtitle.preferredGroups` | `[]` | Soft rank boost for fansub group names. |
