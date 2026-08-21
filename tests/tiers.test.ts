@@ -10,6 +10,14 @@ describe('looksBlocked', () => {
     [403, '<title>Attention Required! | Cloudflare</title>', true],
     [503, '<title>Just a moment...</title>', true],
     [403, 'cf-chl-bypass', true],
+    [403, '<div id="cf-error-details">Error 1020</div>', true],
+    [
+      403,
+      '<html><head><title>\u4e0b\u8f7d\u9875\u9762\u5df2\u5931\u6548</title>' +
+        '<script src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script></head>' +
+        '<body><p>\u8bf7\u8fd4\u56de\u5b57\u5e55\u8be6\u60c5\u9875\u91cd\u65b0\u4e0b\u8f7d</p></body></html>',
+      false,
+    ],
     [404, 'not found', false],
     [200, '<html>real page</html>', false],
     [500, 'server error', false],

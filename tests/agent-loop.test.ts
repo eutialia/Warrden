@@ -139,6 +139,54 @@ describe('runAgentLoop', () => {
     expect(tier.calls[0]!.opts).toEqual({ method: 'GET' });
   });
 
+  it('records the error page text alongside the status when a request fails', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'request', url: 'https://acg.rip/down/uE7Rx2', note: 'protocol step', method: 'GET' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([
+      {
+        ok: false,
+        status: 403,
+        body: '<html><head><title>Download page expired</title></head><body><p>Go back to the detail page and download again.</p></body></html>',
+        blocked: false,
+      },
+    ]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const secondPrompt = llm.calls[1]!.prompt;
+    expect(secondPrompt).toContain(
+      'request GET https://acg.rip/down/uE7Rx2 -> HTTP 403: Download page expired Go back to the detail page and download again.',
+    );
+    expect(secondPrompt).not.toContain('<title>');
+    expect(secondPrompt).not.toContain('<p>');
+  });
+
+  it('records the error page text alongside the status when an open fails', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'open', url: 'https://acg.rip/t/123', note: 'opening' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([
+      { ok: false, status: 403, body: '<div class="err">Session expired,\n  please sign in.</div>', blocked: false },
+    ]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const secondPrompt = llm.calls[1]!.prompt;
+    expect(secondPrompt).toContain('open https://acg.rip/t/123 -> HTTP 403: Session expired, please sign in.');
+    expect(secondPrompt).not.toContain('<div');
+  });
+
+  it('records only the status when the failed response has no body text', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'open', url: 'https://acg.rip/t/123', note: 'opening' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([{ ok: false, status: 403, body: '', blocked: false }]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const secondPrompt = llm.calls[1]!.prompt;
+    expect(secondPrompt).toContain('open https://acg.rip/t/123 -> HTTP 403');
+    expect(secondPrompt).not.toContain('HTTP 403:');
+  });
+
   it('refuses request to a foreign host without fetching', async () => {
     const llm = new FakeGenerator([
       act({ action: 'request', url: 'https://evil.test/admin', note: 'probe foreign host', method: 'POST', body: '{}' }),

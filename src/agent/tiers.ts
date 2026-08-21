@@ -51,7 +51,12 @@ const DOWNLOAD_TIMEOUT_MS = 180_000;
 const BODY_CAP = 2 * 1024 * 1024;
 const MAX_REDIRECT_HOPS = 5;
 
-const BLOCK_MARKERS = ['cloudflare', 'cf-chl', 'captcha', 'attention required'];
+/** Markers a challenge or block page carries and an ordinary page does not. The bare word
+ * "cloudflare" is deliberately absent: every Cloudflare-proxied site ships
+ * `/cdn-cgi/scripts/.../cloudflare-static/email-decode.min.js` on ordinary pages, so it
+ * matched application errors like an expired download link and escalated the whole ladder
+ * against a site that was answering fine. */
+const BLOCK_MARKERS = ['cf-chl', 'cf-error-details', 'captcha', 'attention required'];
 
 /** Whether a response smells like a bot-wall rather than an ordinary failure — the signal
  * the ladder escalates on (a plain 404 is "wrong URL", not "wrong tier"). */

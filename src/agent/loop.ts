@@ -63,6 +63,26 @@ function capUrl(url: string): string {
   return url.length <= REFUSED_URL_CAP ? url : `${url.slice(0, REFUSED_URL_CAP)}…[elided]`;
 }
 
+/** Cap on the failed page's text echoed into the next prompt. Long enough for the sentence
+ * a site puts on its error page, short enough that a failure never crowds out the run. */
+const ERROR_SNIPPET_CAP = 600;
+
+/**
+ * A failed fetch rendered as one history line. The status on its own leaves the model
+ * guessing, while the page usually says what actually went wrong ("go back to the detail
+ * page and download again") and that is what lets the next step correct itself. Script and
+ * style blocks are dropped before the tags so their contents do not survive as text.
+ */
+function httpFailure(res: FetchResult): string {
+  const status = `HTTP ${res.status ?? 'error'}`;
+  const text = (res.body ?? '')
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text === '' ? status : `${status}: ${text.slice(0, ERROR_SNIPPET_CAP)}`;
+}
+
 /** One history step: a fixed prefix plus an optional observation body (already OBSERVATION_CAP-capped). */
 interface HistoryStep {
   prefix: string;
@@ -313,7 +333,7 @@ export async function runAgentLoop(input: {
           observation: (res.body ?? '').slice(0, OBSERVATION_CAP),
         });
       } else {
-        history.push({ prefix: `request ${method} ${action.url} -> HTTP ${res.status ?? 'error'}` });
+        history.push({ prefix: `request ${method} ${action.url} -> ${httpFailure(res)}` });
       }
       continue;
     }
@@ -330,7 +350,7 @@ export async function runAgentLoop(input: {
         observation: (res.body ?? '').slice(0, OBSERVATION_CAP),
       });
     } else {
-      history.push({ prefix: `${action.action} ${action.url} -> HTTP ${res.status ?? 'error'}` });
+      history.push({ prefix: `${action.action} ${action.url} -> ${httpFailure(res)}` });
     }
   }
   return { kind: 'exhausted' };
