@@ -173,7 +173,7 @@ describe('runSubtitleJob', () => {
       targetId: fx.targetId,
       sourceUrl: 'https://example.test/pack.zip',
       path: extractDir,
-      files: entriesForFiles([filePath]),
+      files: entriesForFiles([filePath], extractDir),
     });
     const llm = new FakeGenerator([]);
     fx.ctx.llm = llm;
@@ -240,7 +240,7 @@ describe('runSubtitleJob', () => {
     const rows = new ArchiveCache(fx.ctx.db).forTarget(fx.arrInstance, 'series', fx.targetId);
     expect(rows).toHaveLength(1);
     expect(cacheDirs(fx)).toHaveLength(1);
-    expect(existsSync(join(rows[0]!.path, '0-Bonus.ass'))).toBe(true);
+    expect(existsSync(join(rows[0]!.path, 'Bonus.ass'))).toBe(true);
   });
 
   it('two different pack filenames -> distinct cache rows and dirs', async () => {
@@ -556,6 +556,35 @@ describe('runSubtitleJob', () => {
     });
 
     expect(calls).toEqual([{ verifiedSuccess: true }]);
+  });
+
+  it('a pack with no subtitle files in it -> subtitle.pack-empty at warn, nothing placed', async () => {
+    const fx = subtitleFixture();
+    fx.ctx.llm = new FakeGenerator([]);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'readme.txt': 'no subs here', 'fonts/song.ttf': 'font' }));
+
+    const empty = findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.pack-empty');
+    expect(empty?.message).toContain('pack.zip');
+    expect(empty?.data).toMatchObject({ instance: fx.arrInstance, targetKind: 'series', targetId: fx.targetId, url: 'https://example.test/pack.zip' });
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(false);
+  });
+
+  it('an archive no extractor can open -> subtitle.pack-empty carrying the extractor error', async () => {
+    const fx = subtitleFixture();
+    fx.ctx.llm = new FakeGenerator([]);
+    const bogus = join(tmpDir(), 'pack.rar');
+    writeFileSync(bogus, 'not-a-real-rar');
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: { filePath: bogus, url: 'https://example.test/pack.rar' }, transcript: [], outcome: 'downloaded' as const }),
+    });
+
+    const empty = findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.pack-empty');
+    expect(empty?.message).toContain('pack.rar');
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(false);
   });
 
   it('reflects with verifiedSuccess: false, then still propagates, when extraction fails hard', async () => {

@@ -1,14 +1,24 @@
 import { execFile } from 'node:child_process';
-import { copyFileSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { basename, extname, join } from 'node:path';
+import { copyFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import { extract as tarExtract } from 'tar';
 import type { ArchiveCacheEntry } from '../../db/archiveCache.js';
-import { parseEpisodeRef, parseLangTag } from '../ingest/sidecars.js';
+import { walkFiles } from '../../fs/files.js';
+import { parseEpisodeRefWithHint, parseLangTag } from '../ingest/sidecars.js';
 
 const execFileAsync = promisify(execFile);
 const SUBTITLE_EXTENSIONS: readonly string[] = ['.srt', '.ass', '.ssa'];
+
+/** Extensions `walkFiles` must surface so nested archives can be found and opened. `.gz`
+ * is here for `.tar.gz`; a bare `.gz` fails `isSupportedArchive` and is ignored. */
+const ARCHIVE_EXTENSIONS: readonly string[] = ['.zip', '.tar', '.gz', '.tgz', '.rar', '.7z'];
+
+/** How many archives deep one download may nest before unpacking stops. Real packs go
+ * three: an outer 7z holding a 7z per season, one of which holds a rar. Four leaves room
+ * for one more surprise while still bounding a zip bomb. */
+const MAX_ARCHIVE_DEPTH = 4;
 
 /** Lone subtitle file (not an archive) — subhd and others occasionally serve .ass/.srt
  * directly; the pipeline must place these, not skip them as "unsupported archive". */
@@ -122,85 +132,134 @@ async function extractWithExternalTool(archivePath: string, destDir: string): Pr
   );
 }
 
-async function collectSubtitleFiles(destDir: string, out: string[]): Promise<void> {
-  const { walkFiles } = await import('../../fs/files.js');
-  const kept = walkFiles(destDir, SUBTITLE_EXTENSIONS);
-  const dest = (name: string): string => join(destDir, `${out.length}-${basename(name)}`);
-  for (const p of kept) {
-    if (isEmptyFile(p)) continue;
-    // Already under destDir; re-prefix for stable numbered names when not already numbered.
-    const base = basename(p);
-    if (/^\d+-/.test(base) && p === join(destDir, base)) {
-      out.push(p);
-      continue;
-    }
-    const target = dest(p);
-    if (p !== target) renameSync(p, target);
-    out.push(target);
-  }
-}
-
 /**
- * Copies a single .srt/.ass/.ssa into `destDir` with the same numbered-name contract as
- * extractArchive, so match/place can treat it like a one-file pack.
+ * Copies a single .srt/.ass/.ssa into `destDir` under its own name, so match/place can
+ * treat it like a one-file pack.
  */
 export function materializeLooseSubtitle(filePath: string, destDir: string): string[] {
   mkdirSync(destDir, { recursive: true });
   if (!isLooseSubtitleFile(filePath)) {
     throw new UnsupportedArchiveError(filePath, `not a loose subtitle file: ${basename(filePath)}`);
   }
-  const target = join(destDir, `0-${basename(filePath)}`);
+  const target = join(destDir, basename(filePath));
   copyFileSync(filePath, target);
   return [target];
 }
 
-export async function extractArchive(archivePath: string, destDir: string): Promise<string[]> {
+/**
+ * Turns one zip entry name into a path relative to the extraction dir, or `null` when the
+ * entry tries to leave it: an absolute path (POSIX or `C:\`-style) or any `..` segment.
+ * A hostile or merely sloppy archive must not be able to write outside the cache dir.
+ */
+function safeRelativeEntryPath(entryName: string): string | null {
+  if (/^([A-Za-z]:)?[/\\]/.test(entryName)) return null;
+  const parts = entryName.split(/[/\\]/).filter((p) => p.length > 0 && p !== '.');
+  if (parts.length === 0 || parts.includes('..')) return null;
+  return join(...parts);
+}
+
+/** True for what `extractInto` bothers writing out: subtitles, plus archives that may hold
+ * more of them. */
+function worthExtracting(name: string): boolean {
+  return isLooseSubtitleFile(name) || isSupportedArchive(name);
+}
+
+/** Unpacks one archive into `destDir`, preserving the paths inside it. Nothing else: the
+ * caller walks the result and decides what to do with what landed. */
+async function extractInto(archivePath: string, destDir: string): Promise<void> {
   mkdirSync(destDir, { recursive: true });
-  const lower = archivePath.toLowerCase();
 
-  if (isLooseSubtitleFile(archivePath)) {
-    return materializeLooseSubtitle(archivePath, destDir);
-  }
-
-  if (!isSupportedArchive(archivePath)) throw new UnsupportedArchiveError(archivePath);
-
-  const out: string[] = [];
-  const keep = (name: string): boolean => SUBTITLE_EXTENSIONS.includes(extname(name).toLowerCase());
-  const dest = (name: string): string => join(destDir, `${out.length}-${basename(name)}`);
-
-  if (lower.endsWith('.zip')) {
+  if (archivePath.toLowerCase().endsWith('.zip')) {
     const zip = new AdmZip(archivePath);
     for (const entry of zip.getEntries()) {
       if (entry.isDirectory) continue;
       const entryName = decodeZipEntryName(entry.entryName);
-      if (!keep(entryName)) continue;
+      if (!worthExtracting(entryName)) continue;
+      const rel = safeRelativeEntryPath(entryName);
+      if (rel === null) continue;
       // Skip 0-byte placeholders fansub packs sometimes ship for missing episodes.
       const data = entry.getData();
       if (data.length === 0) continue;
-      const target = dest(entryName);
+      const target = join(destDir, rel);
+      mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, data);
-      out.push(target);
     }
-    return out.sort();
+    return;
   }
 
   if (isSevenZipFamily(archivePath)) {
     await extractWithExternalTool(archivePath, destDir);
-    await collectSubtitleFiles(destDir, out);
-    return out.sort();
+    return;
   }
 
   // tar / tar.gz / tgz
-  await tarExtract({ file: archivePath, cwd: destDir, filter: (path) => keep(path) });
-  await collectSubtitleFiles(destDir, out);
+  await tarExtract({ file: archivePath, cwd: destDir, filter: (path) => worthExtracting(path) });
+}
+
+/**
+ * Walks `dir`, appending every non-empty subtitle file to `out` exactly where it sits, and
+ * unpacking every archive it finds into a sibling `<name>.d/` before descending into that
+ * too. `depth` counts the extractions already done along this branch, and nothing past
+ * `MAX_ARCHIVE_DEPTH` is opened — the archive just stays on disk, unread.
+ *
+ * An inner archive no extractor can open is skipped, not fatal: the rest of the pack is
+ * still worth having, and the file is left in place rather than deleted so nothing is lost
+ * silently. Only the outermost archive failing to open reaches the caller as an error.
+ */
+async function collectFrom(dir: string, out: string[], depth: number): Promise<void> {
+  const nested: string[] = [];
+  for (const path of walkFiles(dir, [...SUBTITLE_EXTENSIONS, ...ARCHIVE_EXTENSIONS])) {
+    if (isLooseSubtitleFile(path)) {
+      if (!isEmptyFile(path)) out.push(path);
+    } else if (isSupportedArchive(path)) {
+      nested.push(path);
+    }
+  }
+  if (depth >= MAX_ARCHIVE_DEPTH) return;
+
+  for (const archive of nested) {
+    const innerDir = `${archive}.d`;
+    try {
+      await extractInto(archive, innerDir);
+    } catch (err) {
+      if (err instanceof UnsupportedArchiveError) continue;
+      throw err;
+    }
+    rmSync(archive, { force: true });
+    await collectFrom(innerDir, out, depth + 1);
+  }
+}
+
+/**
+ * Unpacks `archivePath` into `destDir` and returns the absolute path of every subtitle
+ * file inside, sorted. Directory structure is preserved rather than flattened, because a
+ * fansub pack's folder names are load-bearing: they're where the season and often the
+ * group live, and the episode-number-only filenames underneath mean nothing without them.
+ * Archives nested inside the pack are unpacked in place (into `<name>.d/`) up to
+ * `MAX_ARCHIVE_DEPTH`, so a season-per-7z bundle resolves to one flat list of real files.
+ */
+export async function extractArchive(archivePath: string, destDir: string): Promise<string[]> {
+  mkdirSync(destDir, { recursive: true });
+
+  if (isLooseSubtitleFile(archivePath)) return materializeLooseSubtitle(archivePath, destDir);
+  if (!isSupportedArchive(archivePath)) throw new UnsupportedArchiveError(archivePath);
+
+  await extractInto(archivePath, destDir);
+
+  const out: string[] = [];
+  await collectFrom(destDir, out, 1);
   return out.sort();
 }
 
-export function entriesForFiles(files: string[]): ArchiveCacheEntry[] {
+/**
+ * Pre-annotates each extracted file for the cache: its language tag, and the episode it
+ * refers to. `rootDir` is the extraction root, so the directories between it and the file
+ * can supply a season the filename itself omits (see `parseEpisodeRefWithHint`).
+ */
+export function entriesForFiles(files: string[], rootDir: string): ArchiveCacheEntry[] {
   return files.map((path) => {
-    // Strip extractArchive's collision-safe `<index>-` prefix so parseEpisodeRef sees one
-    // bare episode number. Without this, `0-Show - 01.ass` yields candidates [0, 1] → null.
-    const name = basename(path).replace(/^\d+-/, '');
-    return { path, lang: parseLangTag(name), episodeRef: parseEpisodeRef(name) };
+    const name = basename(path);
+    const segments = dirname(relative(rootDir, path)).split(sep).filter((s) => s.length > 0 && s !== '.');
+    return { path, lang: parseLangTag(name), episodeRef: parseEpisodeRefWithHint(name, segments) };
   });
 }

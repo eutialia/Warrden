@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { basename, relative } from 'node:path';
 import { z } from 'zod';
 import type { EpisodeResource } from '../../arr/types.js';
 import type { ArchiveCacheEntry } from '../../db/archiveCache.js';
@@ -27,6 +27,14 @@ const ArchiveMapResponseSchema = z.object({
 
 const CALLSITE = 'archive-map';
 
+/**
+ * Files per generate call. A subhd multi-season pack runs to ~1,500 files; one prompt
+ * listing all of them buries the episode table and invites the model to drop or
+ * renumber assignments wholesale. Batching keeps each list short enough to answer
+ * carefully, at the cost of one call per 120 files.
+ */
+export const MAP_BATCH_SIZE = 120;
+
 /** Zero-pads a season/episode number to 2 digits for the `SxxEyy` rendering — same
  * convention as `renderEpisodeLine` in `matchLlm.ts`. */
 function pad(n: number): string {
@@ -35,10 +43,13 @@ function pad(n: number): string {
 
 /**
  * Renders one numbered archive-file line with optional pre-parsed hints, e.g.
- * `#1 0-01.ass (lang=zh-Hans, parsed=S01E01)`. Null pieces render nothing.
+ * `#1 Season 2/01.ass (lang=zh-Hans, parsed=S02E01)`. The name is the file's path under
+ * the pack root, not its basename: fansub packs put the season and often the group in the
+ * directory and leave a bare episode number in the filename, so the basename alone hides
+ * the half of the evidence that disambiguates. Null pieces render nothing.
  */
-function renderFileLine(entry: ArchiveCacheEntry, index: number): string {
-  const name = basename(entry.path);
+function renderFileLine(entry: ArchiveCacheEntry, index: number, rootDir: string): string {
+  const name = relative(rootDir, entry.path) || basename(entry.path);
   const hints: string[] = [];
   if (entry.lang !== null) {
     hints.push(`lang=${entry.lang}`);
@@ -63,12 +74,14 @@ export async function mapArchiveWithLlm(input: {
   llm: StructuredGenerator;
   seriesTitle: string;
   files: ArchiveCacheEntry[];
+  /** Extraction root the file paths are rendered relative to — the archive cache dir. */
+  rootDir: string;
   episodes: EpisodeResource[]; // only hasFile episodes — a sub needs a video to sit beside
   /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
    * with no job at hand (tests), which just means the call isn't traced. */
   jobId?: number;
 }): Promise<(number | null)[]> {
-  const { llm, seriesTitle, files, episodes, jobId } = input;
+  const { llm, seriesTitle, files, rootDir, episodes, jobId } = input;
 
   if (files.length === 0) {
     return [];
@@ -79,15 +92,39 @@ export async function mapArchiveWithLlm(input: {
     return files.map(() => null);
   }
 
+  const episodeLines = episodes.map(renderEpisodeLine).join('\n');
+  const validEpisodeIds = new Set(episodes.map((e) => e.id));
+
+  const out: (number | null)[] = [];
+  for (let start = 0; start < files.length; start += MAP_BATCH_SIZE) {
+    const batch = files.slice(start, start + MAP_BATCH_SIZE);
+    out.push(...(await mapBatch({ llm, seriesTitle, batch, rootDir, episodeLines, validEpisodeIds, jobId })));
+  }
+  return out;
+}
+
+/** One generate call over one batch of files, numbered 1..batch.length within the call.
+ * Returns the batch's slice of the answer, aligned to `batch`. */
+async function mapBatch(input: {
+  llm: StructuredGenerator;
+  seriesTitle: string;
+  batch: ArchiveCacheEntry[];
+  rootDir: string;
+  episodeLines: string;
+  validEpisodeIds: Set<number>;
+  jobId?: number;
+}): Promise<(number | null)[]> {
+  const { llm, seriesTitle, batch, rootDir, episodeLines, validEpisodeIds, jobId } = input;
+
   const system = [
     'You map each numbered subtitle file extracted from a downloaded subtitle pack to the episode it belongs to, using the episode table provided.',
+    'Each file is shown as its path inside the pack, so a directory name may carry the season or the fansub group even when the filename holds only an episode number.',
     'Filenames may include pre-parsed hints (lang, parsed episode ref) — use those plus episode numbers, absolute numbers, and titles to decide.',
     "Answer with each file's number and the matched episode id, using episodeId null when a file is genuinely unmatchable.",
     'Respond with JSON matching the schema provided — no prose outside the JSON.',
   ].join(' ');
 
-  const episodeLines = episodes.map(renderEpisodeLine).join('\n');
-  const fileLines = files.map((f, i) => renderFileLine(f, i)).join('\n');
+  const fileLines = batch.map((f, i) => renderFileLine(f, i, rootDir)).join('\n');
   const prompt = [
     `Series: ${seriesTitle}`,
     ['Episodes:', episodeLines].join('\n'),
@@ -104,18 +141,16 @@ export async function mapArchiveWithLlm(input: {
 
   const byFile = new Map<number, number | null>();
   for (const a of result.assignments) {
-    if (a.file < 1 || a.file > files.length) {
+    if (a.file < 1 || a.file > batch.length) {
       throw new LlmError(
-        `LLM assigned file number ${a.file}, which is out of range (files are numbered 1-${files.length})`,
+        `LLM assigned file number ${a.file}, which is out of range (files are numbered 1-${batch.length})`,
         CALLSITE,
       );
     }
     byFile.set(a.file, a.episodeId);
   }
 
-  const validEpisodeIds = new Set(episodes.map((e) => e.id));
-
-  return files.map((_, i) => {
+  return batch.map((_, i) => {
     const episodeId = byFile.get(i + 1) ?? null;
     return episodeId !== null && validEpisodeIds.has(episodeId) ? episodeId : null;
   });

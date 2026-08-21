@@ -5,7 +5,7 @@ import { reflectOnRun } from '../../agent/siteReflection.js';
 import type { AppContext } from '../../context.js';
 import { siteKey, siteLabel } from '../../config/siteLabel.js';
 import type { SubtitleSiteConfig } from '../../config/schema.js';
-import { ArchiveCache, type ArchiveCacheRow } from '../../db/archiveCache.js';
+import { ArchiveCache, type ArchiveCacheEntry, type ArchiveCacheRow } from '../../db/archiveCache.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
 import { SiteProfiles } from '../../db/siteProfiles.js';
 import type { TranscriptEntry } from '../../db/subtitleRuns.js';
@@ -20,7 +20,7 @@ import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../
 import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetMeta } from '../targetTitle.js';
 import { assertMounted, MOUNT_RETRY_MS } from '../mounts.js';
-import { buildSidecarName, matchSidecarDeterministic } from '../ingest/sidecars.js';
+import { buildSidecarName, matchEpisodeRef } from '../ingest/sidecars.js';
 import { placeBlocked } from '../placeGuard.js';
 import {
   entriesForFiles,
@@ -351,6 +351,7 @@ async function matchArchiveRow(
       llm: ctx.llm,
       seriesTitle,
       files: unmatchedEntries,
+      rootDir: row.path,
       episodes: missing.map((m) => ({
         id: m.episodeId,
         seriesId: job.target_id,
@@ -381,17 +382,16 @@ async function matchArchiveRow(
   return { resolved, placedCount };
 }
 
-/** Deterministically matches an archive entry to a still-missing episode. The extracted path
- * carries extractArchive's collision-safe `<index>-` prefix (e.g. `0-Show - 01.ass`), which
- * parseEpisodeRef would misread as a second number and treat as ambiguous — so it's stripped
- * before matching, exactly as `entriesForFiles` does when it pre-annotates `episodeRef`.
- * Matching reuses ingest's `matchSidecarDeterministic` (same season/episode/absolute rules).
+/** Deterministically matches an archive entry to a still-missing episode, using the ref
+ * `entriesForFiles` already parsed at cache-write time — that ref carries the season the
+ * pack's directory names implied, which re-parsing the basename here would throw away.
+ * Matching itself is ingest's own `matchEpisodeRef` (same season/episode/absolute rules).
  * Movies with a single missing slot always match that slot. Returns null when nothing matches. */
-function matchDeterministic(missing: EpisodeTarget[], entry: { path: string }, isMovie: boolean): EpisodeTarget | null {
+function matchDeterministic(missing: EpisodeTarget[], entry: ArchiveCacheEntry, isMovie: boolean): EpisodeTarget | null {
   if (isMovie && missing.length === 1) return missing[0]!;
-  const bareName = basename(entry.path).replace(/^\d+-/, '');
-  const hit = matchSidecarDeterministic(
-    bareName,
+  if (entry.episodeRef === null) return null;
+  const hit = matchEpisodeRef(
+    entry.episodeRef,
     missing.map((m) => ({
       id: m.episodeId,
       seriesId: 0,
@@ -808,6 +808,20 @@ function raiseUnusable(ctx: AppContext, job: JobRow, site: SubtitleSiteConfig, r
   });
 }
 
+/** A download that reached us but yielded nothing placeable — an empty pack, or an archive
+ * no extractor on this box can open. Both used to return `false` in silence, leaving the
+ * run's only trace a `subtitle.unresolved` that named no cause. Warn, not attention: the
+ * site is working, this particular pack just isn't. */
+function packEmpty(ctx: AppContext, job: JobRow, url: string, message: string): void {
+  ctx.events.append({
+    kind: 'subtitle.pack-empty',
+    level: 'warn',
+    jobId: job.id,
+    message,
+    data: targetEventData(job, { url }),
+  });
+}
+
 /** Extracts one site's downloaded payload into the archive cache and matches it against the
  * still-missing episodes. Returns whether anything actually got placed this call —
  * `matchArchiveRow`'s `placedCount` is the placement oracle (at least one subtitle file
@@ -847,12 +861,18 @@ async function extractAndMatch(
     rmSync(cacheDir, { recursive: true, force: true });
     files = await extractArchive(download.filePath, cacheDir);
   } catch (err) {
-    if (err instanceof UnsupportedArchiveError) return false;
+    if (err instanceof UnsupportedArchiveError) {
+      packEmpty(ctx, job, download.url, err.message);
+      return false;
+    }
     throw err;
   }
-  if (files.length === 0) return false;
+  if (files.length === 0) {
+    packEmpty(ctx, job, download.url, `Pack from ${siteLabel(site.baseUrl)} held no subtitle files: ${basename(download.url)}`);
+    return false;
+  }
 
-  const entries = entriesForFiles(files);
+  const entries = entriesForFiles(files, cacheDir);
   cache.upsert({
     arrInstance: job.arr_instance,
     targetKind: job.target_kind,

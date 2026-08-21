@@ -17,7 +17,7 @@ export function sidecarKindForExt(ext: string): SidecarKind {
   return ext.toLowerCase() === '.mka' ? 'audio' : 'subtitle';
 }
 
-interface EpisodeRef {
+export interface EpisodeRef {
   season: number | null;
   episode: number;
 }
@@ -60,6 +60,67 @@ export function parseEpisodeRef(filename: string): EpisodeRef | null {
   }
   if (candidates.length === 1) return { season: null, episode: candidates[0]! };
   return null; // zero or ambiguous — the LLM call-site handles these
+}
+
+/** CJK numerals as they appear in `第二季`-style season markers. Fansub packs never
+ * count past a handful of seasons this way, so one through ten is the whole range. */
+const CJK_NUMERALS: Record<string, number> = {
+  '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+  '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+};
+
+const ROMAN_SEASONS: Record<string, number> = { ii: 2, iii: 3, iv: 4 };
+
+/**
+ * Every season number a single path segment names, as a set. Four shapes, all
+ * case-insensitive:
+ * - `第2季` / `第二季`, the Chinese season marker, arabic or CJK numeral.
+ * - `Season 4`.
+ * - `S2` / `S04` as a standalone token — the digits must not run into more alphanumerics,
+ *   which is what keeps `S01E05` (an episode ref) out.
+ * - A roman `II`/`III`/`IV` trailing a title word, as in `Sword Art Online II`. A bare `I`
+ *   is far more often a word than a season, so it doesn't count.
+ */
+function seasonsNamedIn(segment: string): Set<number> {
+  const found = new Set<number>();
+  for (const m of segment.matchAll(/第(\d{1,2}|[一二三四五六七八九十])季/g)) {
+    const token = m[1]!;
+    found.add(CJK_NUMERALS[token] ?? Number(token));
+  }
+  for (const m of segment.matchAll(/season\s*(\d{1,2})(?![a-z0-9])/gi)) found.add(Number(m[1]));
+  for (const m of segment.matchAll(/(?:^|[^a-z0-9])s(\d{1,2})(?![a-z0-9])/gi)) found.add(Number(m[1]));
+  for (const m of segment.matchAll(/[a-z]{2,}\s+(iii|iv|ii)(?![a-z0-9])/gi)) found.add(ROMAN_SEASONS[m[1]!.toLowerCase()]!);
+  return found;
+}
+
+/**
+ * Reads a season number out of the directory names a subtitle file sits under, for packs
+ * whose filenames carry only a bare episode number and leave the season to the folder
+ * (`.../[刀剑神域 第二季 Sword Art Online II][BD+TV]/[Group][01].chs.ass`). `segments` runs
+ * outermost-first, so the scan runs backwards: the directory closest to the file is the
+ * most specific claim about it. A segment naming two different seasons is a claim we
+ * can't adjudicate, so it resolves to `null` rather than a coin flip; a segment naming
+ * none at all is simply not a claim, and the scan continues outward.
+ */
+export function parseSeasonHint(segments: string[]): number | null {
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const found = seasonsNamedIn(segments[i]!);
+    if (found.size === 0) continue;
+    return found.size === 1 ? [...found][0]! : null;
+  }
+  return null;
+}
+
+/**
+ * `parseEpisodeRef` with the enclosing directories as a fallback for the season only. The
+ * filename always wins: an `SxxEyy` name inside a `Season 2` folder stays on the season it
+ * names. Only a ref the basename left season-less takes the directory's word for it.
+ */
+export function parseEpisodeRefWithHint(filename: string, segments: string[]): EpisodeRef | null {
+  const ref = parseEpisodeRef(filename);
+  if (ref === null || ref.season !== null) return ref;
+  const hint = parseSeasonHint(segments);
+  return hint === null ? ref : { season: hint, episode: ref.episode };
 }
 
 /** Fansub language/subtitle tags, normalized to a BCP-47-ish tag. Keys are lowercased
@@ -206,8 +267,14 @@ export function buildSidecarName(videoFileName: string, s: { lang: string | null
  */
 export function matchSidecarDeterministic(filename: string, episodes: EpisodeResource[]): EpisodeResource | null {
   const ref = parseEpisodeRef(filename);
-  if (!ref) return null;
+  return ref === null ? null : matchEpisodeRef(ref, episodes);
+}
 
+/** The matching half of `matchSidecarDeterministic`, split out for callers that already
+ * hold a parsed ref — the subtitle pipeline annotates every archive entry with one at
+ * cache-write time (season hint included), and re-deriving it from the basename would
+ * throw that hint away. Same rules, documented above. */
+export function matchEpisodeRef(ref: EpisodeRef, episodes: EpisodeResource[]): EpisodeResource | null {
   if (ref.season !== null) {
     return episodes.find((e) => e.seasonNumber === ref.season && e.episodeNumber === ref.episode) ?? null;
   }

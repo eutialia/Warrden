@@ -7,6 +7,9 @@ import {
   parseLangTag,
   buildSidecarName,
   matchSidecarDeterministic,
+  matchEpisodeRef,
+  parseEpisodeRefWithHint,
+  parseSeasonHint,
   sidecarStem,
 } from '../src/pipelines/ingest/sidecars.js';
 import { episodeResource } from './helpers.js';
@@ -207,6 +210,69 @@ describe('matchSidecarDeterministic', () => {
   it('no parseable ref -> null regardless of episode list', () => {
     const episodes = [episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1, absoluteEpisodeNumber: 1080 })];
     expect(matchSidecarDeterministic('[Group] Title [1080].ass', episodes)).toBeNull();
+  });
+});
+
+describe('parseSeasonHint', () => {
+  it.each([
+    // The real subhd pack this was built for: the CJK marker and the roman numeral in the
+    // same segment agree on 2, so the segment is not a conflict.
+    [['[中文字幕全版本][刀剑神域 第二季 Sword Art Online II][BD+TV][170512].7z.d'], 2],
+    [['第2季'], 2],
+    [['第十季'], 10],
+    [['Season 3'], 3],
+    [['season 3'], 3],
+    [['S04'], 4],
+    [['Show S2 [BDRip]'], 2],
+    [['Sword Art Online II'], 2],
+    [['Fate III'], 3],
+    // A bare roman I is far more often a title word than a season.
+    [['Show I'], null],
+    [['Sword Art Online'], null],
+    [['1080P'], null],
+    [['[Group][AVC_AAC][720p_Hi10P]'], null],
+    // An SxxEyy token is an episode ref, not a standalone season token.
+    [['Show S01E05'], null],
+    // Nearest segment to the file wins.
+    [['Season 1', 'Season 4'], 4],
+    // ... but a segment with no hint at all is skipped rather than ending the search.
+    [['Season 4', '[BD+TV]'], 4],
+    // Two different seasons named in one segment: no way to pick, so no hint.
+    [['Season 1 第三季'], null],
+    [[], null],
+  ])('%j -> %s', (segments, expected) => {
+    expect(parseSeasonHint(segments)).toBe(expected);
+  });
+});
+
+describe('parseEpisodeRefWithHint', () => {
+  it('fills a season-less ref from the path hint', () => {
+    expect(parseEpisodeRefWithHint('[Group][01].chs.ass', ['第二季'])).toEqual({ season: 2, episode: 1 });
+  });
+
+  it('leaves an SxxEyy ref alone — the filename is more specific than the directory', () => {
+    expect(parseEpisodeRefWithHint('Show - S01E05.ass', ['Season 2'])).toEqual({ season: 1, episode: 5 });
+  });
+
+  it('an unparseable basename stays unparseable, hint or not', () => {
+    expect(parseEpisodeRefWithHint('[Group] Title [1080].ass', ['Season 2'])).toBeNull();
+  });
+
+  it('no hint leaves the ref season-less', () => {
+    expect(parseEpisodeRefWithHint('[Group][01].chs.ass', ['[BD+TV]'])).toEqual({ season: null, episode: 1 });
+  });
+});
+
+describe('matchEpisodeRef', () => {
+  it('a directory-derived season picks the right one of two otherwise ambiguous seasons', () => {
+    const episodes = [
+      episodeResource({ id: 1, seasonNumber: 1, episodeNumber: 1 }),
+      episodeResource({ id: 2, seasonNumber: 2, episodeNumber: 1 }),
+    ];
+    const ref = parseEpisodeRefWithHint('[X][01].chs.ass', ['第二季']);
+    expect(matchEpisodeRef(ref!, episodes)).toMatchObject({ id: 2, seasonNumber: 2, episodeNumber: 1 });
+    // Without the hint the same basename is genuinely ambiguous.
+    expect(matchSidecarDeterministic('[X][01].chs.ass', episodes)).toBeNull();
   });
 });
 
