@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import type { MediaStream, MediaTools } from '../../media/tools.js';
+import type { MediaTools } from '../../media/tools.js';
 import { parseLangTag, sidecarStem } from '../ingest/sidecars.js';
 
 export interface VideoEntry {
@@ -60,15 +60,12 @@ export async function findMissingSubtitles(input: {
   const missing: MissingSubtitle[] = [];
 
   for (const video of videos) {
-    // A video can vanish mid-probe (a torrent client moving files on a live share makes
-    // `probeStreams` reject): skip it rather than crash the whole reconcile or report it
-    // as missing when it's simply gone.
-    let streams: MediaStream[];
-    try {
-      streams = await media.probeStreams(video.videoPath);
-    } catch {
-      continue;
-    }
+    // A video can vanish mid-run (a torrent client moving files on a live share): skip it
+    // rather than report a gap for a file that is no longer there. Every other probe
+    // failure (no ffprobe on PATH, an unmapped path, a timeout) propagates, because
+    // swallowing it would read as "this video already has every language".
+    if (!existsSync(video.videoPath)) continue;
+    const streams = await media.probeStreams(video.videoPath);
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
     const externalLangs = externalSubsFor(video.videoPath).map((p) => parseLangTag(basename(p)));
 

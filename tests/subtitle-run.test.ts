@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ArchiveCache } from '../src/db/archiveCache.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
@@ -10,6 +10,7 @@ import { TraceEntries } from '../src/db/traceEntries.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
+import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
 import type { MediaStream } from '../src/media/tools.js';
 import { enqueueAndClaim, FakeGenerator, findEvent, hasEvent, seriesResource, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
 
@@ -408,6 +409,25 @@ describe('runSubtitleJob', () => {
       delayMs: 300_000,
     });
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.mount-missing')).toBe(true);
+  });
+
+  it('ffprobe off PATH: reschedules with a subtitle.tool-missing attention event before touching the arr', async () => {
+    const fx = subtitleFixture();
+    fx.media.setAvailability({ ffprobe: false });
+    const listEpisodes = vi.spyOn(fx.client, 'listEpisodes');
+    const getSeries = vi.spyOn(fx.client, 'getSeries');
+
+    const job = claimSubtitleJob(fx);
+    await expect(runSubtitleJob(fx.ctx, job, NO_SITES)).rejects.toMatchObject({
+      name: 'RescheduleError',
+      delayMs: MOUNT_RETRY_MS,
+    });
+
+    const event = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.tool-missing');
+    expect(event).toBeTruthy();
+    expect(event!.data).toMatchObject({ missing: ['ffprobe'] });
+    expect(getSeries).not.toHaveBeenCalled();
+    expect(listEpisodes).not.toHaveBeenCalled();
   });
 
   it('places one of two target languages without treating the episode as fully resolved', async () => {

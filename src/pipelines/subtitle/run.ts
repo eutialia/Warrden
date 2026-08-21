@@ -14,11 +14,12 @@ import { atomicCopy } from '../../fs/files.js';
 import { mapArrPath, safeUrlTailName } from '../../fs/paths.js';
 import type { ArrApi } from '../../arr/types.js';
 import { traceArrClient } from '../../arr/traced.js';
+import { RescheduleError } from '../../jobs/errors.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
 import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetMeta } from '../targetTitle.js';
-import { assertMounted } from '../mounts.js';
+import { assertMounted, MOUNT_RETRY_MS } from '../mounts.js';
 import { buildSidecarName, matchSidecarDeterministic } from '../ingest/sidecars.js';
 import { placeBlocked } from '../placeGuard.js';
 import {
@@ -84,6 +85,8 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   assertMounted(ctx, job, 'subtitle');
 
   const media = requireMedia(ctx);
+  await assertProbeAvailable(ctx, job, media);
+
   const placedFiles = new PlacedFiles(ctx.db);
   const cache = new ArchiveCache(ctx.db);
 
@@ -227,6 +230,27 @@ function describeLanguages(langs: string[]): string {
 function requireMedia(ctx: AppContext): MediaTools {
   if (!ctx.media) throw new Error('subtitle pipeline requires ctx.media (MediaTools)');
   return ctx.media;
+}
+
+/**
+ * ffprobe is the pipeline's only way to see a video's embedded subtitle tracks, so without
+ * it reconcile can't tell a covered video from an uncovered one. Same shape as the storage
+ * guard in `assertMounted`: an attention event plus an uncounted, fixed-delay reschedule
+ * that pauses the pipeline until a human installs ffmpeg. The resync tools (alass,
+ * ffsubsync) are deliberately not checked here: a missing one degrades to quarantining that
+ * candidate, which is a per-candidate outcome rather than a reason to stop the job.
+ */
+async function assertProbeAvailable(ctx: AppContext, job: JobRow, media: MediaTools): Promise<void> {
+  const avail = await media.available();
+  if (avail.ffprobe) return;
+  ctx.events.append({
+    kind: 'subtitle.tool-missing',
+    level: 'attention',
+    jobId: job.id,
+    message: 'Subtitle search paused: ffprobe is not on PATH. Install ffmpeg (it ships ffprobe) where Warrden runs, then retry.',
+    data: targetEventData(job, { missing: ['ffprobe'] }),
+  });
+  throw new RescheduleError('ffprobe missing', MOUNT_RETRY_MS);
 }
 
 /** Removes fully-resolved episodes (every target language filled) from the working

@@ -267,6 +267,8 @@ export function attentionKindLabel(kind: string): string {
     case 'ingest.mount-missing':
     case 'subtitle.mount-missing':
       return 'Storage';
+    case 'subtitle.tool-missing':
+      return 'Missing tool';
     case 'acquire.no-candidates':
       return 'No releases';
     case 'acquire.none-viable':
@@ -305,10 +307,10 @@ export function siteLabel(baseUrl: string): string {
   }
 }
 
-/** Storage problems and outright job failures are errors; everything else in the
- * queue is a decision waiting on a human. */
+/** A paused pipeline (unreachable storage, a missing binary) and outright job failures are
+ * errors; everything else in the queue is a decision waiting on a human. */
 export function attentionKindTone(kind: string): Tone {
-  if (kind.endsWith('.mount-missing') || kind === 'job.attention') return 'danger';
+  if (kind.endsWith('.mount-missing') || kind === 'subtitle.tool-missing' || kind === 'job.attention') return 'danger';
   return 'warning';
 }
 

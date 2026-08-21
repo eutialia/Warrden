@@ -101,27 +101,44 @@ describe('findMissingSubtitles', () => {
     expect(missing).toEqual([{ videoPath: video, episodeId: 1, languages: ['zh-Hans'], embeddedRefs: [] }]);
   });
 
-  it('skips a video whose probe throws instead of crashing the reconcile', async () => {
-    const { video } = videoDir();
-    const other = join(videoDir().dir, 'Show - S02E01.mkv');
-    const throwingMedia: MediaTools = {
+  it('skips a video that is gone from disk without probing it', async () => {
+    const { dir, video } = videoDir();
+    const gone = join(dir, 'Show - S02E01.mkv');
+    const probed: string[] = [];
+    const media = fakeMedia({ [video]: [] });
+    const spyMedia: MediaTools = {
+      ...media,
       probeStreams: async (p: string) => {
-        if (p === video) throw new Error('file vanished');
-        return ZH_EMBEDDED;
+        probed.push(p);
+        return media.probeStreams(p);
+      },
+    };
+    const missing = await findMissingSubtitles({
+      videos: [
+        { videoPath: gone, episodeId: 2 },
+        { videoPath: video, episodeId: 1 },
+      ],
+      languages: ['zh-Hans'],
+      media: spyMedia,
+    });
+    expect(missing.map((m) => m.videoPath)).toEqual([video]);
+    expect(probed).toEqual([video]);
+  });
+
+  it('propagates a probe failure on a video that is still on disk', async () => {
+    const { video } = videoDir();
+    const boom = new Error('ffprobe not found');
+    const throwingMedia: MediaTools = {
+      probeStreams: async () => {
+        throw boom;
       },
       extractSubtitle: async () => {},
       resyncAlass: async () => {},
       resyncFfsubsync: async () => {},
       available: async () => ({ ffprobe: true, alass: true, ffsubsync: true }),
     };
-    const missing = await findMissingSubtitles({
-      videos: [
-        { videoPath: video, episodeId: 1 },
-        { videoPath: other, episodeId: 2 },
-      ],
-      languages: ['zh-Hans'],
-      media: throwingMedia,
-    });
-    expect(missing).toEqual([]);
+    await expect(
+      findMissingSubtitles({ videos: [{ videoPath: video, episodeId: 1 }], languages: ['zh-Hans'], media: throwingMedia }),
+    ).rejects.toBe(boom);
   });
 });
