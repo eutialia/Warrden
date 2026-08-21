@@ -450,7 +450,8 @@ describe('AiSdkGenerator structured-output tiers', () => {
   ])('appends the JSON Schema to the system prompt on the %s tier', async (_label, capabilities) => {
     const call = await generateOn(capabilities);
     const system = String(call.instructions);
-    expect(system.startsWith('Pick one option.')).toBe(true);
+    expect(system.startsWith('Reply with a single JSON object')).toBe(true);
+    expect(system.endsWith('Pick one option.')).toBe(true);
     expect(system).toContain('single JSON object');
     expect(system).toContain(JSON.stringify(z.toJSONSchema(schema), null, 2));
   });
@@ -491,7 +492,8 @@ describe('AiSdkGenerator configured structured-output override', () => {
     expect('response_format' in (call.settings.extraBody ?? {})).toBe(true);
     expect(call.settings.extraBody?.response_format).toBeUndefined();
     const system = String(call.instructions);
-    expect(system.startsWith('Pick one option.')).toBe(true);
+    expect(system.startsWith('Reply with a single JSON object')).toBe(true);
+    expect(system.endsWith('Pick one option.')).toBe(true);
     expect(system).toContain(JSON.stringify(z.toJSONSchema(schema), null, 2));
   });
 

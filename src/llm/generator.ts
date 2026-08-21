@@ -253,12 +253,14 @@ function schemaAppendix(schema: z.ZodType<unknown>): string {
  * sends. Tests that mock `generateObject` skip that validation entirely and would pass on a
  * prompt the SDK refuses.
  *
- * Below the `native` tier the provider enforces nothing, so the schema is appended to the
+ * Below the `native` tier the provider enforces nothing, so the schema is restated in the
  * system half: the `schema` option still governs parsing here, it just no longer reaches the
- * endpoint as a constraint.
+ * endpoint as a constraint. It goes first, not last: with the schema trailing a long
+ * instruction block, ox-alpha answered the agent loop in prose five times out of six;
+ * leading with it, the same prompts came back as valid objects every time.
  */
 export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCachePlan, tier: StructuredOutputTier) {
-  const system = tier === 'native' ? opts.system : `${opts.system}\n\n${schemaAppendix(opts.schema)}`;
+  const system = tier === 'native' ? opts.system : `${schemaAppendix(opts.schema)}\n\n${opts.system}`;
   return {
     schema: opts.schema,
     instructions: cache.systemProviderOptions
