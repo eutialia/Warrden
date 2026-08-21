@@ -38,9 +38,11 @@ const LlmSchema = z.object({ model: LlmModelSchema.optional(), keys: LlmKeysSche
 // Absolute or blank. A relative media path resolves against the working directory, which
 // differs between `npm run dev` and the container, so it is never what the operator meant.
 // Blank is how the operator says "I do not have this library".
+// Trimmed before the test, matching `storageRoles`: a hand-edited config.json with a
+// stray space in a field is a disabled role, never a boot failure.
 const StoragePathSchema = z
   .string()
-  .refine((p) => p === '' || p.startsWith('/'), {
+  .refine((p) => p.trim() === '' || p.trim().startsWith('/'), {
     message: 'must be an absolute path, or blank to disable the role',
   });
 export const ConfigSchema = z

@@ -167,7 +167,7 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
     ctx.events.append({
       kind: 'ingest.source-fallback-skipped',
       jobId: job.id,
-      message: `No usable local source folder, and no Downloads path is configured to search for one. Set it in Settings under Storage.`,
+      message: 'No usable local source folder, and no Downloads path is configured to search for one. Set it in Settings under Storage.',
       data: targetEventData(job),
     });
   } else if (sourceDirsLocal.length === 0 && movieFile) {
