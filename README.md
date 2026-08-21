@@ -69,6 +69,37 @@ mounts, including the size-match fallback, the foreign-file guard, and the stuck
 filters. Series ingest and the LLM matching steps are covered by unit and integration
 tests against mocked arrs, but haven't had a live pass yet.
 
+### Running it outside Docker
+
+The API and the dashboard are built separately, so a bare `npm run dev` serves whatever
+was last built into `web/dist`. That goes stale the moment you touch `web/src`, with
+nothing to tell you so. Pick by what you're working on:
+
+```sh
+npm run dev:all   # API watcher + vite dev server; the UI is always your source on disk
+npm run dev       # API only, on :9797, serving the last built dashboard
+npm run dev:web   # vite only, on :5173, against an API you're running elsewhere
+npm start         # build both, then run the compiled server, as the container does
+```
+
+`dev:all` is the one to reach for. Vite serves the dashboard on `:5173` with HMR and
+proxies `/api` to the API on `:9797`, so the app stays same-origin from the browser's
+side. Both halves stop together on Ctrl-C.
+
+Open `:5173`. Under `dev:all` the API deliberately serves no dashboard of its own
+(`WARRDEN_SERVE_WEB=false`), so `:9797` answers API routes and 404s everything else.
+Landing on the wrong port gives you an obvious 404 rather than a stale UI that looks
+live. `npm run dev` on its own is unaffected and still serves `web/dist` at `:9797`.
+
+The API still logs `warrden listening on port 9797` at boot, because it is: that is the
+port vite proxies `/api` to. Under `dev:all` it says so in a way that names the split.
+
+`npm start` is for checking a change against the real compiled artifacts before it ships.
+
+Set the four storage paths below to real paths on this machine first. The Docker defaults
+(`/tv` and friends) don't exist outside the container, and every pipeline pauses until
+they resolve.
+
 ### Where Warrden looks for your media
 
 Four paths, set under Settings, Storage. Leave one blank if you do not have that library.
