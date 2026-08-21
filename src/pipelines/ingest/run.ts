@@ -160,7 +160,17 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // source, so an exact size match between the movie's current file and a video sitting
   // under a configured torrent-client root re-derives that torrent's own folder with no
   // history needed at all.
-  if (sourceDirsLocal.length === 0 && movieFile) {
+  if (sourceDirsLocal.length === 0 && movieFile && downloadRoots.length === 0) {
+    // Distinct from source-fallback-miss below: that one means the scan ran and matched
+    // nothing. This one means there was nowhere to scan, because the operator has no
+    // Downloads path set. The fix is a setting, not a retry.
+    ctx.events.append({
+      kind: 'ingest.source-fallback-skipped',
+      jobId: job.id,
+      message: `No usable local source folder, and no Downloads path is configured to search for one. Set it in Settings under Storage.`,
+      data: targetEventData(job),
+    });
+  } else if (sourceDirsLocal.length === 0 && movieFile) {
     const { dirs: fallbackDirs, rootsScanned } = findMovieSourceDirsBySize(
       downloadRoots,
       ctx.config.pathMappings,

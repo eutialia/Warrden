@@ -844,6 +844,19 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7)).toHaveLength(0);
   });
 
+  it('movie source-fallback skipped: no Downloads path configured -> an info ingest.source-fallback-skipped event says the role is unconfigured, instead of reporting a scan of zero roots', async () => {
+    const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
+    fx.client.movieHistory = [];
+    fx.ctx.config.storage.downloads = '';
+
+    const job = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, job);
+
+    expect(hasEvent(fx.ctx.events.list(), 'ingest.source-fallback-miss')).toBe(false);
+    expect(findEvent(fx.ctx.events.list(), 'ingest.source-fallback-skipped')).toBeTruthy();
+    expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'movie', 7)).toHaveLength(0);
+  });
+
   it('movie source-fallback: a dot-prefixed depth-1 directory (NAS housekeeping trees like .zfs/.Trashes) is skipped, not walked, even when it contains a size-matching video', async () => {
     const fx = ingestFixture({ targetKind: 'movie', targetId: 7, videoFileName: 'Movie.mkv' });
     fx.client.movieHistory = [];
