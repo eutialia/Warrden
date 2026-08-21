@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Combobox as ComboboxPrimitive } from "@base-ui/react/combobox"
 
-import { cn } from "@/lib/utils"
+import { chipBarClass, chipClass, cn } from "@/lib/utils"
 import { CheckIcon, ChevronsUpDownIcon } from "lucide-react"
 
 /**
@@ -39,15 +39,56 @@ function ComboboxTrigger({
   )
 }
 
-/** `Value` renders no element of its own, so the truncation lives on a wrapper here. */
+/** `Value` renders no element of its own, so the truncation lives on a wrapper here.
+ * Function children (chip lists) need the wrapper gone, or they clip. */
 function ComboboxValue({
   className,
+  children,
   ...props
 }: ComboboxPrimitive.Value.Props & { className?: string }) {
+  if (typeof children === "function") {
+    return <ComboboxPrimitive.Value {...props}>{children}</ComboboxPrimitive.Value>
+  }
   return (
     <span data-slot="combobox-value" className={cn("min-w-0 flex-1 truncate", className)}>
-      <ComboboxPrimitive.Value {...props} />
+      <ComboboxPrimitive.Value {...props}>{children}</ComboboxPrimitive.Value>
     </span>
+  )
+}
+
+function ComboboxChips({ className, ...props }: ComboboxPrimitive.Chips.Props) {
+  return (
+    <ComboboxPrimitive.Chips
+      data-slot="combobox-chips"
+      className={cn(
+        chipBarClass,
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function ComboboxChip({ className, ...props }: ComboboxPrimitive.Chip.Props) {
+  return (
+    <ComboboxPrimitive.Chip
+      data-slot="combobox-chip"
+      className={cn(
+        chipClass,
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function ComboboxChipRemove({ className, ...props }: ComboboxPrimitive.ChipRemove.Props) {
+  return (
+    <ComboboxPrimitive.ChipRemove
+      data-slot="combobox-chip-remove"
+      className={cn("rounded-sm p-0.5 hover:bg-muted [&_svg]:size-3", className)}
+      {...props}
+    />
   )
 }
 
@@ -176,6 +217,9 @@ function ComboboxFooter({ className, ...props }: React.ComponentProps<"div">) {
 
 export {
   Combobox,
+  ComboboxChip,
+  ComboboxChipRemove,
+  ComboboxChips,
   ComboboxContent,
   ComboboxEmpty,
   ComboboxFooter,

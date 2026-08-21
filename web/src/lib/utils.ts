@@ -5,6 +5,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Outer chrome for chip bars (language combobox and freeform tag lists). */
+export const chipBarClass =
+  'flex min-h-9 w-full flex-wrap items-center gap-1.5 rounded-lg border border-input bg-transparent px-2 py-1.5 text-sm transition-colors outline-none focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30'
+
+export const chipClass =
+  'inline-flex h-auto max-w-full items-center gap-1 rounded-4xl bg-secondary py-1 pr-1 pl-2 font-sans text-xs font-normal text-secondary-foreground'
+
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
 
 /**
