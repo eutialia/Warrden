@@ -133,9 +133,8 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   }
 
   const placedFiles = new PlacedFiles(ctx.db);
-  cleanupStaleProvenance(ctx, job, placedFiles);
-
   const target = await resolveTarget(client, job);
+  cleanupStaleProvenance(ctx, job, placedFiles, target);
 
   const droppedPaths = target.history.map((h) => h.data.droppedPath).filter((p): p is string => Boolean(p));
   // One derivation pass feeds both the sidecar sweep's full dir set (`all`) and the
@@ -335,32 +334,35 @@ function siblingVideosInDir(dir: string): string[] {
  * job's target owns are considered, and only `placed_files`-recorded paths are ever
  * touched, per the destruction limit: Warrden never deletes a file it didn't place.
  *
- * A missing `video_path` is ambiguous on its own: it can mean the video genuinely vanished
- * (re-imported/upgraded/deleted — real stale), or it can mean the video's whole share isn't
- * mounted right now (`assertMounted` only checks the configured storage roots, so a share
- * that isn't one of them can slip past it entirely). Only the parent folder's own reachability tells the
- * two apart: `existsSync(dirname(row.video_path))` true means the folder is there and the
- * video specifically is gone (real stale, safe to clean); false means the whole folder is
- * unreachable, so nothing here can tell deletion from an outage — the row is skipped rather
- * than cleaned, because provenance for an unavailable mount must survive the outage, not be
- * read as "the file is gone" and destroyed. Every skipped row for this run is folded into
- * one `ingest.stale-clean-deferred` warn event rather than one per row, so a whole
- * unreachable share doesn't flood the event log.
+ * Staleness is decided from the arr's own file list (`target`'s `episodeFiles`/
+ * `movieFiles`, already fetched by `resolveTarget`), not the filesystem. Sonarr/Radarr own
+ * the library and are the authority on whether a file still exists, and they already
+ * decline to drop their own file records when a root folder is unreachable — so Warrden
+ * doesn't have to guess "genuinely deleted" from "share unmounted" itself.
+ *
+ * A row matches a live file when its `video_path` equals the file's `path` outright, or
+ * when it ends with `/` plus the file's `relativePath`. The arr reports paths in its own
+ * layout while `video_path` was stored in Warrden's, and the two differ only in the root
+ * prefix, so the tail below the library root is identical either way — matching on that
+ * tail needs no `pathMappings` translation at all. A false match can only make this check
+ * keep a row it might have cleaned, which is the safe direction. An empty file list (the
+ * target has no files at all right now) is a legitimate answer, not a special case: every
+ * row for it is simply stale.
  *
  * One row's `rmSync` failure (a permission error, the path being a directory, ...) is
  * contained per-row (same shape as `tryPlace`'s containment) rather than aborting the rest
  * of the cleanup pass — and the row is deliberately kept, not deleted, on failure: the file
  * is still sitting there unremoved, so dropping provenance for it now would misrepresent
  * reality and drop it from being retried next run. */
-function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles): void {
+function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, target: TargetContext): void {
+  const liveFiles: { path: string; relativePath: string }[] = target.kind === 'series' ? target.episodeFiles : target.movieFiles;
   const rows = placedFiles.listByTarget(job.arr_instance, job.target_kind, job.target_id);
-  let deferredCount = 0;
   for (const row of rows) {
-    if (existsSync(row.video_path)) continue;
-    if (!existsSync(dirname(row.video_path))) {
-      deferredCount++;
-      continue;
-    }
+    const stillLive = liveFiles.some(
+      (file) => row.video_path === file.path || (file.relativePath.length > 0 && row.video_path.endsWith(`/${file.relativePath}`)),
+    );
+    if (stillLive) continue;
+
     try {
       rmSync(row.placed_path, { force: true });
     } catch (err) {
@@ -379,16 +381,6 @@ function cleanupStaleProvenance(ctx: AppContext, job: JobRow, placedFiles: Place
       jobId: job.id,
       message: `Removed "${row.placed_path}" — its video no longer exists`,
       data: targetEventData(job, { placedPath: row.placed_path, videoPath: row.video_path }),
-    });
-  }
-
-  if (deferredCount > 0) {
-    ctx.events.append({
-      kind: 'ingest.stale-clean-deferred',
-      level: 'warn',
-      jobId: job.id,
-      message: `Deferred stale-cleanup for ${deferredCount} row(s) — their video's parent folder is unreachable (mount likely unavailable), not just the video itself`,
-      data: targetEventData(job, { count: deferredCount }),
     });
   }
 }

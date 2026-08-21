@@ -480,60 +480,60 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(1);
   });
 
-  it('stale cleanup mount discriminator: a video whose PARENT FOLDER is also missing (unmounted share) is deferred, not cleaned — the row and its placed file both survive', async () => {
-    const fx = ingestFixture();
+  it('stale cleanup namespace mismatch: the arr\'s path is in a different namespace from video_path, but relativePath matches its tail -> nothing is cleaned', async () => {
+    // This is the case the whole design turns on: the arr reports its own layout
+    // ('/downloads-side/...'), video_path was recorded in Warrden's ('/mnt/library/...'),
+    // and only the tail below the library root — relativePath — is guaranteed to agree.
+    const relativePath = 'Season 01/Show - S01E05.mkv';
+    const fx = ingestFixture({
+      episodeFiles: [{ id: 100, seriesId: 42, seasonNumber: 1, relativePath, path: '/downloads-side/Show/Season 01/Show - S01E05.mkv' }],
+    });
     const placedFiles = new PlacedFiles(fx.ctx.db);
 
-    // The video's parent directory itself doesn't exist — indistinguishable from "the whole
-    // NAS share isn't mounted right now" from cleanupStaleProvenance's point of view, so it
-    // must never be read as "the video was deleted".
-    const unmountedVideoPath = join(fx.libraryDir, 'unmounted-share', 'Ghost Episode.mkv');
-    const placedUnderUnmounted = join(fx.libraryDir, 'unmounted-share', 'Ghost Episode.ass');
+    const placedPath = join(fx.libraryDir, 'Show - S01E05.ass');
+    writeFileSync(placedPath, 'live');
     placedFiles.upsert({
       arrInstance: fx.arrInstance,
       targetKind: fx.targetKind,
       targetId: fx.targetId,
       kind: 'subtitle',
-      placedPath: placedUnderUnmounted,
-      videoPath: unmountedVideoPath,
-      sourcePath: join(fx.torrentDir, 'ghost-source.ass'),
+      placedPath,
+      videoPath: `/mnt/library/${relativePath}`, // different root, same tail
+      sourcePath: join(fx.torrentDir, 'source.ass'),
     });
 
     const job = claimIngestJob(fx);
     await runIngestJob(fx.ctx, job);
 
-    // Row survives untouched — nothing was deleted, nothing was even attempted.
-    expect(placedFiles.findByPlacedPath(placedUnderUnmounted)).not.toBeNull();
+    expect(existsSync(placedPath)).toBe(true);
+    expect(placedFiles.findByPlacedPath(placedPath)).not.toBeNull();
     expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(0);
-    expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-clean-failed')).toHaveLength(0);
-
-    const deferred = fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.stale-clean-deferred');
-    expect(deferred).toHaveLength(1);
-    expect(deferred[0]!.data).toMatchObject({ instance: fx.arrInstance, targetKind: fx.targetKind, targetId: fx.targetId, count: 1 });
   });
 
-  it('stale cleanup mount discriminator: several deferred rows in one run collapse into a single ingest.stale-clean-deferred event naming the count', async () => {
-    const fx = ingestFixture();
+  it('stale cleanup: the video is absent from the arr\'s file list -> the row and file are removed and ingest.stale-cleaned fires', async () => {
+    // An empty arr file list is itself a legitimate answer (the target has no files at
+    // all), so every row for it is stale — no special-casing needed.
+    const fx = ingestFixture({ episodeFiles: [] });
     const placedFiles = new PlacedFiles(fx.ctx.db);
 
-    for (let i = 0; i < 3; i++) {
-      placedFiles.upsert({
-        arrInstance: fx.arrInstance,
-        targetKind: fx.targetKind,
-        targetId: fx.targetId,
-        kind: 'subtitle',
-        placedPath: join(fx.libraryDir, 'unmounted-share', `Ghost ${i}.ass`),
-        videoPath: join(fx.libraryDir, 'unmounted-share', `Ghost ${i}.mkv`),
-        sourcePath: join(fx.torrentDir, `ghost-source-${i}.ass`),
-      });
-    }
+    const staleTarget = join(fx.libraryDir, 'Deleted Episode.ass');
+    writeFileSync(staleTarget, 'stale');
+    placedFiles.upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: fx.targetKind,
+      targetId: fx.targetId,
+      kind: 'subtitle',
+      placedPath: staleTarget,
+      videoPath: fx.videoPath,
+      sourcePath: join(fx.torrentDir, 'stale-source.ass'),
+    });
 
     const job = claimIngestJob(fx);
     await runIngestJob(fx.ctx, job);
 
-    const deferred = fx.ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'ingest.stale-clean-deferred');
-    expect(deferred).toHaveLength(1);
-    expect(deferred[0]!.data).toMatchObject({ count: 3 });
+    expect(existsSync(staleTarget)).toBe(false);
+    expect(placedFiles.findByPlacedPath(staleTarget)).toBeNull();
+    expect(fx.ctx.events.list().filter((e) => e.kind === 'ingest.stale-cleaned')).toHaveLength(1);
   });
 
   it('stale cleanup containment: one row failing to rmSync (EISDIR, not ENOENT) warns and keeps that row, but still cleans the next stale row', async () => {
