@@ -20,11 +20,11 @@ import {
 } from '@/api';
 import { ArrHealth } from '@/components/ArrHealth';
 import { ModelPicker } from '@/components/ModelPicker';
-import { MountHealth } from '@/components/MountHealth';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
+import { StorageHealth } from '@/components/StorageHealth';
 import { THEME_OPTIONS } from '@/components/ThemeToggle';
 import { TagInput } from '@/components/TagInput';
 import { StatusDot, ToneBadge } from '@/components/ToneBadge';
@@ -188,7 +188,7 @@ export default function ConfigPage() {
   useEffect(load, [load]);
 
   // A router navigation doesn't act on the fragment the way a real page load would, and
-  // the section it names doesn't exist until the config resolves — so "Check mounts" on
+  // the section it names doesn't exist until the config resolves, so "Check storage" on
   // the home screen would otherwise just drop you at the top of a long page.
   // Depending on `draft` itself would re-scroll on every keystroke, since each edit
   // clones it; only its arrival matters.
@@ -567,7 +567,7 @@ export default function ConfigPage() {
               directly or in an LXC, they are paths on this machine. Leave one blank if you do not have that library.
             </CardDescription>
             <CardAction>
-              <MountHealth checks={storageChecks} />
+              <StorageHealth checks={storageChecks} />
             </CardAction>
           </CardHeader>
           <CardContent className="space-y-3">

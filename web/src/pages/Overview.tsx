@@ -4,10 +4,10 @@ import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'luc
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
 import { ActivityList } from '@/components/activity/ActivityList';
 import { TargetDrawer } from '@/components/activity/TargetDrawer';
-import { MountHealth, unreachableCount } from '@/components/MountHealth';
 import { PageHeader } from '@/components/PageHeader';
 import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusNotice } from '@/components/StatusNotice';
+import { StorageHealth, storageProblems } from '@/components/StorageHealth';
 import { StatusDot } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,15 +33,16 @@ interface Verdict {
 
 /**
  * The one sentence the home screen exists to produce. Ordered by how much a human
- * needs to act: a broken storage path stops all filesystem work, a review backlog is
- * waiting on a decision, failures are informational after the fact.
+ * needs to act: a missing storage path stops all filesystem work, a review backlog is
+ * waiting on a decision, a suspect path is producing quiet nothing, failures are
+ * informational after the fact.
  */
 function verdictOf(data: OverviewData): Verdict {
-  const bad = unreachableCount(data.storage);
-  if (bad > 0) {
+  const storage = storageProblems(data.storage);
+  if (storage.missing > 0) {
     return {
       tone: 'danger',
-      headline: `${bad} storage ${bad === 1 ? 'path is' : 'paths are'} unreachable`,
+      headline: `${storage.missing} storage ${storage.missing === 1 ? 'path is' : 'paths are'} unreachable`,
       detail: 'Warrden pauses filesystem work until the paths come back. Check the paths under Settings, Storage.',
       action: { label: 'Check storage', to: '/config#storage' },
     };
@@ -52,6 +53,15 @@ function verdictOf(data: OverviewData): Verdict {
       headline: `${data.attention.open} ${data.attention.open === 1 ? 'thing needs' : 'things need'} your review`,
       detail: 'Warrden stopped short of deciding these on its own.',
       action: { label: 'Review now', to: '/attention' },
+    };
+  }
+  if (storage.suspect > 0) {
+    return {
+      tone: 'warning',
+      headline: `${storage.suspect} storage ${storage.suspect === 1 ? 'path needs' : 'paths need'} a look`,
+      detail:
+        'Warrden is still working, but a path is either an empty directory where a share should be, or one it cannot read.',
+      action: { label: 'Check storage', to: '/config#storage' },
     };
   }
   if (data.jobs.running > 0 || data.jobs.pending > 0) {
@@ -234,7 +244,7 @@ export default function Overview() {
               Storage
             </CardTitle>
             <CardAction>
-              <MountHealth checks={data?.storage ?? []} />
+              <StorageHealth checks={data?.storage ?? []} />
             </CardAction>
           </CardHeader>
           <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
@@ -242,6 +252,9 @@ export default function Overview() {
             {data?.storage.map((check) => (
               <div key={check.id} className="flex items-center gap-3 py-2.5">
                 <StatusDot tone={storageStatusTone(check.status)} />
+                {/* A disabled role has no path, and a row identified only by its path is
+                    then an anonymous blank line. The label always names the library. */}
+                <span className="shrink-0 text-xs text-muted-foreground">{check.label}</span>
                 <code className="min-w-0 flex-1 truncate text-xs">{check.path}</code>
                 {/* Capacity when the mount can answer, its problem when it can't —
                     the right-hand column always says the most useful thing it has. */}
