@@ -43,7 +43,7 @@ import { resolvePickedRelease } from '../pipelines/acquire/picked.js';
 import { assessQueue } from '../pipelines/ingest/queueState.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
-import { cachedStorage, probeStorage } from './storageHealth.js';
+import { cachedStorage, probeStorage, resetStorageCache } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
@@ -1062,6 +1062,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       saveConfig(dataDir, result.data);
       const arrsChanged = JSON.stringify(previous.arrs) !== JSON.stringify(result.data.arrs);
       const publicUrlChanged = previous.server.publicUrl !== result.data.server.publicUrl;
+      if (JSON.stringify(previous.storage) !== JSON.stringify(result.data.storage)) resetStorageCache();
       // Every consumer reads `ctx.config` (and, for arr calls, `ctx.clients`) live, so
       // pointing the context at the new config is all it takes for the save to be fully in
       // effect. Nothing here is deferred to a restart; only `server.port` still needs one,

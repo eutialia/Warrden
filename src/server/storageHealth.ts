@@ -1,48 +1,31 @@
-import { accessSync, constants, existsSync, statfsSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { accessSync, constants, existsSync, statfsSync } from 'node:fs';
 import type { Config } from '../config/schema.js';
 import { storageRoles, type StorageRoleId } from '../config/storage.js';
+import { containingMount, isEmptyDir } from '../fs/mountPoint.js';
 
-export type StorageCheckStatus = 'ok' | 'missing' | 'unreadable' | 'unwritable' | 'not-mounted';
+export type StorageCheckStatus = 'ok' | 'not-configured' | 'missing' | 'looks-unmounted' | 'unreadable';
 
 export interface StorageCheck {
-  /** Stable mount role — series | anime | movies | downloads. */
   id: StorageRoleId;
   /** Human label for the dashboard. */
   label: string;
-  /** Path shown as the configured/expected location. */
+  /** The configured path, or '' when the role is disabled. */
   path: string;
-  /** Path as seen inside Warrden (same as path for the four standard mounts). */
-  localPath: string;
-  role: StorageRoleId;
   status: StorageCheckStatus;
   detail: string;
-  /** Always true for the four standard mounts — UI must not offer an editor. */
-  immutable: boolean;
-  /** How full the volume is. Absent when the mount is unreachable, or when the
-   * filesystem won't answer — a missing number is not the same as a full disk, so
-   * the UI has to be able to tell the two apart. */
+  /** How full the volume is. Absent when the path is unreachable, or when the filesystem
+   * will not answer: a missing number is not the same as a full disk. */
   usage?: { totalBytes: number; usedBytes: number };
 }
 
-/**
- * Probes the four standard mounts (Series / Anime / Movies / Downloads).
- * Path mappings stay file/env-only — never edited or shown here.
- *
- * A path that merely *exists* is not enough: the image must not pre-create `/tv` etc.,
- * and we also require a real mount point (device id differs from parent) so an empty
- * leftover directory never reports as OK.
- */
 /** How long a probe stays good enough for a page that polls. */
 const CACHE_MS = 30_000;
 let cached: { at: number; checks: StorageCheck[] } | null = null;
 
 /**
- * The probe, but safe to call from a route the dashboard polls. Every check here is a
- * blocking syscall against a network mount, and Node has one thread: a hung NFS share
- * would otherwise stall webhooks and the job queue behind it, once per poll per open tab.
- * The explicit "Re-check now" button calls `probeStorage` instead and always sees fresh
- * results.
+ * The probe, but safe to call from a route the dashboard polls. Every check is a blocking
+ * syscall against a network path, and Node has one thread: a hung NFS share would stall
+ * webhooks and the job queue behind it, once per poll per open tab.
  */
 export function cachedStorage(config: Config, now = Date.now()): StorageCheck[] {
   if (cached && now - cached.at < CACHE_MS) return cached.checks;
@@ -51,16 +34,32 @@ export function cachedStorage(config: Config, now = Date.now()): StorageCheck[] 
   return checks;
 }
 
+/** Drops the cached probe. Called when the operator saves new paths, so the panel answers
+ * for what they just typed instead of for what was there half a minute ago. */
+export function resetStorageCache(): void {
+  cached = null;
+}
+
 export function probeStorage(config: Config): StorageCheck[] {
-  return storageRoles(config).map((role) => ({
-    id: role.id,
-    label: role.label,
-    path: role.path,
-    localPath: role.path,
-    role: role.id,
-    immutable: true,
-    ...probeAccess(role.path, role.label, /* requireMountPoint */ true),
-  }));
+  return storageRoles(config).map((role) => {
+    if (!role.configured) {
+      return {
+        id: role.id,
+        label: role.label,
+        path: '',
+        status: 'not-configured' as const,
+        detail: `No path set. Warrden skips ${role.label} entirely.`,
+      };
+    }
+    const access = probeAccess(role.path, role.label);
+    return {
+      id: role.id,
+      label: role.label,
+      path: role.path,
+      ...access,
+      ...(access.status === 'ok' ? { usage: diskUsage(role.path) } : {}),
+    };
+  });
 }
 
 /**
@@ -83,53 +82,34 @@ function diskUsage(p: string): StorageCheck['usage'] {
 }
 
 /**
- * True when `p` is its own mount point (device id differs from parent). Empty directories
- * that live on the container rootfs share the parent's device and fail this check —
- * which is what we want for "forgot to bind-mount /tv".
+ * Whether the media is really there.
+ *
+ * A path that exists is not enough. Docker creates an empty `/tv` on the container's own
+ * filesystem when you forget the bind mount, and ingest would then look like it found
+ * nothing rather than like it looked in the wrong place. So an empty directory that sits on
+ * the root filesystem reports `looks-unmounted`.
+ *
+ * Anything on another filesystem passes, which is the NFS and SMB case: `/mnt/media/Series`
+ * is a directory inside the share, not the share itself. A directory on the root filesystem
+ * with files in it passes too, which is media on a laptop's own disk.
  */
-export function isMountPoint(p: string): boolean {
-  try {
-    const st = statSync(p);
-    if (!st.isDirectory()) return false;
-    const parent = dirname(p);
-    if (parent === p) return true;
-    const pst = statSync(parent);
-    return st.dev !== pst.dev;
-  } catch {
-    return false;
-  }
-}
-
-function probeAccess(
-  localPath: string,
-  label: string,
-  requireMountPoint: boolean,
-): Pick<StorageCheck, 'status' | 'detail'> {
-  if (!existsSync(localPath)) {
-    return {
-      status: 'missing',
-      detail: `${label} not found at ${localPath} — bind this volume when creating the container`,
-    };
-  }
-
-  if (requireMountPoint && !isMountPoint(localPath)) {
-    return {
-      status: 'not-mounted',
-      detail: `${label} exists as an empty container path, not a bind mount — add -v hostPath:${localPath} when starting the container`,
-    };
+function probeAccess(path: string, label: string): Pick<StorageCheck, 'status' | 'detail'> {
+  if (!existsSync(path)) {
+    return { status: 'missing', detail: `${label} not found at ${path}` };
   }
 
   try {
-    accessSync(localPath, constants.R_OK);
+    accessSync(path, constants.R_OK);
   } catch {
+    return { status: 'unreadable', detail: `${path} exists but Warrden cannot read it` };
+  }
+
+  if (containingMount(path) === '/' && isEmptyDir(path)) {
     return {
-      status: 'unreadable',
-      detail: `Exists but is not readable by Warrden`,
+      status: 'looks-unmounted',
+      detail: `${path} is an empty directory on this machine's own filesystem, not a mounted share`,
     };
   }
 
-  return {
-    status: 'ok',
-    detail: `Mounted and readable at ${localPath}`,
-  };
+  return { status: 'ok', detail: `Reachable at ${path}` };
 }
