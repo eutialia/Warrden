@@ -26,7 +26,7 @@ interface Verdict {
   tone: Tone;
   headline: string;
   detail: string;
-  /** The one thing to do about it — always the fix for the headline, never a
+  /** The one thing to do about it. Always the fix for the headline, never a
    * generic call to action that sends you somewhere unrelated. */
   action?: { label: string; to: string };
 }
@@ -117,7 +117,7 @@ export default function Overview() {
   const verdict = data ? verdictOf(data) : null;
   const inFlight = (data?.jobs.running ?? 0) + (data?.jobs.pending ?? 0);
   const placed = (data?.placed.subtitle ?? 0) + (data?.placed.audio ?? 0);
-  // Only worth saying once a week's worth of jobs have actually finished — "100%
+  // Only worth saying once a week's worth of jobs have actually finished. "100%
   // clean" out of nothing finished is a lie of omission.
   const weekTotal = (data?.week.done ?? 0) + (data?.week.failed ?? 0);
   // Floored, never rounded up: 1999 of 2000 must not read as "100% clean" beside a
@@ -129,17 +129,17 @@ export default function Overview() {
     <div className="space-y-6">
       <PageHeader
         title="Overview"
-        description="Warrden at a glance — what it is working on, what it finished, and anything it could not decide alone."
+        description="Warrden at a glance: what it is working on, what it finished, and anything it could not decide alone."
       />
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       {/* The verdict. One sentence, sized so it is readable across a room, in the
           serif that carries every title. The tone lives in the icon badge rather
-          than an accent rail — the eye goes to the icon anyway, so a rail would
+          than an accent rail. The eye goes to the icon anyway, so a rail would
           only repeat it. */}
       <div className="flex flex-wrap items-center gap-4 empty:hidden">
         {/* Skeletons only while a request is genuinely in flight. If it failed there is
-            no verdict to give and the notice above already says why — leaving the
+            no verdict to give and the notice above already says why. Leaving the
             skeleton up would promise an answer that is never coming. */}
         {loading ? (
           <div className="space-y-2">
@@ -205,7 +205,7 @@ export default function Overview() {
       </StatBand>
 
       {/* The queue reads as the page's subject, so it takes the wide column and the
-          mounts sit beside it rather than under it. */}
+          storage panel sits beside it rather than under it. */}
       <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
         <Card>
           <CardHeader>
@@ -219,7 +219,7 @@ export default function Overview() {
           </CardHeader>
           <CardContent>
             {/* "Nothing yet" is a claim about the queue, so it waits until a request has
-                actually answered — before that the truth is simply unknown. */}
+                actually answered. Before that, the truth is unknown. */}
             {!jobsLoaded ? (
               <div className="space-y-3 border-t py-4">
                 {Array.from({ length: 4 }, (_, i) => (
@@ -256,8 +256,8 @@ export default function Overview() {
                     then an anonymous blank line. The label always names the library. */}
                 <span className="shrink-0 text-xs text-muted-foreground">{check.label}</span>
                 <code className="min-w-0 flex-1 truncate text-xs">{check.path}</code>
-                {/* Capacity when the mount can answer, its problem when it can't —
-                    the right-hand column always says the most useful thing it has. */}
+                {/* Capacity when storage can answer, its problem when it can't. The
+                    right-hand column always says the most useful thing it has. */}
                 <span
                   className={cn(
                     'shrink-0 font-mono text-xs',

@@ -77,6 +77,7 @@ Four paths, set under Settings, Storage. Leave one blank if you do not have that
 | --- | --- |
 | Docker | Bind your directories to `/tv`, `/anime`, `/movies`, and `/downloads`. The defaults already point there, so there is nothing to configure. |
 | Proxmox LXC, or running directly | Set the four paths to wherever the shares are on the host, such as `/mnt/media/Series`. No environment variables. |
+| Development | Same as running directly. `WARRDEN_DATA_DIR` still picks the data directory, defaulting to `./data`. |
 
 If a path shows **Looks unmounted**, it exists as an empty directory on the machine's own
 filesystem. Under Docker that means the bind mount is missing. Elsewhere it usually means

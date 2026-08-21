@@ -1001,7 +1001,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge), version });
     });
 
-    // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
+    // Read-only probes for Settings → Storage. The paths themselves are editable
+    // through PUT /api/config below; this route only reports their current status.
     app.get('/api/health/storage', (c) => c.json({ checks: probeStorage(requireConfig(ctx)) }));
 
     // Same idea for Settings → Arr instances. Nested guard rather than widening the block

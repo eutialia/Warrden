@@ -92,9 +92,10 @@ export class MountError extends Error {
 /**
  * Verifies every path in `paths` exists, throwing `MountError` (listing exactly the
  * absent ones) otherwise. Guards against running filesystem work (sweeps, copies, deletes)
- * against an unmounted NAS share, where the mount point exists as an empty local
- * directory and would otherwise look like "nothing to do" instead of "not actually
- * mounted". An empty list, meaning every role is disabled, is a no-op.
+ * against a share that was never mounted. This check only looks for the path's presence;
+ * it cannot tell a real share from an empty local directory sitting where a mount point
+ * should be. That case is caught by the storage probe, not here. An empty list, meaning
+ * every role is disabled, is a no-op.
  */
 export function ensureMounts(paths: string[]): void {
   const missing = paths.filter((p) => !existsSync(p));
