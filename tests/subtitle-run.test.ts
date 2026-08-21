@@ -400,7 +400,7 @@ describe('runSubtitleJob', () => {
 
   it('movie target respects the mount guard like series (missing marker reschedules)', async () => {
     const fx = subtitleFixture({ targetKind: 'movie', targetId: 7 });
-    fx.ctx.config.ingest.mountMarkers = [join(fx.libraryDir, 'nas-mount-marker')];
+    fx.ctx.config.storage.series = join(fx.libraryDir, 'nas-mount-marker');
 
     const job = claimSubtitleJob(fx);
     await expect(runSubtitleJob(fx.ctx, job)).rejects.toMatchObject({

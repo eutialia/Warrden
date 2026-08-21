@@ -618,7 +618,7 @@ export function ingestFixture(opts?: {
   episodes?: EpisodeResource[];
   episodeFiles?: EpisodeFileResource[];
   movieFiles?: MovieFileResource[];
-  mountMarkers?: string[];
+  storage?: Partial<Record<'series' | 'anime' | 'movies' | 'downloads', string>>;
 }): IngestFixture {
   const targetKind = opts?.targetKind ?? 'series';
   const targetId = opts?.targetId ?? 42;
@@ -674,10 +674,10 @@ export function ingestFixture(opts?: {
         { from: downloadsDir, to: downloadsDir },
         { from: libraryDir, to: libraryDir },
       ],
-      // Non-empty mountMarkers is a test override so we don't require the real standard
-      // `/tv` `/anime` `/movies` `/downloads` paths on the developer machine. Production
-      // leaves mountMarkers empty and enforces those four.
-      ingest: { mountMarkers: opts?.mountMarkers ?? [downloadsDir], downloadRoots: [downloadsDir] },
+      // The fixture's tmpdirs stand in for the real libraries so a test never depends on
+      // /tv or /downloads existing on the machine running it. Series and Movies are blank
+      // because this fixture has one library dir, and a blank role is simply not checked.
+      storage: opts?.storage ?? { series: '', anime: '', movies: '', downloads: downloadsDir },
     }),
     // Ingest now enqueues a follow-on subtitle job for series targets; the real runner
     // (e2e.test.ts) picks that job up and runSubtitleJob requires ctx.media for its
@@ -962,8 +962,7 @@ export function subtitleFixture(opts?: {
     clients: new Map([[arrInstanceName, client]]),
     config: ConfigSchema.parse({
       pathMappings: [{ from: libraryDir, to: libraryDir }],
-      // Test override so assertMounted does not require real /tv /anime /movies /downloads.
-      ingest: { mountMarkers: [libraryDir], downloadRoots: [] },
+      storage: { series: libraryDir, anime: '', movies: '', downloads: '' },
       subtitle: {
         languages: opts?.languages ?? ['zh-Hans'],
         preferredGroups: opts?.preferredGroups ?? [],

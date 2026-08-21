@@ -13,7 +13,7 @@ describe('config store', () => {
     expect(cfg.arrs).toEqual([]);
     expect(cfg.llm.model).toBeUndefined();
     expect(cfg.reconcileIntervalMinutes).toBe(15);
-    expect(cfg.ingest).toEqual({ mountMarkers: [], downloadRoots: [] });
+    expect(cfg.storage).toEqual({ series: '/tv', anime: '/anime', movies: '/movies', downloads: '/downloads' });
   });
 
   it('round-trips saved config', () => {
@@ -22,10 +22,12 @@ describe('config store', () => {
     cfg.picking.prefer = ['CHS subs', 'dual audio'];
     cfg.picking.avoid = ['HEVC re-encodes'];
     cfg.arrs.push({ name: 'sonarr', kind: 'sonarr', baseUrl: 'http://sonarr:8989', apiKey: 'k' });
-    cfg.ingest.mountMarkers.push('/mnt/nas/.mounted');
-    cfg.ingest.downloadRoots.push('/data/downloads');
+    cfg.pathMappings.push({ from: '/mnt/nas/downloads', to: '/downloads' });
     saveConfig(dir, cfg);
     expect(loadConfig(dir)).toEqual(cfg);
+    // A fresh parse must not see the mutation above: proves pathMappings' default isn't
+    // a shared reference across parses.
+    expect(loadConfig(tmp()).pathMappings).toEqual([]);
   });
 
   it('does not share nested default structure across parses', () => {
@@ -246,22 +248,12 @@ describe('config store', () => {
       },
     },
     {
-      // A blank marker would trivially "exist" as a no-op `existsSync` check, defeating the
-      // point of configuring mount verification at all.
-      scenario: 'ingest.mountMarkers[] entry left blank',
+      // A relative media path resolves against the working directory, which differs between
+      // `npm run dev` and the container, so it is never what the operator meant.
+      scenario: 'storage.series set to a relative path',
       setup: (dir: string) => {
         const cfg = loadConfig(dir);
-        cfg.ingest.mountMarkers.push('');
-        return () => saveConfig(dir, cfg);
-      },
-    },
-    {
-      // A blank root's longest-prefix check in `resolveSourceDirsDetailed` matches every
-      // absolute path (`p.startsWith('/')`), corrupting bundle rescue's folder derivation.
-      scenario: 'ingest.downloadRoots[] entry left blank',
-      setup: (dir: string) => {
-        const cfg = loadConfig(dir);
-        cfg.ingest.downloadRoots.push('');
+        cfg.storage.series = 'relative/path';
         return () => saveConfig(dir, cfg);
       },
     },

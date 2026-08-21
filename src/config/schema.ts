@@ -35,6 +35,14 @@ const LlmKeysSchema = z
 // The one model every call-site runs on. Optional: a fresh install has no provider
 // configured, and `resolveModel` turns that into a clear error at the first call.
 const LlmSchema = z.object({ model: LlmModelSchema.optional(), keys: LlmKeysSchema }).prefault({});
+// Absolute or blank. A relative media path resolves against the working directory, which
+// differs between `npm run dev` and the container, so it is never what the operator meant.
+// Blank is how the operator says "I do not have this library".
+const StoragePathSchema = z
+  .string()
+  .refine((p) => p === '' || p.startsWith('/'), {
+    message: 'must be an absolute path, or blank to disable the role',
+  });
 export const ConfigSchema = z
   .object({
     // Nested objects use .prefault() rather than .default(): in Zod v4, .default()
@@ -59,6 +67,18 @@ export const ConfigSchema = z
     // no-op `mapArrPath` for every path it's checked against — reject it rather than let a
     // half-filled row (e.g. one left over from a UI "Add" click) save as valid.
     pathMappings: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) })).default(() => []),
+    // Where Warrden looks for each library. Defaults are the container paths, so a Docker
+    // install that binds /tv, /anime, /movies and /downloads needs no config at all, and a
+    // config.json written before this key existed reads back as the behaviour it already had.
+    // An LXC or a direct run sets host paths here instead, from Settings.
+    storage: z
+      .object({
+        series: StoragePathSchema.default('/tv'),
+        anime: StoragePathSchema.default('/anime'),
+        movies: StoragePathSchema.default('/movies'),
+        downloads: StoragePathSchema.default('/downloads'),
+      })
+      .prefault({}),
     picking: z
       .object({
         prefer: z.array(z.string()).default(() => []),
@@ -80,19 +100,6 @@ export const ConfigSchema = z
           });
         }
       }),
-    ingest: z
-      .object({
-        // Legacy/test override only. Empty = use the four standard mounts
-        // (/tv, /anime, /movies, /downloads — see `standardMounts.ts`). The web UI never edits this.
-        // `.min(1)` per entry: a blank marker would trivially "exist" as a no-op check.
-        mountMarkers: z.array(z.string().min(1)).default(() => []),
-        // Legacy/test override only. Empty = derive from pathMappings targeting the
-        // standard Downloads mount, else `/downloads`. The web UI never edits this.
-        // `.min(1)` per entry: a blank root would match every path's longest-prefix check
-        // in `resolveSourceDirsDetailed`, corrupting bundle rescue.
-        downloadRoots: z.array(z.string().min(1)).default(() => []),
-      })
-      .prefault({}),
     subtitle: z
       .object({
         // Target languages, most-wanted first (e.g. ['zh-Hans', 'zh-Hant']). An episode

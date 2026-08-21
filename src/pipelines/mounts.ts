@@ -1,4 +1,4 @@
-import { effectiveMountMarkers } from '../config/standardMounts.js';
+import { configuredStoragePaths } from '../config/storage.js';
 import type { AppContext } from '../context.js';
 import { targetEventData } from '../events/target.js';
 import { ensureMounts, MountError } from '../fs/files.js';
@@ -22,7 +22,7 @@ export const MOUNT_RETRY_MS = 5 * 60_000;
  */
 export function assertMounted(ctx: AppContext, job: JobRow, scope: 'ingest' | 'subtitle'): void {
   try {
-    ensureMounts(effectiveMountMarkers(ctx.config));
+    ensureMounts(configuredStoragePaths(ctx.config));
   } catch (err) {
     if (!(err instanceof MountError)) throw err;
     ctx.events.append({

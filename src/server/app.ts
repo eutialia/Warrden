@@ -871,7 +871,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // in one request: queue depth, the review backlog, recent outcomes, and the mount
     // probe that would otherwise be a second round-trip.
     app.get('/api/overview', (c) =>
-      c.json({ ...overview.counts(), storage: cachedStorage(), debugEnabled: ctx.config?.debug.enabled ?? false }),
+      c.json({
+        ...overview.counts(),
+        storage: ctx.config ? cachedStorage(ctx.config) : [],
+        debugEnabled: ctx.config?.debug.enabled ?? false,
+      }),
     );
   }
 
@@ -998,7 +1002,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     });
 
     // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
-    app.get('/api/health/storage', (c) => c.json({ checks: probeStorage() }));
+    app.get('/api/health/storage', (c) => c.json({ checks: probeStorage(requireConfig(ctx)) }));
 
     // Same idea for Settings → Arr instances. Nested guard rather than widening the block
     // above: `requireClients` documents an invariant about being gated on at mount time,

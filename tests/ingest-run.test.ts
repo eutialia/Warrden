@@ -130,7 +130,7 @@ describe('runIngestJob — settle gate', () => {
     // A path that's guaranteed absent — a subpath of a real fixture dir that's never created.
     const fx = ingestFixture();
     const job = claimIngestJob(fx);
-    fx.ctx.config.ingest.mountMarkers = [join(fx.downloadsDir, 'nas-mount-marker')];
+    fx.ctx.config.storage.downloads = join(fx.downloadsDir, 'nas-mount-marker');
 
     const call = runIngestJob(fx.ctx, job);
     await expect(call).rejects.toThrow(RescheduleError);
@@ -627,7 +627,7 @@ describe('runIngestJob — sidecar sweep and placement', () => {
 
   it('dedupes swept sidecar paths across nested source dirs — a parent dir and its own subdirectory both resolving as sweep roots must not double-place or double-list a file', async () => {
     const fx = ingestFixture();
-    fx.ctx.config.ingest.downloadRoots = []; // force the no-configured-root dirname fallback for both entries below
+    fx.ctx.config.storage.downloads = ''; // force the no-configured-root dirname fallback for both entries below
 
     const nestedDir = join(fx.torrentDir, 'S1');
     mkdirSync(nestedDir, { recursive: true });
@@ -1077,7 +1077,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
       ],
     });
-    fx.ctx.config.ingest.downloadRoots = []; // forces the dirname() fallback for the sidecar sweep's own sourceDirsArr
+    fx.ctx.config.storage.downloads = ''; // forces the dirname() fallback for the sidecar sweep's own sourceDirsArr
     fx.client.queue = [queueRecord({ seriesId: fx.targetId, downloadId: 'dl-stuck-1', status: 'completed', trackedDownloadStatus: 'warning' })];
     const stuckItem = manualImportItem({ path: '/downloads/Show/Show - 06.mkv', folderName: 'Show Torrent' });
     fx.client.manualImportByScope['downloadId:dl-stuck-1'] = [stuckItem];
@@ -1358,8 +1358,7 @@ describe('runIngestJob — mapArrPath boundary', () => {
           { from: '/data/dl', to: downloadsDir },
           { from: '/data/tv', to: libraryDir },
         ],
-        // Test override — production leaves mountMarkers empty and uses /tv,/anime,/movies,/downloads.
-        ingest: { mountMarkers: [downloadsDir, libraryDir], downloadRoots: ['/data/dl'] },
+        storage: { series: '', anime: '', movies: libraryDir, downloads: downloadsDir },
       }) });
 
     const job = enqueueAndClaim(ctx, { pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' });

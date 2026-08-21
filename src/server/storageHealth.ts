@@ -1,19 +1,20 @@
 import { accessSync, constants, existsSync, statfsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { standardMounts, type StandardMountId } from '../config/standardMounts.js';
+import type { Config } from '../config/schema.js';
+import { storageRoles, type StorageRoleId } from '../config/storage.js';
 
 export type StorageCheckStatus = 'ok' | 'missing' | 'unreadable' | 'unwritable' | 'not-mounted';
 
 export interface StorageCheck {
   /** Stable mount role — series | anime | movies | downloads. */
-  id: StandardMountId;
+  id: StorageRoleId;
   /** Human label for the dashboard. */
   label: string;
   /** Path shown as the configured/expected location. */
   path: string;
   /** Path as seen inside Warrden (same as path for the four standard mounts). */
   localPath: string;
-  role: StandardMountId;
+  role: StorageRoleId;
   status: StorageCheckStatus;
   detail: string;
   /** Always true for the four standard mounts — UI must not offer an editor. */
@@ -43,27 +44,23 @@ let cached: { at: number; checks: StorageCheck[] } | null = null;
  * The explicit "Re-check now" button calls `probeStorage` instead and always sees fresh
  * results.
  */
-export function cachedStorage(now = Date.now()): StorageCheck[] {
+export function cachedStorage(config: Config, now = Date.now()): StorageCheck[] {
   if (cached && now - cached.at < CACHE_MS) return cached.checks;
-  const checks = probeStorage();
+  const checks = probeStorage(config);
   cached = { at: now, checks };
   return checks;
 }
 
-export function probeStorage(): StorageCheck[] {
-  return standardMounts().map((mount) => {
-    const access = probeAccess(mount.path, mount.label, /* requireMountPoint */ true);
-    return {
-      id: mount.id,
-      label: mount.label,
-      path: mount.path,
-      localPath: mount.path,
-      role: mount.id,
-      immutable: true,
-      ...access,
-      ...(access.status === 'ok' ? { usage: diskUsage(mount.path) } : {}),
-    };
-  });
+export function probeStorage(config: Config): StorageCheck[] {
+  return storageRoles(config).map((role) => ({
+    id: role.id,
+    label: role.label,
+    path: role.path,
+    localPath: role.path,
+    role: role.id,
+    immutable: true,
+    ...probeAccess(role.path, role.label, /* requireMountPoint */ true),
+  }));
 }
 
 /**
