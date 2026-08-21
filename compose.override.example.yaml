@@ -1,9 +1,11 @@
-# Only Docker on Linux needs this file. The Docker daemon runs as root and cannot read a
-# GVFS mount, which belongs to your user session, so Docker mounts the SMB shares itself
-# and needs SMB_USERNAME and SMB_PASSWORD in .env.
+# The bind mounts below are the default: point them at paths already present in this
+# machine's filesystem, such as shares mounted system-wide with /etc/fstab or a
+# systemd .mount unit. No .env, no credentials in this repo.
 #
-# To drop the credentials, mount the shares system-wide with /etc/fstab or a systemd
-# .mount unit, then bind-mount the resulting host path here instead.
+# If you instead let Docker mount the shares itself (see the "Let Docker mount the
+# shares itself" variant below), you need SMB_USERNAME and SMB_PASSWORD in .env.
+# Only Docker on Linux needs that: the daemon runs as root and cannot read a GVFS
+# mount, which belongs to your user session.
 #
 # Running Warrden directly, or in an LXC where the shares are already in the filesystem,
 # needs neither this file nor .env. Set the four paths under Settings, Storage.
@@ -27,10 +29,11 @@ services:
       - /mnt/nas/Movies:/movies
       - /mnt/nas/Downloads:/downloads
 
-# Variant: no host mounts (e.g. the NAS is only reachable over SMB, or your file
-# manager's GVFS mounts are invisible to the docker daemon). Let docker mount the
-# shares itself as CIFS volumes; credentials go in .env (copy .env.example).
-# Replace the bind mounts above with named volumes and define them like this:
+# Variant: let Docker mount the shares itself (e.g. the NAS is only reachable over
+# SMB, or your file manager's GVFS mounts are invisible to the docker daemon). Docker
+# mounts the shares itself as CIFS volumes; credentials go in .env (copy
+# .env.example). Replace the bind mounts above with named volumes and define them
+# like this:
 #
 # x-cifs-o: &cifs-o "addr=nas.lan,username=${SMB_USERNAME:?set in .env},password=${SMB_PASSWORD:?set in .env},uid=1000,gid=1000"
 #
