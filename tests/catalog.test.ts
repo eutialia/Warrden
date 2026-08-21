@@ -128,6 +128,73 @@ describe('ModelCatalog', () => {
     });
   });
 
+  // The tier decides how `AiSdkGenerator` asks for JSON: an endpoint that doesn't declare
+  // `structured_outputs` is dropped by `require_parameters` the moment a json_schema
+  // response_format is sent, which is a 404 from OpenRouter, not a soft degrade.
+  describe('structured-output tier', () => {
+    it.each([
+      ['structured_outputs declared', ['temperature', 'response_format', 'structured_outputs'], 'native'],
+      ['response_format only', ['temperature', 'response_format'], 'json_object'],
+      ['neither declared', ['temperature'], 'none'],
+    ] as const)('%s', async (_label, supported, expected) => {
+      stubFetch(async () => jsonResponse([upstreamModel({ supported_parameters: supported })]));
+      const catalog = new ModelCatalog(() => baseConfig());
+
+      const result = await catalog.list();
+
+      expect(result.models[0]!.structuredOutput).toBe(expected);
+    });
+
+    it('assumes native when upstream reports no supported_parameters at all', async () => {
+      stubFetch(async () => jsonResponse([upstreamModel({ supported_parameters: undefined })]));
+      const catalog = new ModelCatalog(() => baseConfig());
+
+      const result = await catalog.list();
+
+      expect(result.models[0]!.structuredOutput).toBe('native');
+    });
+  });
+
+  describe('capabilities', () => {
+    it('returns the tier and reasoning mandate for a known model', async () => {
+      stubFetch(async () =>
+        jsonResponse([upstreamModel({ id: 'stealth/ox-alpha', supported_parameters: ['response_format'], reasoning: { mandatory: true } })]),
+      );
+      const catalog = new ModelCatalog(() => baseConfig());
+
+      expect(await catalog.capabilities('stealth/ox-alpha')).toEqual({
+        structuredOutput: 'json_object',
+        mandatoryReasoning: true,
+      });
+    });
+
+    it('serves from the same cache as list(), without a second fetch', async () => {
+      const spy = stubFetch(async () => jsonResponse([upstreamModel()]));
+      const catalog = new ModelCatalog(() => baseConfig());
+
+      await catalog.list();
+      await catalog.capabilities('openai/gpt-5');
+
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    // A generation must not fail because the catalog is unreachable: the caller reads
+    // undefined as "assume native", which is the behaviour that predates the tiering.
+    it('returns undefined instead of throwing when a cold-cache fetch fails', async () => {
+      stubFetch(async () => new Response('down', { status: 500 }));
+      const catalog = new ModelCatalog(() => baseConfig());
+
+      await expect(catalog.capabilities('openai/gpt-5')).resolves.toBeUndefined();
+    });
+
+    it('returns undefined for a model id the catalog does not list', async () => {
+      stubFetch(async () => jsonResponse([upstreamModel()]));
+      const catalog = new ModelCatalog(() => baseConfig());
+
+      await expect(catalog.capabilities('nobody/nothing')).resolves.toBeUndefined();
+    });
+  });
+
   it('drops a malformed entry without failing the whole batch', async () => {
     stubFetch(async () =>
       jsonResponse([upstreamModel({ id: 'good/model' }), { id: 42, name: null }, upstreamModel({ id: 'also-good/model' })]),

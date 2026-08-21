@@ -880,11 +880,13 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   }
 
   if (ctx.config) {
-    // One catalog per `createApp()` call (like `attentionItems`/`managedObjects` below),
-    // not per request, since its whole point is an in-memory cache that survives across
-    // requests to this app instance. `requireConfig(ctx)` (not a value captured here) so
-    // a key added via `PUT /api/config` is picked up on the very next fetch.
-    const catalog = new ModelCatalog(() => requireConfig(ctx));
+    // Production hands its own catalog in (`ctx.catalog`), shared with the LLM generator so
+    // both read one cache. Falling back to a fresh one keeps `createApp({ config })` tests
+    // working; it is built per `createApp()` call, not per request, since the whole point is
+    // an in-memory cache that survives across requests to this app instance.
+    // `requireConfig(ctx)` (not a value captured here) so a key added via `PUT /api/config`
+    // is picked up on the very next fetch.
+    const catalog = ctx.catalog ?? new ModelCatalog(() => requireConfig(ctx));
 
     app.get('/api/llm/models', async (c) => {
       try {

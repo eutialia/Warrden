@@ -1,10 +1,11 @@
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
 import { APICallError, generateObject, InvalidPromptError, NoObjectGeneratedError } from 'ai';
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { Config, Effort, Provider } from '../config/schema.js';
 import { NOOP_HANDLE, NOOP_TRACER, type StepHandle, type Tracer } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
+import type { ModelCapabilities, StructuredOutputTier } from './catalog.js';
 import { type PromptCachePlan, planPromptCache } from './promptCache.js';
 
 export interface GenerateOpts<T> {
@@ -126,6 +127,11 @@ export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Looks up what one model id can be asked for, `undefined` when nothing is known about it
+ * (see `ModelCatalog.capabilities`). Injected as a function rather than the catalog itself so
+ * a test can hand over one line instead of a fetch stub. */
+export type CapabilityLookup = (modelId: string) => Promise<ModelCapabilities | undefined>;
+
 /**
  * Builds the AI SDK language model for a resolved model, keyed from `cfg.llm.keys`.
  *
@@ -134,14 +140,35 @@ export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
  * on 40+ models. `extraBody` is merged into the request body verbatim (and before call-level
  * providerOptions), so prompt-cache options set per call survive alongside it.
  */
-function createModel(cfg: Config, ref: ModelRef, callsite: string): LanguageModel {
+function createModel(
+  cfg: Config,
+  ref: ModelRef,
+  tier: StructuredOutputTier,
+  capabilitiesKnown: boolean,
+  callsite: string,
+): LanguageModel {
   const apiKey = cfg.llm.keys.openrouter;
   if (!apiKey) {
     // Keys come from `cfg.llm.keys` only (not the provider SDK's own env-var fallback) so
     // config.json stays the single source of truth for credentials.
     throw new LlmError('Missing API key for provider "openrouter" (llm.keys.openrouter)', callsite);
   }
-  return createOpenRouter({ apiKey })(ref.model, reasoningSettings(ref.effort));
+  return createOpenRouter({ apiKey })(ref.model, modelSettings(ref.effort, tier, capabilitiesKnown));
+}
+
+/** The three independent halves of the request body this build overrides, merged into the one
+ * `extraBody` the provider accepts. Each can be empty; only when all are does the model get no
+ * settings at all, which is what a no-effort call on an unknown model must still send.
+ * `capabilitiesKnown` says whether the catalog answered for this model id at all (see
+ * `routingGuardBody`). Exported so a test can put the exact production settings on a real
+ * provider instance and read what they serialize to. */
+export function modelSettings(
+  effort: Effort | undefined,
+  tier: StructuredOutputTier,
+  capabilitiesKnown: boolean,
+): { extraBody?: Record<string, unknown> } {
+  const extraBody = { ...reasoningBody(effort), ...responseFormatBody(tier), ...routingGuardBody(effort, tier, capabilitiesKnown) };
+  return Object.keys(extraBody).length > 0 ? { extraBody } : {};
 }
 
 /**
@@ -149,13 +176,67 @@ function createModel(cfg: Config, ref: ModelRef, callsite: string): LanguageMode
  * enabled by default still thinks (and bills for it) when the field is absent, so 'none' has
  * to send the explicit `enabled: false` toggle instead.
  */
-function reasoningSettings(effort?: Effort): { extraBody?: Record<string, unknown> } {
+function reasoningBody(effort?: Effort): Record<string, unknown> {
   if (effort === undefined) return {};
-  const reasoning = effort === 'none' ? { enabled: false } : { effort };
-  // require_parameters keeps OpenRouter from routing to a provider that silently drops
-  // the reasoning field: observed live as "effort high, 0 reasoning tokens" on a route
-  // that ignored it.
-  return { extraBody: { reasoning, provider: { require_parameters: true } } };
+  return { reasoning: effort === 'none' ? { enabled: false } : { effort } };
+}
+
+/**
+ * require_parameters keeps OpenRouter from routing to an endpoint that silently drops a
+ * parameter the request asked for: observed live as "effort high, 0 reasoning tokens" on a route
+ * that ignored the reasoning field, and the same silent drop turns a `json_object` ask into
+ * plain prose. It cuts both ways, since the filter can also leave no endpoint at all and
+ * OpenRouter answers 404, which the job runner classifies permanent.
+ *
+ * So the flag is an assertion about what the routed endpoint declares, and it is only made when
+ * the catalog actually declared something. Unknown capabilities (catalog unreachable, or a model
+ * id upstream doesn't list) means the tier fallback to `native` is a guess: pairing a guess with
+ * require_parameters is what produced the 404 this tiering exists to avoid, and unguarded but
+ * functional beats terminally failed.
+ *
+ * With capabilities in hand, the flag rides on there being something droppable to protect: a
+ * configured effort, or any tier that still sends a response_format. The `none` tier with no
+ * effort asks for neither, so guarding there would only shrink the endpoint pool for nothing.
+ */
+function routingGuardBody(effort: Effort | undefined, tier: StructuredOutputTier, capabilitiesKnown: boolean): Record<string, unknown> {
+  if (!capabilitiesKnown) return {};
+  if (effort === undefined && tier === 'none') return {};
+  return { provider: { require_parameters: true } };
+}
+
+/**
+ * `generateObject` always asks for `response_format: {type: 'json_schema'}`, which under
+ * `require_parameters` drops every endpoint that doesn't declare `structured_outputs`. For a
+ * model like `stealth/ox-alpha`, whose only endpoint declares `response_format` alone, that is
+ * every endpoint it has. So the ask is narrowed to what the endpoint actually declares and the
+ * schema moves into the prompt (`schemaAppendix`) to make up the difference.
+ *
+ * `extraBody` is spread over the composed body inside the provider, so these win over the
+ * `json_schema` the SDK put there. For `none` the key has to be absent, not null: an
+ * `undefined` value survives the spread and is then dropped by `JSON.stringify`.
+ */
+function responseFormatBody(tier: StructuredOutputTier): Record<string, unknown> {
+  switch (tier) {
+    case 'native':
+      return {};
+    case 'json_object':
+      return { response_format: { type: 'json_object' } };
+    case 'none':
+      return { response_format: undefined };
+  }
+}
+
+/**
+ * The schema restated in the system prompt, for the tiers where no provider will enforce it.
+ * Deterministic (a pure projection of the schema at a fixed indent) so a `promptCache` loop's
+ * system prefix stays byte-identical across steps and keeps hitting the cache breakpoint.
+ */
+function schemaAppendix(schema: z.ZodType<unknown>): string {
+  return [
+    'Reply with a single JSON object and nothing else: no prose, no code fence, no trailing commentary.',
+    'The object must validate against this JSON Schema:',
+    JSON.stringify(z.toJSONSchema(schema), null, 2),
+  ].join('\n');
 }
 
 /**
@@ -169,13 +250,18 @@ function reasoningSettings(effort?: Effort): { extraBody?: Record<string, unknow
  * Extracted from `attemptOnce` so a test can hand the real SDK the exact shape production
  * sends. Tests that mock `generateObject` skip that validation entirely and would pass on a
  * prompt the SDK refuses.
+ *
+ * Below the `native` tier the provider enforces nothing, so the schema is appended to the
+ * system half: the `schema` option still governs parsing here, it just no longer reaches the
+ * endpoint as a constraint.
  */
-export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCachePlan) {
+export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCachePlan, tier: StructuredOutputTier) {
+  const system = tier === 'native' ? opts.system : `${opts.system}\n\n${schemaAppendix(opts.schema)}`;
   return {
     schema: opts.schema,
     instructions: cache.systemProviderOptions
-      ? { role: 'system' as const, content: opts.system, providerOptions: cache.systemProviderOptions }
-      : opts.system,
+      ? { role: 'system' as const, content: system, providerOptions: cache.systemProviderOptions }
+      : system,
     messages: [{ role: 'user' as const, content: opts.prompt }],
     ...(cache.callProviderOptions ? { providerOptions: cache.callProviderOptions } : {}),
     // Our own `withRetry` owns the retry count; the AI SDK's default internal retries would
@@ -212,10 +298,14 @@ export class AiSdkGenerator implements StructuredGenerator {
     private readonly getCfg: () => Config,
     private readonly trace: Tracer = NOOP_TRACER,
     private readonly onEffortIgnored?: (info: EffortIgnoredInfo) => void,
+    /** Defaults to knowing nothing, which is the native path: an unwired generator behaves
+     * exactly as it did before tiering existed. */
+    private readonly lookupCapabilities: CapabilityLookup = async () => undefined,
   ) {}
 
   async generate<T>(opts: GenerateOpts<T>): Promise<T> {
     const model = resolveModel(this.getCfg());
+    const capabilities = await this.lookupCapabilities(model.model);
     const call: StepHandle = opts.trace
       ? this.trace.begin({
           jobId: opts.trace.jobId,
@@ -226,7 +316,7 @@ export class AiSdkGenerator implements StructuredGenerator {
         })
       : NOOP_HANDLE;
     try {
-      const result = await withRetry(() => this.attemptOnce(opts, model, call));
+      const result = await withRetry(() => this.attemptOnce(opts, model, capabilities, call));
       call.end('ok');
       return result;
     } catch (err) {
@@ -242,7 +332,16 @@ export class AiSdkGenerator implements StructuredGenerator {
     }
   }
 
-  private async attemptOnce<T>(opts: GenerateOpts<T>, ref: ModelRef, call: StepHandle): Promise<T> {
+  private async attemptOnce<T>(
+    opts: GenerateOpts<T>,
+    ref: ModelRef,
+    capabilities: ModelCapabilities | undefined,
+    call: StepHandle,
+  ): Promise<T> {
+    // Nothing known falls back to the shape that works for the 336 models declaring
+    // structured_outputs. Safe only because `routingGuardBody` refuses to assert
+    // require_parameters on a guess.
+    const tier = capabilities?.structuredOutput ?? 'native';
     const attempt: StepHandle = opts.trace
       ? this.trace.begin({
           jobId: opts.trace.jobId,
@@ -252,9 +351,9 @@ export class AiSdkGenerator implements StructuredGenerator {
         })
       : NOOP_HANDLE;
     try {
-      const model = createModel(this.getCfg(), ref, opts.callsite);
+      const model = createModel(this.getCfg(), ref, tier, capabilities !== undefined, opts.callsite);
       const cache = planPromptCache(opts.promptCache === true);
-      const result = await generateObject({ model, ...buildGenerateOptions(opts, cache) });
+      const result = await generateObject({ model, ...buildGenerateOptions(opts, cache, tier) });
       attempt.end('ok', () => ({
         provider: ref.provider,
         model: ref.model,
@@ -269,8 +368,15 @@ export class AiSdkGenerator implements StructuredGenerator {
       }));
       // A reported count of zero against a requested effort means the route answered without
       // reasoning at all; no count reported means the provider said nothing, which proves
-      // nothing either way.
-      if (ref.effort !== undefined && ref.effort !== 'none' && result.usage?.outputTokenDetails?.reasoningTokens === 0) {
+      // nothing either way. A model that cannot have reasoning switched off is the exception:
+      // ox-alpha returns a populated `reasoning` alongside `reasoning_tokens: 0`, so there the
+      // zero is a reporting artefact and warning on it would cry wolf on every single call.
+      if (
+        ref.effort !== undefined &&
+        ref.effort !== 'none' &&
+        capabilities?.mandatoryReasoning !== true &&
+        result.usage?.outputTokenDetails?.reasoningTokens === 0
+      ) {
         // Swallowed deliberately: this attempt already succeeded and was already paid for, so
         // a reporting callback that throws must not escape into `withRetry` and buy a second
         // identical call.

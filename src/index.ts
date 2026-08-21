@@ -8,6 +8,7 @@ import { EventLog } from './events/log.js';
 import { bindEventLogToStdio } from './events/stdio.js';
 import { JobQueue } from './jobs/queue.js';
 import { startRunner } from './jobs/runner.js';
+import { ModelCatalog } from './llm/catalog.js';
 import { AiSdkGenerator } from './llm/generator.js';
 import { CliMediaTools } from './media/tools.js';
 import { runAcquireJob } from './pipelines/acquire/run.js';
@@ -31,6 +32,9 @@ function buildContext(dataDir: string): AppContext {
   // tracing/generation is invoked, well after this function returns and `ctx` is fully
   // initialized.
   const trace = new SqlTracer(db, events, () => ctx.config.debug.enabled);
+  // Also handed to `AiSdkGenerator` below, which asks it what the configured model's endpoint
+  // can be sent (json_schema, json_object, or no response_format at all) before each call.
+  const catalog = new ModelCatalog(() => ctx.config);
 
   const ctx: AppContext = {
     db,
@@ -48,7 +52,9 @@ function buildContext(dataDir: string): AppContext {
         message: `Requested reasoning effort "${effort}" for ${callsite} but ${model} returned 0 reasoning tokens - the route ignored it${route ? ` (routed to ${route})` : ''}`,
         data: { callsite, model, effort, route },
       }),
+      (modelId) => catalog.capabilities(modelId),
     ),
+    catalog,
     searchCache: new SearchCache(),
     trace,
     media: new CliMediaTools(),

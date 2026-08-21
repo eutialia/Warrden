@@ -6,7 +6,8 @@ import type { Config, Effort } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { isPermanentError } from '../src/jobs/errors.js';
-import { AiSdkGenerator, LlmError, resolveModel, withRetry, type EffortIgnoredInfo } from '../src/llm/generator.js';
+import type { ModelCapabilities, StructuredOutputTier } from '../src/llm/catalog.js';
+import { AiSdkGenerator, LlmError, modelSettings, resolveModel, withRetry, type EffortIgnoredInfo } from '../src/llm/generator.js';
 import { NOOP_TRACER, SqlTracer } from '../src/trace/tracer.js';
 import { baseConfig, freshDb } from './helpers.js';
 
@@ -203,14 +204,16 @@ describe('AiSdkGenerator', () => {
 function recordedCall(index = 0): {
   settings: { extraBody?: Record<string, unknown> };
   providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
+  instructions: string | { content: string };
 } {
   const [opts] = generateObjectMock.mock.calls[index] as [
     {
       model: { settings: { extraBody?: Record<string, unknown> } };
       providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
+      instructions: string | { content: string };
     },
   ];
-  return { settings: opts.model.settings, providerOptions: opts.providerOptions };
+  return { settings: opts.model.settings, providerOptions: opts.providerOptions, instructions: opts.instructions };
 }
 
 describe('AiSdkGenerator provider-error classification', () => {
@@ -290,12 +293,21 @@ describe('AiSdkGenerator provider-error classification', () => {
 describe('AiSdkGenerator reasoning effort', () => {
   const schema = z.object({ ok: z.boolean() });
 
+  // Every case here wires a capability lookup that answers: require_parameters is an assertion
+  // about what the routed endpoint declares, and the generator only makes it when the catalog
+  // actually told it something. An unwired lookup means "nothing known" and sends no guard.
   async function generateWith(model: Config['llm']['model'], promptCache = false): Promise<void> {
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({ object: { ok: true } });
     const cfg = keyedConfig();
     cfg.llm.model = model;
-    await new AiSdkGenerator(() => cfg).generate({
+    const known: ModelCapabilities = { structuredOutput: 'native', mandatoryReasoning: false };
+    await new AiSdkGenerator(
+      () => cfg,
+      NOOP_TRACER,
+      undefined,
+      async () => known,
+    ).generate({
       callsite: 'site-search',
       schema,
       system: 's',
@@ -319,7 +331,7 @@ describe('AiSdkGenerator reasoning effort', () => {
 
   it('sends no reasoning key at all when no effort is configured', async () => {
     await generateWith({ provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731' });
-    expect(recordedCall().settings.extraBody).toBeUndefined();
+    expect(recordedCall().settings.extraBody?.reasoning).toBeUndefined();
   });
 
   // Omitting the field leaves a default-on model thinking, so 'none' has to say so out loud.
@@ -350,6 +362,106 @@ describe('AiSdkGenerator reasoning effort', () => {
   });
 });
 
+describe('AiSdkGenerator structured-output tiers', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  async function generateOn(
+    capabilities: ModelCapabilities | undefined,
+    effort?: Effort,
+  ): Promise<ReturnType<typeof recordedCall>> {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockResolvedValue({ object: { ok: true } });
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'stealth/ox-alpha', effort };
+    await new AiSdkGenerator(() => cfg, NOOP_TRACER, undefined, async () => capabilities).generate({
+      callsite: 'release-pick',
+      schema,
+      system: 'Pick one option.',
+      prompt: 'p',
+    });
+    return recordedCall();
+  }
+
+  const native: ModelCapabilities = { structuredOutput: 'native', mandatoryReasoning: false };
+  const jsonObject: ModelCapabilities = { structuredOutput: 'json_object', mandatoryReasoning: false };
+  const noFormat: ModelCapabilities = { structuredOutput: 'none', mandatoryReasoning: false };
+
+  // A model whose endpoint declares structured_outputs must keep sending exactly what it sent
+  // before tiering existed: the json_schema response_format the SDK sets, untouched.
+  it('leaves the request untouched for a native model', async () => {
+    const call = await generateOn(native, 'high');
+    expect(call.settings.extraBody).toEqual({ reasoning: { effort: 'high' }, provider: { require_parameters: true } });
+    expect(call.instructions).toBe('Pick one option.');
+  });
+
+  // Nothing known is not the same as "structured_outputs is supported". The native path is still
+  // the right guess for the request shape, but asserting require_parameters on top of a
+  // json_schema ask is how an unlisted model earns a 404, which the runner then calls permanent.
+  it('stays on the native path but sends no provider block when nothing is known about the model', async () => {
+    const call = await generateOn(undefined, 'high');
+    expect(call.settings.extraBody).toEqual({ reasoning: { effort: 'high' } });
+    expect(call.instructions).toBe('Pick one option.');
+  });
+
+  it('overrides response_format to json_object alongside the reasoning body', async () => {
+    const call = await generateOn(jsonObject, 'high');
+    expect(call.settings.extraBody).toEqual({
+      reasoning: { effort: 'high' },
+      provider: { require_parameters: true },
+      response_format: { type: 'json_object' },
+    });
+  });
+
+  it('blanks response_format for a model that declares neither parameter', async () => {
+    const call = await generateOn(noFormat, 'high');
+    expect(call.settings.extraBody).toMatchObject({ reasoning: { effort: 'high' } });
+    expect(call.settings.extraBody?.response_format).toBeUndefined();
+  });
+
+  // Reasoning is droppable too, so an effort on the none tier still needs the guard even though
+  // no response_format is being asked for.
+  it('guards routing on the none tier when an effort is configured', async () => {
+    const call = await generateOn(noFormat, 'high');
+    expect(call.settings.extraBody?.provider).toEqual({ require_parameters: true });
+  });
+
+  // Nothing is being asked for that an endpoint could drop, so there is nothing to guard and no
+  // reason to shrink the endpoint pool.
+  it('sends no provider block on the none tier with no effort', async () => {
+    const call = await generateOn(noFormat);
+    expect(call.settings.extraBody).toEqual({ response_format: undefined });
+  });
+
+  // The whole point of the json_object tier: it has to work on a model configured with no
+  // reasoning effort at all, and most models on this tier take no reasoning efforts. The guard
+  // rides on the response_format ask, not on reasoning, or the endpoint is free to drop it and
+  // answer prose.
+  it('sends the response_format override and the guard with no effort configured', async () => {
+    const call = await generateOn(jsonObject);
+    expect(call.settings.extraBody).toEqual({
+      response_format: { type: 'json_object' },
+      provider: { require_parameters: true },
+    });
+  });
+
+  it.each([
+    ['json_object', jsonObject],
+    ['none', noFormat],
+  ])('appends the JSON Schema to the system prompt on the %s tier', async (_label, capabilities) => {
+    const call = await generateOn(capabilities);
+    const system = String(call.instructions);
+    expect(system.startsWith('Pick one option.')).toBe(true);
+    expect(system).toContain('single JSON object');
+    expect(system).toContain(JSON.stringify(z.toJSONSchema(schema), null, 2));
+  });
+
+  // The promptCache breakpoint only pays off while the system prefix is byte-identical across
+  // a loop's steps, so the appendix must not carry anything that varies per call.
+  it('renders a byte-identical appendix for the same schema twice', async () => {
+    expect(String((await generateOn(jsonObject)).instructions)).toBe(String((await generateOn(jsonObject)).instructions));
+  });
+});
+
 type EffortIgnoredMock = Mock<(info: EffortIgnoredInfo) => void>;
 
 describe('AiSdkGenerator ignored-effort detection', () => {
@@ -358,7 +470,7 @@ describe('AiSdkGenerator ignored-effort detection', () => {
   async function generateReporting(
     effort: Effort | undefined,
     reasoningTokens: number | undefined,
-    opts?: { providerMetadata?: Record<string, unknown>; callback?: EffortIgnoredMock },
+    opts?: { providerMetadata?: Record<string, unknown>; callback?: EffortIgnoredMock; capabilities?: ModelCapabilities },
   ): Promise<EffortIgnoredMock> {
     generateObjectMock.mockReset();
     generateObjectMock.mockResolvedValue({
@@ -369,7 +481,7 @@ describe('AiSdkGenerator ignored-effort detection', () => {
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', effort };
     const onEffortIgnored = opts?.callback ?? vi.fn<(info: EffortIgnoredInfo) => void>();
-    await new AiSdkGenerator(() => cfg, NOOP_TRACER, onEffortIgnored).generate({
+    await new AiSdkGenerator(() => cfg, NOOP_TRACER, onEffortIgnored, async () => opts?.capabilities).generate({
       callsite: 'site-search',
       schema,
       system: 's',
@@ -425,6 +537,19 @@ describe('AiSdkGenerator ignored-effort detection', () => {
     expect(await generateReporting(undefined, 0)).not.toHaveBeenCalled();
   });
 
+  // ox-alpha reasons (the response carries `reasoning`) and still reports 0 reasoning tokens.
+  // Reasoning can't be switched off there, so the count is a reporting artefact and warning on
+  // it would fire on every single call.
+  it('stays quiet for a model whose reasoning is mandatory, where a zero count proves nothing', async () => {
+    const capabilities: ModelCapabilities = { structuredOutput: 'json_object', mandatoryReasoning: true };
+    expect(await generateReporting('high', 0, { capabilities })).not.toHaveBeenCalled();
+  });
+
+  it('still fires for a model that could have honoured the effort and reported zero', async () => {
+    const capabilities: ModelCapabilities = { structuredOutput: 'native', mandatoryReasoning: false };
+    expect(await generateReporting('high', 0, { capabilities })).toHaveBeenCalled();
+  });
+
   // No count reported is not a count of zero: there is nothing to conclude about the route.
   it('stays quiet when the provider reported no reasoning-token count at all', async () => {
     expect(await generateReporting('high', undefined)).not.toHaveBeenCalled();
@@ -461,6 +586,77 @@ describe('OpenRouter request body', () => {
     // best-effort again.
     expect(body.provider).toEqual({ require_parameters: true });
     expect(body.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  // extraBody is spread AFTER the provider's own body, which is the only reason a tier can
+  // override the json_schema response_format `generateObject` always asks for. Asserting on
+  // the serialized body is the only way to prove the override survives to the wire, and for
+  // the `none` tier that the key is absent rather than null.
+  describe('structured-output tier overrides', () => {
+    async function sentBody(tier: StructuredOutputTier, effort?: Effort, known = true): Promise<Record<string, unknown>> {
+      let body: Record<string, unknown> = {};
+      const fetchStub: typeof fetch = async (_url, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            id: 'resp_1',
+            choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: '{}' } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      };
+      const model = createOpenRouter({ apiKey: 'k', fetch: fetchStub })('stealth/ox-alpha', modelSettings(effort, tier, known));
+      await model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'p' }] }],
+        responseFormat: { type: 'json', schema: { type: 'object' } },
+      });
+      return body;
+    }
+
+    it('leaves the json_schema response_format in place on the native tier', async () => {
+      const body = await sentBody('native', 'high');
+      expect((body.response_format as { type: string }).type).toBe('json_schema');
+      expect(body.reasoning).toEqual({ effort: 'high' });
+      expect(body.provider).toEqual({ require_parameters: true });
+    });
+
+    it('replaces it with json_object, keeping reasoning and the routing restriction', async () => {
+      const body = await sentBody('json_object', 'high');
+      expect(body.response_format).toEqual({ type: 'json_object' });
+      expect(body.reasoning).toEqual({ effort: 'high' });
+      expect(body.provider).toEqual({ require_parameters: true });
+    });
+
+    it('drops the key entirely on the none tier', async () => {
+      const body = await sentBody('none', 'high');
+      expect('response_format' in body).toBe(false);
+    });
+
+    // Defect 1 on the wire: 29 of the 36 models on this tier take no reasoning efforts at all, so
+    // an unguarded json_object ask is the common case for them, and an endpoint that doesn't
+    // declare response_format answers prose instead of JSON.
+    it('keeps the guard on the json_object tier with no effort configured', async () => {
+      const body = await sentBody('json_object');
+      expect(body.response_format).toEqual({ type: 'json_object' });
+      expect(body.provider).toEqual({ require_parameters: true });
+      expect('reasoning' in body).toBe(false);
+    });
+
+    it('sends no provider block for a model nothing is known about, even with an effort', async () => {
+      const body = await sentBody('native', 'high', false);
+      expect(body.provider).toBeUndefined();
+      expect(body.reasoning).toEqual({ effort: 'high' });
+      expect((body.response_format as { type: string }).type).toBe('json_schema');
+    });
+
+    // The SDK still asks for json_schema here, which is droppable, so a known-native model gets
+    // the guard even with no reasoning to protect.
+    it('guards the json_schema ask for a known native model with no effort', async () => {
+      const body = await sentBody('native');
+      expect(body.provider).toEqual({ require_parameters: true });
+      expect((body.response_format as { type: string }).type).toBe('json_schema');
+    });
   });
 });
 

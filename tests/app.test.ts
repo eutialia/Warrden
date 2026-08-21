@@ -1330,6 +1330,8 @@ describe('app', () => {
           supportedEfforts: [],
           mandatoryReasoning: false,
           reasoningCapable: false,
+          // No supported_parameters upstream, so the model keeps the json_schema path.
+          structuredOutput: 'native',
           contextLength: 128_000,
           pricing: { prompt: '0.000001', completion: '0.000002' },
         },

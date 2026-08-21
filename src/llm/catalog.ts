@@ -27,7 +27,7 @@ const UpstreamReasoningSchema = z
   .nullable()
   .optional();
 
-// `.loose()` so unknown/extra upstream fields (architecture, supported_parameters, ...)
+// `.loose()` so unknown/extra upstream fields (architecture, per_request_limits, ...)
 // round-trip harmlessly instead of tripping strict-object validation. Pricing values are
 // strings upstream (e.g. "0.0000014"), not numbers.
 const UpstreamModelSchema = z
@@ -51,6 +51,7 @@ const UpstreamModelSchema = z
       .optional()
       .catch(undefined),
     reasoning: UpstreamReasoningSchema,
+    supported_parameters: z.array(z.string()).optional().catch(undefined),
   })
   .loose();
 
@@ -59,6 +60,31 @@ const UpstreamResponseSchema = z.object({
 });
 
 export type UpstreamModel = z.infer<typeof UpstreamModelSchema>;
+
+/**
+ * How a model can be made to answer in JSON, worst case:
+ * - `native`: the endpoint declares `structured_outputs`, so a `json_schema` response_format
+ *   is honoured and the schema is enforced upstream.
+ * - `json_object`: it declares `response_format` but not `structured_outputs`. Asking for
+ *   `json_schema` gets every endpoint filtered out by `require_parameters` (a 404 from
+ *   OpenRouter, not a fallback), so the schema has to travel in the prompt instead.
+ * - `none`: neither is declared, so no response_format may be sent at all.
+ */
+export type StructuredOutputTier = 'native' | 'json_object' | 'none';
+
+/** The slice of a `CatalogModel` that shapes an outgoing generation request. */
+export interface ModelCapabilities {
+  structuredOutput: StructuredOutputTier;
+  mandatoryReasoning: boolean;
+}
+
+/** Missing `supported_parameters` means upstream told us nothing, not that the model is
+ * limited: assume the full-fat path rather than degrading every request on absent data. */
+function structuredOutputTier(supported: string[] | undefined): StructuredOutputTier {
+  if (supported === undefined) return 'native';
+  if (supported.includes('structured_outputs')) return 'native';
+  return supported.includes('response_format') ? 'json_object' : 'none';
+}
 
 /** The trimmed shape the dashboard actually consumes: everything the UI needs to render a
  * model picker (with a reasoning-effort selector where applicable) and nothing else. */
@@ -72,6 +98,7 @@ export interface CatalogModel {
    * `supportedEfforts` would read the same for a model that cannot reason and one that
    * reasons but takes no effort tiers, and those two need different picker rows. */
   reasoningCapable: boolean;
+  structuredOutput: StructuredOutputTier;
   contextLength: number;
   pricing: { prompt: string; completion: string };
 }
@@ -104,6 +131,7 @@ function projectModel(m: UpstreamModel): CatalogModel {
     ...(reasoning?.default_effort !== undefined ? { defaultEffort: reasoning.default_effort } : {}),
     mandatoryReasoning: reasoning?.mandatory === true,
     reasoningCapable: reasoning !== null,
+    structuredOutput: structuredOutputTier(m.supported_parameters),
     // top_provider.context_length is the effective ceiling for the account's own request
     // limits; context_length is the model's raw training window. Prefer the former, fall
     // back to the latter, then 0 rather than an undefined the UI would have to guard.
@@ -179,6 +207,24 @@ export class ModelCatalog {
         cause: err,
       });
     }
+  }
+
+  /**
+   * One model's request-shaping capabilities, off the same cache `list()` serves.
+   *
+   * Never throws and never rejects: this sits in front of every generation, and a catalog
+   * that's unreachable (or a model id upstream doesn't list, e.g. one typed into config by
+   * hand) must not be the reason a generation fails. `undefined` means "nothing known",
+   * which callers read as the native path.
+   */
+  async capabilities(modelId: string): Promise<ModelCapabilities | undefined> {
+    const models = await this.list().then(
+      (r) => r.models,
+      () => [] as CatalogModel[],
+    );
+    const model = models.find((m) => m.id === modelId);
+    if (!model) return undefined;
+    return { structuredOutput: model.structuredOutput, mandatoryReasoning: model.mandatoryReasoning };
   }
 
   private async fetchFresh(): Promise<CatalogModel[]> {

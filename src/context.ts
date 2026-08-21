@@ -4,6 +4,7 @@ import type { ArrApi } from './arr/types.js';
 import type { Config } from './config/schema.js';
 import type { EventLog } from './events/log.js';
 import type { JobQueue } from './jobs/queue.js';
+import type { ModelCatalog } from './llm/catalog.js';
 import type { StructuredGenerator } from './llm/generator.js';
 import type { MediaTools } from './media/tools.js';
 import type { SearchCache } from './pipelines/acquire/searchCache.js';
@@ -20,6 +21,11 @@ export interface AppContext {
   // keyed by ArrInstance.name; ArrApi (not the concrete ArrClient) so fakes plug in directly
   clients: Map<string, ArrApi>;
   llm: StructuredGenerator;
+  // The one OpenRouter model catalog, shared between the picker route and the generator that
+  // reads each model's capabilities off it: a second instance would be a second cold cache and
+  // a second fetch of the same 400-model list. Optional so a `Partial<AppContext>` test that
+  // only exercises the route still gets one built for it in `createApp`.
+  catalog?: ModelCatalog;
   // Process-wide so a job's retry (a different runner tick, same process) can still see what
   // its previous run already searched, instead of re-sweeping every indexer for it.
   searchCache: SearchCache;

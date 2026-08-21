@@ -39,6 +39,7 @@ describe('buildGenerateOptions against the real AI SDK', () => {
     const options = buildGenerateOptions(
       { callsite: 'test', schema: SCHEMA, system: 'Pick one option.', prompt: 'Choose: a or b', promptCache },
       planPromptCache(promptCache),
+      'native',
     );
 
     const result = await generateObject({ model, ...options });
@@ -54,6 +55,7 @@ describe('buildGenerateOptions against the real AI SDK', () => {
     const options = buildGenerateOptions(
       { callsite: 'test', schema: SCHEMA, system: 's', prompt: 'p' },
       planPromptCache(false),
+      'native',
     );
     expect(options.messages.every((m) => m.role === 'user')).toBe(true);
     expect(options.instructions).toBe('s');
@@ -63,6 +65,7 @@ describe('buildGenerateOptions against the real AI SDK', () => {
     const options = buildGenerateOptions(
       { callsite: 'test', schema: SCHEMA, system: 's', prompt: 'p', promptCache: true },
       planPromptCache(true),
+      'native',
     );
     expect(options.instructions).toMatchObject({
       role: 'system',
