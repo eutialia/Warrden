@@ -207,14 +207,14 @@ export function storageStatusLabel(status: StorageCheckStatus): string {
   switch (status) {
     case 'ok':
       return 'Reachable';
+    case 'not-configured':
+      return 'Not set';
     case 'missing':
       return 'Missing';
-    case 'not-mounted':
-      return 'Not mounted';
+    case 'looks-unmounted':
+      return 'Looks unmounted';
     case 'unreadable':
       return 'Not readable';
-    case 'unwritable':
-      return 'Not writable';
     default:
       return status;
   }
@@ -224,8 +224,9 @@ export function storageStatusTone(status: StorageCheckStatus): Tone {
   switch (status) {
     case 'ok':
       return 'success';
+    case 'not-configured':
+      return 'neutral';
     case 'missing':
-    case 'not-mounted':
       return 'danger';
     default:
       return 'warning';

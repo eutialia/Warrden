@@ -1,11 +1,12 @@
 import type { StorageCheck } from '@/api';
 import { ToneBadge } from '@/components/ToneBadge';
 
-/** How many checks are reporting anything other than `ok`: the number every health badge
- * leads with. Typed over the status field alone, since the mount and arr probes agree on
- * that one sentinel and on nothing else. */
+/** How many checks report a problem: the number every health badge leads with. Typed over
+ * the status field alone, since the storage and arr probes agree on that one sentinel and
+ * on nothing else. A role with no path set is not a problem: the operator said they do not
+ * have that library. */
 export function unreachableCount(checks: { status: string }[]): number {
-  return checks.filter((c) => c.status !== 'ok').length;
+  return checks.filter((c) => c.status !== 'ok' && c.status !== 'not-configured').length;
 }
 
 /**
