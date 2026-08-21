@@ -9,6 +9,10 @@ export interface MediaStream {
   codecType: 'subtitle' | 'audio' | 'video' | 'other';
   codecName: string;
   language: string | null;
+  /** ffprobe's `disposition.forced`: the track only carries lines for foreign dialogue/signs. */
+  forced: boolean;
+  /** ffprobe's `tags.title`, e.g. 'FR Forced : SRT'. Some muxes mark forced only here. */
+  title: string | null;
 }
 
 /**
@@ -33,7 +37,8 @@ interface FfprobeStream {
   index: number;
   codec_type?: string;
   codec_name?: string;
-  tags?: { language?: string };
+  disposition?: { forced?: number };
+  tags?: { language?: string; title?: string };
 }
 
 /** `MediaTools` over real CLI binaries. Binaries are located lazily by name (PATH), so a
@@ -75,6 +80,8 @@ export class CliMediaTools implements MediaTools {
         s.codec_type === 'subtitle' ? 'subtitle' : s.codec_type === 'audio' ? 'audio' : s.codec_type === 'video' ? 'video' : 'other',
       codecName: s.codec_name ?? '',
       language: s.tags?.language ?? null,
+      forced: s.disposition?.forced === 1,
+      title: s.tags?.title ?? null,
     }));
   }
 

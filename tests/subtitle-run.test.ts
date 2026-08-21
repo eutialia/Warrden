@@ -19,8 +19,8 @@ import { enqueueAndClaim, FakeGenerator, findEvent, hasEvent, seriesResource, su
  * already covering the zh-Hans gap, so a reference the gate can use has to be a non-target
  * language (here 'ja') — the drift gate only cares about timings, not the reference's tongue. */
 const VIDEO_STREAMS: MediaStream[] = [
-  { index: 0, codecType: 'video', codecName: 'hevc', language: null },
-  { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'ja' },
+  { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+  { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'ja', forced: false, title: null },
 ];
 
 /** An SRT cue table for the fixture's episode — shared by the reference extraction AND the
@@ -150,8 +150,8 @@ describe('runSubtitleJob', () => {
     // a drift reference while the episode still counts as missing the target language).
     const fx = subtitleFixture();
     fx.media.setStreams(fx.videoPath, [
-      { index: 0, codecType: 'video', codecName: 'hevc', language: null },
-      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans' },
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
     ]);
 
     const job = claimSubtitleJob(fx);
