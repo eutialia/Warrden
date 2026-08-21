@@ -35,10 +35,13 @@ export interface AppContext {
   // sites (createApp routes) stay valid; pipeline code that needs it asserts its presence.
   media?: MediaTools;
   // Directory the dashboard's built assets (`index.html` + `assets/`) live in, served by
-  // `createApp` when present. Optional and injectable (rather than a module-level constant
-  // resolved off `import.meta.url`) so tests can point it at a small fixture dir instead of
-  // the real `web/dist` — production just omits it and gets the real build's location.
-  webDistDir?: string;
+  // `createApp`. Injectable (rather than a module-level constant resolved off
+  // `import.meta.url`) so tests can point it at a small fixture dir instead of the real
+  // `web/dist`. Three states: omitted takes the real build's location, which is what
+  // production wants; a path serves that path; `null` serves no dashboard at all, for
+  // `npm run dev:all` where vite owns the UI and the built copy here would only be a
+  // staler second dashboard to confuse yourself with.
+  webDistDir?: string | null;
 }
 
 /**

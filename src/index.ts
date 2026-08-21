@@ -58,6 +58,10 @@ function buildContext(dataDir: string): AppContext {
     searchCache: new SearchCache(),
     trace,
     media: new CliMediaTools(),
+    // `npm run dev:all` sets this, because there vite serves the dashboard on its own port
+    // and whatever sits in `web/dist` is only the last build: a second, staler UI on this
+    // port, indistinguishable from the live one until you notice your edits missing.
+    webDistDir: process.env.WARRDEN_SERVE_WEB === 'false' ? null : undefined,
   };
   applyConfig(ctx, config);
   return ctx;
@@ -74,7 +78,13 @@ async function main(): Promise<void> {
   const stopEventPrune = scheduleEventPrune(ctx);
 
   const server = serve({ fetch: createApp(ctx).fetch, port: ctx.config.server.port }, () => {
-    console.log(`warrden listening on port ${ctx.config.server.port}`);
+    // With no dashboard on this port, "listening on 9797" is true but points you at the
+    // one port that has no UI, so say which half is here and where the other one went.
+    console.log(
+      ctx.webDistDir === null
+        ? `warrden API listening on port ${ctx.config.server.port}; the dashboard is vite's, on its own port`
+        : `warrden listening on port ${ctx.config.server.port}`,
+    );
   });
 
   // After serve() so a slow/unreachable arr can never delay the server (and dashboard)

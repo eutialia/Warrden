@@ -247,6 +247,31 @@ describe('app', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it('serves no dashboard when webDistDir is null, even with a real dist dir on disk', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'warrden-web-dist-'));
+      try {
+        writeFileSync(join(dir, 'index.html'), '<!doctype html><html><body>fixture shell</body></html>');
+        // `null` has to win over the default location too, not just over `dir`.
+        const app = createApp({ webDistDir: null });
+
+        // Hono's own 404 (plain text), because the SPA fallback lives inside the static
+        // mount this case skips entirely, same as running with no dist dir built.
+        const deepLink = await app.request('/jobs/5');
+        expect(deepLink.status).toBe(404);
+        expect(await deepLink.text()).not.toContain('fixture shell');
+
+        const root = await app.request('/');
+        expect(root.status).toBe(404);
+
+        // The API half is untouched: only the static mount goes away.
+        const health = await app.request('/healthz');
+        expect(health.status).toBe(200);
+        expect(await health.json()).toEqual({ status: 'ok' });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('attention routes', () => {

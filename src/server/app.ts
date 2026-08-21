@@ -1091,8 +1091,10 @@ export function createApp(ctx: Partial<AppContext>): Hono {
   // (`npm run build:web`), and this server's own test suite (which asserts 404s for
   // routes that a given ctx doesn't mount) runs whether or not that build has happened,
   // so this can't turn into a hard dependency for `createApp` to work either way.
-  const webDistDir = ctx.webDistDir ?? DEFAULT_WEB_DIST_DIR;
-  if (existsSync(webDistDir)) {
+  // `?? DEFAULT` won't do here: `null` means "serve no dashboard" and has to survive the
+  // fallback, while `undefined` (the common case) still means "use the real build".
+  const webDistDir = ctx.webDistDir === undefined ? DEFAULT_WEB_DIST_DIR : ctx.webDistDir;
+  if (webDistDir !== null && existsSync(webDistDir)) {
     // `serveStatic` calls `next()`, not a 404, when a requested asset doesn't exist, so an
     // unmatched request falls through to Hono's own `notFound` handler below — that's where
     // the client-side-routing fallback to `index.html` lives, *except* for `/api` and
