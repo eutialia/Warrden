@@ -1,12 +1,12 @@
 import { useState, type KeyboardEvent } from 'react';
 import { X } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { cn } from '@/lib/utils';
+import { chipBarClass, chipClass, cn } from '@/lib/utils';
 
 /**
- * Chip/tag editor: type a value, press Enter or comma to add; click × to remove.
- * Parent owns the string[] and only persists on its own Save.
+ * Freeform chip bar: type, Enter (or comma), it becomes a chip with ×, same
+ * chrome as the language combobox. Parent owns the string[] and decides when to persist
+ * it: Config batches chips behind its Save button, Sites writes on every change.
  */
 export function TagInput({
   values,
@@ -48,28 +48,22 @@ export function TagInput({
 
   return (
     <div
-      className={cn(
-        'flex min-h-9 flex-wrap items-center gap-1.5 rounded-lg border border-input bg-transparent px-2 py-1.5',
-        disabled && 'opacity-50',
-        className,
-      )}
+      className={cn(chipBarClass, disabled && 'opacity-50', className)}
     >
-      {/* Picking preferences are written as whole sentences, so a chip has to be able
-          to wrap rather than truncate the policy mid-word. */}
       {values.map((v) => (
-        <Badge key={v} variant="secondary" className="h-auto max-w-full gap-1 py-1 pr-1 font-normal whitespace-normal">
+        <span key={v} className={cn(chipClass, 'whitespace-normal')}>
           <span className="min-w-0 text-left">{v}</span>
           {!disabled && (
             <button
               type="button"
-              className="rounded-sm p-0.5 hover:bg-muted"
+              className="rounded-sm p-0.5 hover:bg-muted [&_svg]:size-3"
               aria-label={`Remove ${v}`}
               onClick={() => onChange(values.filter((x) => x !== v))}
             >
-              <X className="size-3" />
+              <X />
             </button>
           )}
-        </Badge>
+        </span>
       ))}
       <Input
         value={draft}
@@ -80,7 +74,7 @@ export function TagInput({
         onBlur={() => {
           if (draft.trim()) commit(draft);
         }}
-        className="h-7 min-w-[8rem] flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
+        className="h-7 min-h-0 min-w-[8rem] flex-1 border-0 bg-transparent px-1 py-0 shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
       />
     </div>
   );

@@ -20,6 +20,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { SectionStack } from '@/components/SectionStack';
 import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusNotice } from '@/components/StatusNotice';
+import { LanguageInput } from '@/components/LanguageInput';
 import { TagInput } from '@/components/TagInput';
 import { StatusDot, ToneBadge } from '@/components/ToneBadge';
 import {
@@ -78,10 +79,19 @@ export default function Sites() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Languages and preferred groups are a small form with its own save; sites are
+  // Languages and preferred groups persist on each chip add/remove. Sites are
   // edited through dialogs and persist on confirm.
   const [languages, setLanguages] = useState<string[]>([]);
   const [groups, setGroups] = useState<string[]>([]);
+  const languagesRef = useRef<string[]>([]);
+  const groupsRef = useRef<string[]>([]);
+  languagesRef.current = languages;
+  groupsRef.current = groups;
+
+  // The last config the server handed us, read by the chip rollback path from inside a
+  // promise callback that closed over an older render's `config`.
+  const configRef = useRef<Config | null>(null);
+  configRef.current = config;
 
   const [draft, setDraft] = useState<SiteDraft | null>(null);
   const [removing, setRemoving] = useState<SubtitleSite | null>(null);
@@ -101,13 +111,17 @@ export default function Sites() {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [resettingKnowledge, setResettingKnowledge] = useState(false);
 
-  // Whether the two tag fields hold edits nobody has saved yet. Held in a ref because
-  // `refetch` runs on a 45-second heartbeat and on every server event: re-seeding the
-  // fields from the server mid-sentence would wipe what someone is typing, and take the
-  // save bar with it.
+  // True while a chip write hasn't round-tripped. Held in a ref because `refetch`
+  // runs on a 45-second heartbeat and on every server event: re-seeding the fields
+  // from the server mid-write would snap the chip back off.
   const prefsDirtyRef = useRef(false);
+  // Tail of the chain every config write runs on, so no two are ever in flight together.
+  const writeQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const beginFetch = useFetchGeneration();
+  // Only the newest chip edit owns the fields, so an older one's failure must not roll
+  // back over a newer one's optimistic state.
+  const beginPrefsWrite = useFetchGeneration();
   // The knowledge dialog gets its own counter, separate from `refetch`'s. Sharing one
   // (round 1's approach) meant any SSE event or the 45 s heartbeat landing mid-open bumped
   // the same generation the dialog was waiting on, wedging it on a permanent skeleton —
@@ -142,38 +156,68 @@ export default function Sites() {
 
   useEffect(refetch, [refetch]);
 
-  /** Writes a whole config back, but this page only owns `subtitle`. Everything else is
-   * rebased on a fresh read rather than on this page's copy, which can be up to a
-   * heartbeat old: `PUT /api/config` replaces the whole document and the body is the
-   * whole truth (API keys included, in plain text), so sending our stale copy would
-   * quietly undo anything saved from Settings in the meantime, up to reverting a key
-   * rotated a minute ago. Mounts and path mappings ride along in `current` for the same
-   * reason: they are fixed outside the UI and no page may rewrite them. */
-  const persist = useCallback(
-    async (next: Config, successMsg: string): Promise<boolean> => {
+  /** This page only owns `subtitle`. Everything else is rebased on a fresh read:
+   * `PUT /api/config` replaces the whole document, so sending our stale copy would
+   * undo a Settings save from the last heartbeat. Patch merges into `current.subtitle`
+   * so a language write can't clobber a site add in the other direction.
+   *
+   * Each call is a read-modify-write, so two overlapping ones both read the pre-edit
+   * document and whichever PUT lands last erases the other's edit. Chip edits make that
+   * reachable by clicking — nothing gates them behind a disabled button — so every write
+   * queues behind the previous one instead. */
+  const persistSubtitle = useCallback(
+    (patch: Partial<Config['subtitle']>, successMsg?: string): Promise<boolean> => {
       setSaving(true);
-      try {
-        const current = await fetchConfig();
-        await saveConfig({ ...current, subtitle: next.subtitle });
-        toast.success(successMsg);
-        refetch();
-        return true;
-      } catch (err) {
-        toast.error(apiErrorMessage(err, 'Failed to save'));
-        return false;
-      } finally {
-        setSaving(false);
-      }
+      const run: Promise<boolean> = writeQueueRef.current.then(async () => {
+        try {
+          const current = await fetchConfig();
+          await saveConfig({ ...current, subtitle: { ...current.subtitle, ...patch } });
+          if (successMsg) toast.success(successMsg);
+          refetch();
+          return true;
+        } catch (err) {
+          toast.error(apiErrorMessage(err, 'Failed to save'));
+          return false;
+        } finally {
+          // Only the write still at the tail clears the flag: an earlier one finishing
+          // while a later one is queued must not re-enable the dialogs mid-sequence.
+          if (writeQueueRef.current === run) setSaving(false);
+        }
+      });
+      writeQueueRef.current = run;
+      return run;
     },
     [refetch],
   );
 
-  async function savePreferences(): Promise<void> {
-    if (!config) return;
-    await persist(
-      { ...config, subtitle: { ...config.subtitle, languages, preferredGroups: groups } },
-      'Subtitle preferences saved',
-    );
+  /** Chip edits persist as they happen, so a failed write has to undo itself. Rolling the
+   * fields back to the last config the server gave us is deterministic, and it makes
+   * `prefsDirty` false again so the next heartbeat is free to re-seed them. Clearing
+   * `prefsDirtyRef` and leaning on a refetch is not: that ref is recomputed from state on
+   * every render, and any render landing before the response flips it back to true and the
+   * re-seed is skipped, stranding a chip that never reached the server. */
+  function commitList(kind: 'languages' | 'groups', next: string[]): void {
+    if (kind === 'languages') {
+      languagesRef.current = next;
+      setLanguages(next);
+    } else {
+      groupsRef.current = next;
+      setGroups(next);
+    }
+    const isStale = beginPrefsWrite();
+    void persistSubtitle({
+      languages: languagesRef.current,
+      preferredGroups: groupsRef.current,
+    }).then((ok) => {
+      // A newer chip edit has taken over the fields; its own outcome decides what they show.
+      if (ok || isStale()) return;
+      const server = configRef.current;
+      if (!server) return;
+      languagesRef.current = server.subtitle.languages;
+      groupsRef.current = server.subtitle.preferredGroups ?? [];
+      setLanguages(languagesRef.current);
+      setGroups(groupsRef.current);
+    });
   }
 
   async function saveSite(): Promise<void> {
@@ -189,17 +233,14 @@ export default function Sites() {
     const sites = draft.original
       ? config.subtitle.sites.map((s) => (s.baseUrl === draft.original!.baseUrl ? value : s))
       : [...config.subtitle.sites, value];
-    const ok = await persist({ ...config, subtitle: { ...config.subtitle, sites } }, draft.original ? 'Site updated' : 'Site added');
+    const ok = await persistSubtitle({ sites }, draft.original ? 'Site updated' : 'Site added');
     if (ok) setDraft(null);
   }
 
   async function removeSite(): Promise<void> {
     if (!config || !removing) return;
     const sites = config.subtitle.sites.filter((s) => s.baseUrl !== removing.baseUrl);
-    const ok = await persist(
-      { ...config, subtitle: { ...config.subtitle, sites } },
-      `Removed ${siteLabel(removing.baseUrl)}`,
-    );
+    const ok = await persistSubtitle({ sites }, `Removed ${siteLabel(removing.baseUrl)}`);
     if (ok) setRemoving(null);
   }
 
@@ -362,29 +403,16 @@ export default function Sites() {
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label>Languages</Label>
-                <TagInput values={languages} onChange={setLanguages} placeholder="e.g. zh-Hans — Enter to add" />
+                <LanguageInput values={languages} onChange={(next) => commitList('languages', next)} />
               </div>
               <div className="space-y-2">
                 <Label>Preferred fansub groups</Label>
-                <TagInput values={groups} onChange={setGroups} placeholder="e.g. Airota — Enter to add" />
+                <TagInput
+                  values={groups}
+                  onChange={(next) => commitList('groups', next)}
+                  placeholder="e.g. Airota — Enter to add"
+                />
               </div>
-              {prefsDirty && (
-                <div className="flex items-center gap-2 border-t pt-4">
-                  <Button disabled={saving} onClick={() => void savePreferences()}>
-                    {saving ? 'Saving…' : 'Save preferences'}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    disabled={saving}
-                    onClick={() => {
-                      setLanguages(config.subtitle.languages);
-                      setGroups(config.subtitle.preferredGroups ?? []);
-                    }}
-                  >
-                    Discard
-                  </Button>
-                </div>
-              )}
             </CardContent>
           </Card>
 

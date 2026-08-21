@@ -37,8 +37,7 @@ docker run -d \
   warrden
 ```
 
-Warrden always expects exactly these four media mounts (they aren't editable in the
-dashboard):
+Under Docker, bind your directories to these four container paths:
 
 | Role | Container path | What to bind |
 | --- | --- | --- |
@@ -70,14 +69,28 @@ mounts, including the size-match fallback, the foreign-file guard, and the stuck
 filters. Series ingest and the LLM matching steps are covered by unit and integration
 tests against mocked arrs, but haven't had a live pass yet.
 
+### Where Warrden looks for your media
+
+Four paths, set under Settings, Storage. Leave one blank if you do not have that library.
+
+| Deployment | What to do |
+| --- | --- |
+| Docker | Bind your directories to `/tv`, `/anime`, `/movies`, and `/downloads`. The defaults already point there, so there is nothing to configure. |
+| Proxmox LXC, or running directly | Set the four paths to wherever the shares are on the host, such as `/mnt/media/Series`. No environment variables. |
+| Development | Same as running directly. `WARRDEN_DATA_DIR` still picks the data directory, defaulting to `./data`. |
+
+If a path shows **Looks unmounted**, it exists as an empty directory on the machine's own
+filesystem. Under Docker that means the bind mount is missing. Elsewhere it usually means
+the share is not mounted yet.
+
 ## Ingest
 
 Ingest runs once per target per import burst: webhooks enqueue a job, further webhooks
 fold into it instead of piling up, and a reconciliation loop catches anything a webhook
 missed. Before touching the filesystem it waits for the arr's import queue to go idle
-for that target and checks that all four mounts are really mounted; either condition
-reschedules the job (without burning a retry) rather than sweeping a half-imported
-season pack or an unmounted NAS share.
+for that target and checks that every configured storage path is actually reachable;
+either condition reschedules the job (without burning a retry) rather than sweeping a
+half-imported season pack or a share that is not mounted yet.
 
 - **Sidecar rescue.** Copies `.mka` audio and `.srt`/`.ass` subtitles from the torrent's
   folder into place beside their video, renamed to the arr's convention. Always a copy,
@@ -85,7 +98,7 @@ season pack or an unmounted NAS share.
   first, with one batched LLM call for the cryptic rest. Movies skip the LLM but keep a
   filename-stem guard so a bundled extra's subtitles don't get attached to the main
   film. A movie with no usable import history gets its source folder re-derived by an
-  exact file-size match across `ingest.downloadRoots`.
+  exact file-size match under the downloads storage path.
 - **Bundle rescue (series only).** Maps leftover episode files from partially imported
   season packs (parsing first, LLM for the rest) and pushes them through the arr's
   manual-import API in copy mode. A low-confidence mapping is proposed as an Attention
@@ -99,8 +112,8 @@ season pack or an unmounted NAS share.
 Warrden never deletes or overwrites a file it didn't place itself. Every placement is
 recorded in a provenance table, and a file without a provenance row is treated as
 foreign and left alone. Note that bundle rescue only sees a torrent folder it can
-resolve under `ingest.downloadRoots` (derived from the `/downloads` path mapping by
-default); a folder outside every configured root is excluded from it on purpose.
+resolve under the downloads storage path (derived from the `/downloads` path mapping by
+default); a folder outside that root is excluded from it on purpose.
 
 ## Subtitle pipeline
 
@@ -151,9 +164,8 @@ the dashboard's Config page. Unset fields fall back to the defaults below.
 | `arrs[].kind` | — | `sonarr` or `radarr`. |
 | `arrs[].baseUrl` | — | Base URL of the arr instance. |
 | `arrs[].apiKey` | — | API key for the arr instance. |
-| `pathMappings[].from` / `.to` | `[]` | config.json only. Translates a path the arr reports into Warrden's container path; `to` should be one of the four standard mounts. Empty means the arrs already use those paths. |
-| `ingest.mountMarkers` | `[]` | Legacy/test only. Empty enforces the four standard mounts. |
-| `ingest.downloadRoots` | `[]` | Legacy/test only. Empty derives the arr-side download root from `pathMappings`. |
+| `storage.series` / `.anime` / `.movies` / `.downloads` | `/tv`, `/anime`, `/movies`, `/downloads` | Where Warrden looks for each library: container paths under Docker, paths on this machine in an LXC or a direct run. Must be absolute, or blank to say you do not have that library, in which case Warrden skips it everywhere. Editable under Settings, Storage. |
+| `pathMappings[].from` / `.to` | `[]` | config.json only. Translates a path the arr reports into Warrden's storage path; `to` should be one of the four paths set under Settings, Storage. Empty means the arrs already use those paths. |
 | `subtitle.languages` | `[]` | Target languages, most-wanted first (e.g. `["zh-Hans", "zh-Hant"]`). A video counts as covered only with every one present. |
 | `subtitle.preferredGroups` | `[]` | Soft rank boost for fansub group names. |
 | `subtitle.sites[].baseUrl` | — | Base URL of a subtitle site; this is the site's identity and its host is the label shown in the dashboard. |
@@ -177,9 +189,9 @@ is on disk, and a save writes back exactly what's in the fields. So clearing an
 
 ### Path mappings example
 
-Warrden always uses `/tv`, `/anime`, `/movies`, and `/downloads` inside the container.
-If Sonarr/Radarr see those libraries at other paths, map them in `config.json` (the
-Settings page won't edit this):
+Under Docker, the four storage paths default to `/tv`, `/anime`, `/movies`, and
+`/downloads`. If Sonarr/Radarr see those libraries at other paths, map them in
+`config.json` (the Settings page won't edit this):
 
 ```json
 {
@@ -193,10 +205,7 @@ Settings page won't edit this):
 ```
 
 With that mapping the arr-side download root is `/mnt/nas/Downloads` automatically. Best
-is to give Sonarr/Radarr the same four container paths so `pathMappings` can stay empty.
-
-Dev / non-Docker path overrides (not in the UI): `WARRDEN_MOUNT_SERIES`,
-`WARRDEN_MOUNT_ANIME`, `WARRDEN_MOUNT_MOVIES`, `WARRDEN_MOUNT_DOWNLOADS`.
+is to give Sonarr/Radarr the same four storage paths so `pathMappings` can stay empty.
 
 ## Design rules
 

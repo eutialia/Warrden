@@ -26,7 +26,7 @@ import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
 import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, sidecarStem, SIDECAR_EXTS, VIDEO_EXTS } from './sidecars.js';
-import { effectiveDownloadRoots } from '../../config/standardMounts.js';
+import { effectiveDownloadRoots } from '../../config/storage.js';
 import { resolveSourceDirsDetailed } from './sources.js';
 
 export const SETTLE_RETRY_MS = 2 * 60_000;
@@ -160,7 +160,17 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // source, so an exact size match between the movie's current file and a video sitting
   // under a configured torrent-client root re-derives that torrent's own folder with no
   // history needed at all.
-  if (sourceDirsLocal.length === 0 && movieFile) {
+  if (sourceDirsLocal.length === 0 && movieFile && downloadRoots.length === 0) {
+    // Distinct from source-fallback-miss below: that one means the scan ran and matched
+    // nothing. This one means there was nowhere to scan, because the operator has no
+    // Downloads path set. The fix is a setting, not a retry.
+    ctx.events.append({
+      kind: 'ingest.source-fallback-skipped',
+      jobId: job.id,
+      message: 'No usable local source folder, and no Downloads path is configured to search for one. Set it in Settings under Storage.',
+      data: targetEventData(job),
+    });
+  } else if (sourceDirsLocal.length === 0 && movieFile) {
     const { dirs: fallbackDirs, rootsScanned } = findMovieSourceDirsBySize(
       downloadRoots,
       ctx.config.pathMappings,
@@ -327,8 +337,8 @@ function siblingVideosInDir(dir: string): string[] {
  *
  * A missing `video_path` is ambiguous on its own: it can mean the video genuinely vanished
  * (re-imported/upgraded/deleted — real stale), or it can mean the video's whole share isn't
- * mounted right now (`ingest.mountMarkers` defaults to `[]`, so an unmounted NAS share can
- * slip past `assertMounted` entirely). Only the parent folder's own reachability tells the
+ * mounted right now (`assertMounted` only checks the configured storage roots, so a share
+ * that isn't one of them can slip past it entirely). Only the parent folder's own reachability tells the
  * two apart: `existsSync(dirname(row.video_path))` true means the folder is there and the
  * video specifically is gone (real stale, safe to clean); false means the whole folder is
  * unreachable, so nothing here can tell deletion from an outage — the row is skipped rather

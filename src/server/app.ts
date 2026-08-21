@@ -43,7 +43,7 @@ import { resolvePickedRelease } from '../pipelines/acquire/picked.js';
 import { assessQueue } from '../pipelines/ingest/queueState.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
-import { cachedStorage, probeStorage } from './storageHealth.js';
+import { cachedStorage, probeStorage, resetStorageCache } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
 const DEFAULT_EVENTS_LIMIT = 100;
@@ -871,7 +871,11 @@ export function createApp(ctx: Partial<AppContext>): Hono {
     // in one request: queue depth, the review backlog, recent outcomes, and the mount
     // probe that would otherwise be a second round-trip.
     app.get('/api/overview', (c) =>
-      c.json({ ...overview.counts(), storage: cachedStorage(), debugEnabled: ctx.config?.debug.enabled ?? false }),
+      c.json({
+        ...overview.counts(),
+        storage: ctx.config ? cachedStorage(ctx.config) : [],
+        debugEnabled: ctx.config?.debug.enabled ?? false,
+      }),
     );
   }
 
@@ -997,8 +1001,9 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       return c.json({ baseUrl, markdown: renderKnowledge(knowledge), agentChars: agentCharCount(knowledge), version });
     });
 
-    // Read-only probes for Settings → Storage mounts (four fixed binds; not editable here).
-    app.get('/api/health/storage', (c) => c.json({ checks: probeStorage() }));
+    // Read-only probes for Settings → Storage. The paths themselves are editable
+    // through PUT /api/config below; this route only reports their current status.
+    app.get('/api/health/storage', (c) => c.json({ checks: probeStorage(requireConfig(ctx)) }));
 
     // Same idea for Settings → Arr instances. Nested guard rather than widening the block
     // above: `requireClients` documents an invariant about being gated on at mount time,
@@ -1058,6 +1063,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       saveConfig(dataDir, result.data);
       const arrsChanged = JSON.stringify(previous.arrs) !== JSON.stringify(result.data.arrs);
       const publicUrlChanged = previous.server.publicUrl !== result.data.server.publicUrl;
+      if (JSON.stringify(previous.storage) !== JSON.stringify(result.data.storage)) resetStorageCache();
       // Every consumer reads `ctx.config` (and, for arr calls, `ctx.clients`) live, so
       // pointing the context at the new config is all it takes for the save to be fully in
       // effect. Nothing here is deferred to a restart; only `server.port` still needs one,

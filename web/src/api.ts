@@ -250,8 +250,8 @@ export interface Config {
   server: { port: number; publicUrl: string };
   arrs: ArrInstance[];
   pathMappings: { from: string; to: string }[];
+  storage: { series: string; anime: string; movies: string; downloads: string };
   picking: { prefer: string[]; avoid: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
-  ingest: { mountMarkers: string[]; downloadRoots: string[] };
   subtitle: { languages: string[]; preferredGroups: string[]; sites: SubtitleSite[] };
   browser: { stepBudget: number; siteCooldownSeconds: number };
   llm: {
@@ -468,19 +468,17 @@ export function deleteManagedObject(id: number): Promise<{ ok: boolean; deletedI
   return fetchJson(`/api/managed-objects/${id}`, { method: 'DELETE' });
 }
 
-export type StorageCheckStatus = 'ok' | 'missing' | 'unreadable' | 'unwritable' | 'not-mounted';
+export type StorageCheckStatus = 'ok' | 'not-configured' | 'missing' | 'looks-unmounted' | 'unreadable';
 
 export interface StorageCheck {
-  id: string;
+  id: 'series' | 'anime' | 'movies' | 'downloads';
   label: string;
+  /** The configured path, or '' when the role is disabled. */
   path: string;
-  localPath: string;
-  role: 'series' | 'anime' | 'movies' | 'downloads';
   status: StorageCheckStatus;
   detail: string;
-  immutable: boolean;
-  /** Absent when the mount is unreachable, or when the filesystem won't report a
-   * size — "unknown" and "full" must not look the same. */
+  /** Absent when the path is unreachable, or when the filesystem will not report a
+   * size: "unknown" and "full" must not look the same. */
   usage?: { totalBytes: number; usedBytes: number };
 }
 

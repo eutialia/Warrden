@@ -4,10 +4,10 @@ import { ArrowRight, CheckCircle2, HardDrive, Loader2, TriangleAlert } from 'luc
 import { fetchJobs, type Job, type Overview as OverviewData } from '@/api';
 import { ActivityList } from '@/components/activity/ActivityList';
 import { TargetDrawer } from '@/components/activity/TargetDrawer';
-import { MountHealth, unreachableCount } from '@/components/MountHealth';
 import { PageHeader } from '@/components/PageHeader';
 import { StatBand, StatTile } from '@/components/StatTile';
 import { StatusNotice } from '@/components/StatusNotice';
+import { StorageHealth, storageProblems } from '@/components/StorageHealth';
 import { StatusDot } from '@/components/ToneBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -26,24 +26,25 @@ interface Verdict {
   tone: Tone;
   headline: string;
   detail: string;
-  /** The one thing to do about it — always the fix for the headline, never a
+  /** The one thing to do about it. Always the fix for the headline, never a
    * generic call to action that sends you somewhere unrelated. */
   action?: { label: string; to: string };
 }
 
 /**
  * The one sentence the home screen exists to produce. Ordered by how much a human
- * needs to act: a broken mount stops all filesystem work, a review backlog is
- * waiting on a decision, failures are informational after the fact.
+ * needs to act: a missing storage path stops all filesystem work, a review backlog is
+ * waiting on a decision, a suspect path is producing quiet nothing, failures are
+ * informational after the fact.
  */
 function verdictOf(data: OverviewData): Verdict {
-  const bad = unreachableCount(data.storage);
-  if (bad > 0) {
+  const storage = storageProblems(data.storage);
+  if (storage.missing > 0) {
     return {
       tone: 'danger',
-      headline: `${bad} storage ${bad === 1 ? 'mount is' : 'mounts are'} unreachable`,
-      detail: 'Warrden pauses filesystem work until the mounts come back. Check the container bind mounts.',
-      action: { label: 'Check mounts', to: '/config#storage' },
+      headline: `${storage.missing} storage ${storage.missing === 1 ? 'path is' : 'paths are'} unreachable`,
+      detail: 'Warrden pauses filesystem work until the paths come back. Check the paths under Settings, Storage.',
+      action: { label: 'Check storage', to: '/config#storage' },
     };
   }
   if (data.attention.open > 0) {
@@ -52,6 +53,15 @@ function verdictOf(data: OverviewData): Verdict {
       headline: `${data.attention.open} ${data.attention.open === 1 ? 'thing needs' : 'things need'} your review`,
       detail: 'Warrden stopped short of deciding these on its own.',
       action: { label: 'Review now', to: '/attention' },
+    };
+  }
+  if (storage.suspect > 0) {
+    return {
+      tone: 'warning',
+      headline: `${storage.suspect} storage ${storage.suspect === 1 ? 'path needs' : 'paths need'} a look`,
+      detail:
+        'Warrden is still working, but a path is either an empty directory where a share should be, or one it cannot read.',
+      action: { label: 'Check storage', to: '/config#storage' },
     };
   }
   if (data.jobs.running > 0 || data.jobs.pending > 0) {
@@ -72,7 +82,7 @@ function verdictOf(data: OverviewData): Verdict {
   return {
     tone: 'success',
     headline: 'Everything is running clean',
-    detail: 'Nothing needs review, the queue is empty, and every mount is reachable.',
+    detail: 'Nothing needs review, the queue is empty, and every storage path is reachable.',
   };
 }
 
@@ -107,7 +117,7 @@ export default function Overview() {
   const verdict = data ? verdictOf(data) : null;
   const inFlight = (data?.jobs.running ?? 0) + (data?.jobs.pending ?? 0);
   const placed = (data?.placed.subtitle ?? 0) + (data?.placed.audio ?? 0);
-  // Only worth saying once a week's worth of jobs have actually finished — "100%
+  // Only worth saying once a week's worth of jobs have actually finished. "100%
   // clean" out of nothing finished is a lie of omission.
   const weekTotal = (data?.week.done ?? 0) + (data?.week.failed ?? 0);
   // Floored, never rounded up: 1999 of 2000 must not read as "100% clean" beside a
@@ -119,17 +129,17 @@ export default function Overview() {
     <div className="space-y-6">
       <PageHeader
         title="Overview"
-        description="Warrden at a glance — what it is working on, what it finished, and anything it could not decide alone."
+        description="Warrden at a glance: what it is working on, what it finished, and anything it could not decide alone."
       />
       {error && <StatusNotice message={error} onRetry={refetch} />}
 
       {/* The verdict. One sentence, sized so it is readable across a room, in the
           serif that carries every title. The tone lives in the icon badge rather
-          than an accent rail — the eye goes to the icon anyway, so a rail would
+          than an accent rail. The eye goes to the icon anyway, so a rail would
           only repeat it. */}
       <div className="flex flex-wrap items-center gap-4 empty:hidden">
         {/* Skeletons only while a request is genuinely in flight. If it failed there is
-            no verdict to give and the notice above already says why — leaving the
+            no verdict to give and the notice above already says why. Leaving the
             skeleton up would promise an answer that is never coming. */}
         {loading ? (
           <div className="space-y-2">
@@ -195,7 +205,7 @@ export default function Overview() {
       </StatBand>
 
       {/* The queue reads as the page's subject, so it takes the wide column and the
-          mounts sit beside it rather than under it. */}
+          storage panel sits beside it rather than under it. */}
       <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
         <Card>
           <CardHeader>
@@ -209,7 +219,7 @@ export default function Overview() {
           </CardHeader>
           <CardContent>
             {/* "Nothing yet" is a claim about the queue, so it waits until a request has
-                actually answered — before that the truth is simply unknown. */}
+                actually answered. Before that, the truth is unknown. */}
             {!jobsLoaded ? (
               <div className="space-y-3 border-t py-4">
                 {Array.from({ length: 4 }, (_, i) => (
@@ -234,7 +244,7 @@ export default function Overview() {
               Storage
             </CardTitle>
             <CardAction>
-              <MountHealth checks={data?.storage ?? []} />
+              <StorageHealth checks={data?.storage ?? []} />
             </CardAction>
           </CardHeader>
           <CardContent className="[&>*]:border-t [&>*:last-child]:border-b">
@@ -242,9 +252,12 @@ export default function Overview() {
             {data?.storage.map((check) => (
               <div key={check.id} className="flex items-center gap-3 py-2.5">
                 <StatusDot tone={storageStatusTone(check.status)} />
+                {/* A disabled role has no path, and a row identified only by its path is
+                    then an anonymous blank line. The label always names the library. */}
+                <span className="shrink-0 text-xs text-muted-foreground">{check.label}</span>
                 <code className="min-w-0 flex-1 truncate text-xs">{check.path}</code>
-                {/* Capacity when the mount can answer, its problem when it can't —
-                    the right-hand column always says the most useful thing it has. */}
+                {/* Capacity when storage can answer, its problem when it can't. The
+                    right-hand column always says the most useful thing it has. */}
                 <span
                   className={cn(
                     'shrink-0 font-mono text-xs',

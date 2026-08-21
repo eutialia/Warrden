@@ -78,25 +78,26 @@ export function atomicCopy(src: string, dest: string): void {
   }
 }
 
-/** Thrown by `ensureMounts` when one or more expected mount markers are absent. */
+/** Thrown by `ensureMounts` when one or more configured storage paths are absent. */
 export class MountError extends Error {
   readonly missing: string[];
 
   constructor(missing: string[]) {
-    super(`missing mount marker(s): ${missing.join(', ')}`);
+    super(`missing storage path(s): ${missing.join(', ')}`);
     this.name = 'MountError';
     this.missing = missing;
   }
 }
 
 /**
- * Verifies every path in `markers` exists, throwing `MountError` (listing exactly the
- * absent ones) otherwise. Guards against running filesystem work — sweeps, copies, deletes
- * — against an unmounted NAS share, where the mount point exists as an empty local
- * directory and would otherwise look like "nothing to do" instead of "not actually
- * mounted". An empty `markers` list (no markers configured) is a no-op.
+ * Verifies every path in `paths` exists, throwing `MountError` (listing exactly the
+ * absent ones) otherwise. Guards against running filesystem work (sweeps, copies, deletes)
+ * against a share that was never mounted. This check only looks for the path's presence;
+ * it cannot tell a real share from an empty local directory sitting where a mount point
+ * should be. That case is caught by the storage probe, not here. An empty list, meaning
+ * every role is disabled, is a no-op.
  */
-export function ensureMounts(markers: string[]): void {
-  const missing = markers.filter((m) => !existsSync(m));
+export function ensureMounts(paths: string[]): void {
+  const missing = paths.filter((p) => !existsSync(p));
   if (missing.length > 0) throw new MountError(missing);
 }

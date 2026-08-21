@@ -1,69 +1,87 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isMountPoint, probeStorage } from '../src/server/storageHealth.js';
+import { ConfigSchema } from '../src/config/schema.js';
+import type { StatDev } from '../src/fs/mountPoint.js';
+import { cachedStorage, probeStorage, resetStorageCache } from '../src/server/storageHealth.js';
 import { tmpDir } from './helpers.js';
 
-const ENV_KEYS = [
-  'WARRDEN_MOUNT_SERIES',
-  'WARRDEN_MOUNT_ANIME',
-  'WARRDEN_MOUNT_MOVIES',
-  'WARRDEN_MOUNT_DOWNLOADS',
-] as const;
-
-function clearEnv(): void {
-  for (const k of ENV_KEYS) delete process.env[k];
+function cfgWith(storage: Record<string, string>) {
+  return ConfigSchema.parse({ storage });
 }
 
-describe('isMountPoint / probeStorage', () => {
-  it('a normal subdirectory on the same filesystem is not a mount point', () => {
-    const root = tmpDir();
-    const child = join(root, 'tv');
-    mkdirSync(child);
-    expect(isMountPoint(child)).toBe(false);
+/** Every path on one device, so the containing mount walks all the way up to `/`. Whether a
+ * real mkdtemp directory does that depends on the host: `/tmp` is its own tmpfs on many
+ * Linux boxes and shares a device with `/` on a Mac. */
+const oneDevice: StatDev = () => ({ dev: 1 });
+
+/** `path` sits on its own filesystem, the NFS and SMB case a test cannot really mount. */
+function mountedAt(path: string): StatDev {
+  return (p) => ({ dev: p === path ? 2 : 1 });
+}
+
+function statusOf(storage: Record<string, string>, id: string, stat?: StatDev): string {
+  return probeStorage(cfgWith(storage), stat).find((c) => c.id === id)!.status;
+}
+
+describe('probeStorage', () => {
+  it('reports a blank path as not configured, not as an error', () => {
+    const check = probeStorage(cfgWith({ anime: '' })).find((c) => c.id === 'anime')!;
+    expect(check.status).toBe('not-configured');
+    expect(check.path).toBe('');
   });
 
-  it('probeStorage reports not-mounted for empty local dirs that are not bind mounts', () => {
-    const root = tmpDir();
-    const series = join(root, 'tv');
-    const anime = join(root, 'anime');
-    const movies = join(root, 'movies');
-    const downloads = join(root, 'downloads');
-    for (const p of [series, anime, movies, downloads]) mkdirSync(p);
-
-    process.env.WARRDEN_MOUNT_SERIES = series;
-    process.env.WARRDEN_MOUNT_ANIME = anime;
-    process.env.WARRDEN_MOUNT_MOVIES = movies;
-    process.env.WARRDEN_MOUNT_DOWNLOADS = downloads;
-    try {
-      const checks = probeStorage();
-      const byId = Object.fromEntries(checks.map((c) => [c.id, c]));
-      expect(byId.series?.status).toBe('not-mounted');
-      expect(byId.anime?.status).toBe('not-mounted');
-      expect(byId.movies?.status).toBe('not-mounted');
-      expect(byId.downloads?.status).toBe('not-mounted');
-      expect(byId.series?.detail).toMatch(/bind mount/i);
-      // `download-root` is a retired id no probe may resurrect. Widened to `string[]`
-      // because it no longer exists in `StandardMountId` — comparing it directly is a
-      // type error, which is exactly the point of the assertion.
-      const ids: string[] = checks.map((c) => c.id);
-      expect(ids).not.toContain('download-root');
-    } finally {
-      clearEnv();
-    }
+  it('reports a path that does not exist as missing', () => {
+    expect(statusOf({ series: join(tmpDir(), 'nope') }, 'series')).toBe('missing');
   });
 
-  it('probeStorage reports missing when the path does not exist', () => {
-    process.env.WARRDEN_MOUNT_SERIES = '/no/such/warrden/series/mount';
-    process.env.WARRDEN_MOUNT_ANIME = '/no/such/warrden/anime/mount';
-    process.env.WARRDEN_MOUNT_MOVIES = '/no/such/warrden/movies/mount';
-    process.env.WARRDEN_MOUNT_DOWNLOADS = '/no/such/warrden/downloads/mount';
-    try {
-      const checks = probeStorage();
-      expect(checks.every((c) => c.status === 'missing')).toBe(true);
-      expect(checks.some((c) => c.id === 'anime')).toBe(true);
-    } finally {
-      clearEnv();
-    }
+  it('reports an empty directory on the machine filesystem as looks-unmounted', () => {
+    const dir = join(tmpDir(), 'tv');
+    mkdirSync(dir);
+    expect(statusOf({ series: dir }, 'series', oneDevice)).toBe('looks-unmounted');
+  });
+
+  it('accepts a directory on the machine filesystem that has media in it', () => {
+    const dir = join(tmpDir(), 'tv');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'Frieren S01E01.mkv'), 'video');
+    expect(statusOf({ series: dir }, 'series', oneDevice)).toBe('ok');
+  });
+
+  it('accepts an empty directory that is its own filesystem, which is the mounted share', () => {
+    const dir = join(tmpDir(), 'tv');
+    mkdirSync(dir);
+    expect(statusOf({ series: dir }, 'series', mountedAt(dir))).toBe('ok');
+  });
+
+  it('keeps the four roles in order', () => {
+    expect(probeStorage(ConfigSchema.parse({})).map((c) => c.id)).toEqual([
+      'series',
+      'anime',
+      'movies',
+      'downloads',
+    ]);
+  });
+});
+
+describe('cachedStorage', () => {
+  it('serves the previous answer inside the cache window', () => {
+    resetStorageCache();
+    const dir = join(tmpDir(), 'tv');
+    mkdirSync(dir);
+    const first = cachedStorage(cfgWith({ series: dir }), 1_000, oneDevice);
+    writeFileSync(join(dir, 'Frieren S01E01.mkv'), 'video');
+    const second = cachedStorage(cfgWith({ series: dir }), 5_000, oneDevice);
+    expect(second[0].status).toBe(first[0].status);
+  });
+
+  it('re-probes after resetStorageCache, so a saved path shows its real status at once', () => {
+    resetStorageCache();
+    const dir = join(tmpDir(), 'tv');
+    mkdirSync(dir);
+    expect(cachedStorage(cfgWith({ series: dir }), 1_000, oneDevice)[0].status).toBe('looks-unmounted');
+    writeFileSync(join(dir, 'Frieren S01E01.mkv'), 'video');
+    resetStorageCache();
+    expect(cachedStorage(cfgWith({ series: dir }), 5_000, oneDevice)[0].status).toBe('ok');
   });
 });

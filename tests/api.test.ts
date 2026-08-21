@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { ArrClient } from '../src/arr/client.js';
@@ -8,7 +10,8 @@ import { AttentionItems } from '../src/db/attention.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { loadConfig } from '../src/config/store.js';
 import type { AppContext } from '../src/context.js';
-import { makeCtx, configWithArrs, arrInstance, fakeArrClient, withFakeTime, ctxWithClient } from './helpers.js';
+import { resetStorageCache } from '../src/server/storageHealth.js';
+import { makeCtx, configWithArrs, arrInstance, fakeArrClient, withFakeTime, ctxWithClient, tmpDir } from './helpers.js';
 
 describe('dashboard api', () => {
   describe('GET /api/jobs, /api/jobs/:id', () => {
@@ -269,6 +272,46 @@ describe('dashboard api', () => {
       const onDisk = loadConfig(ctx.dataDir);
       expect(onDisk.reconcileIntervalMinutes).toBe(42);
       expect(onDisk.arrs[0]?.apiKey).toBe('test-api-key'); // the secret was persisted too, not just held in memory
+    });
+
+    // The home screen reads the storage probe through a 30s cache (/api/overview), so a
+    // saved path that keeps showing its old status for half a minute is indistinguishable
+    // from a path that is genuinely wrong.
+    describe('storage cache', () => {
+      const storageCfg = (series: string) =>
+        ConfigSchema.parse({ storage: { series, anime: '', movies: '', downloads: '' } });
+      const statusOfSeries = async (app: ReturnType<typeof createApp>): Promise<string> => {
+        const body: any = await (await app.request('/api/overview')).json();
+        return body.storage[0].status;
+      };
+      const put = (app: ReturnType<typeof createApp>, body: unknown) =>
+        app.request('/api/config', { method: 'PUT', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });
+
+      beforeEach(resetStorageCache);
+
+      it('a PUT that changes storage drops the cached probe', async () => {
+        const ctx = makeCtx({ config: storageCfg(join(tmpDir(), 'nope')) });
+        const app = createApp(ctx);
+        expect(await statusOfSeries(app)).toBe('missing');
+
+        const got: any = await (await app.request('/api/config')).json();
+        expect((await put(app, { ...got, storage: { ...got.storage, series: '' } })).status).toBe(200);
+
+        expect(await statusOfSeries(app)).toBe('not-configured');
+      });
+
+      it('a PUT that leaves storage alone keeps it, since each probe is a blocking syscall per path', async () => {
+        const dir = join(tmpDir(), 'tv');
+        const ctx = makeCtx({ config: storageCfg(dir) });
+        const app = createApp(ctx);
+        expect(await statusOfSeries(app)).toBe('missing');
+
+        mkdirSync(dir);
+        const got: any = await (await app.request('/api/config')).json();
+        expect((await put(app, { ...got, reconcileIntervalMinutes: 42 })).status).toBe(200);
+
+        expect(await statusOfSeries(app)).toBe('missing');
+      });
     });
 
     it.each([

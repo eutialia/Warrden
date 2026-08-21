@@ -20,11 +20,11 @@ import {
 } from '@/api';
 import { ArrHealth } from '@/components/ArrHealth';
 import { ModelPicker } from '@/components/ModelPicker';
-import { MountHealth } from '@/components/MountHealth';
 import { NumberField } from '@/components/NumberField';
 import { PageHeader } from '@/components/PageHeader';
 import { SectionStack } from '@/components/SectionStack';
 import { StatusNotice } from '@/components/StatusNotice';
+import { StorageHealth } from '@/components/StorageHealth';
 import { THEME_OPTIONS } from '@/components/ThemeToggle';
 import { TagInput } from '@/components/TagInput';
 import { StatusDot, ToneBadge } from '@/components/ToneBadge';
@@ -52,12 +52,13 @@ function applyRegisterResults(checks: ArrCheck[], results: WebhookRegisterResult
   });
 }
 
-/** Mirrors server `standardMounts` — web has no shared package with the backend. */
-const STANDARD_MOUNT_ROWS = [
-  { id: 'series', label: 'Series', path: '/tv', blurb: 'Sonarr Series root folder' },
-  { id: 'anime', label: 'Anime', path: '/anime', blurb: 'Sonarr Anime root folder' },
-  { id: 'movies', label: 'Movies', path: '/movies', blurb: 'Radarr library root' },
-  { id: 'downloads', label: 'Downloads', path: '/downloads', blurb: 'Torrent download / completed root' },
+/** The four storage roles, in the order the server reports them. Web has no shared package
+ * with the backend, so the list is repeated rather than imported. */
+const STORAGE_ROWS = [
+  { id: 'series', label: 'Series', placeholder: '/tv', blurb: 'Sonarr Series root folder' },
+  { id: 'anime', label: 'Anime', placeholder: '/anime', blurb: 'Sonarr Anime root folder' },
+  { id: 'movies', label: 'Movies', placeholder: '/movies', blurb: 'Radarr library root' },
+  { id: 'downloads', label: 'Downloads', placeholder: '/downloads', blurb: 'Torrent client completed root' },
 ] as const;
 
 /** Spans offered for the event log. `0` is "keep everything" — the schema takes any
@@ -158,10 +159,10 @@ export default function ConfigPage() {
         setStorageError(null);
       })
       .catch((err: unknown) => {
-        // A failed probe is not the same as four missing mounts. Say which it was, or
+        // A failed probe is not the same as four missing paths. Say which it was, or
         // "Re-check now" looks like it does nothing.
         setStorageChecks([]);
-        setStorageError(apiErrorMessage(err, 'Could not check the mounts'));
+        setStorageError(apiErrorMessage(err, 'Could not check the storage paths'));
       });
   }, []);
 
@@ -187,7 +188,7 @@ export default function ConfigPage() {
   useEffect(load, [load]);
 
   // A router navigation doesn't act on the fragment the way a real page load would, and
-  // the section it names doesn't exist until the config resolves — so "Check mounts" on
+  // the section it names doesn't exist until the config resolves, so "Check storage" on
   // the home screen would otherwise just drop you at the top of a long page.
   // Depending on `draft` itself would re-scroll on every keystroke, since each edit
   // clones it; only its arrival matters.
@@ -263,8 +264,7 @@ export default function ConfigPage() {
     try {
       // The PUT is the whole document, but this page only owns part of it. Rebasing on a
       // fresh read means a save here can't revert what another page (Subtitle sources) wrote
-      // since this one mounted. Mounts and path mappings, which no page edits, ride along
-      // the same way.
+      // since this one mounted. Path mappings, which no page edits, ride along the same way.
       const current = await fetchConfig();
       // A secret field untouched since mount belongs to the server: take the freshly read
       // value, so a long-open tab can't revert a key rotated from elsewhere. An edited
@@ -285,6 +285,13 @@ export default function ConfigPage() {
         ...current,
         server: { ...current.server, publicUrl: draft.server.publicUrl.trim() },
         arrs: savedArrs,
+        // Trimmed so a pasted path with a trailing space is not refused as relative.
+        storage: {
+          series: draft.storage.series.trim(),
+          anime: draft.storage.anime.trim(),
+          movies: draft.storage.movies.trim(),
+          downloads: draft.storage.downloads.trim(),
+        },
         picking: {
           prefer: draft.picking.prefer,
           avoid: draft.picking.avoid,
@@ -551,32 +558,37 @@ export default function ConfigPage() {
           </CardContent>
         </Card>
 
-        {/* Storage: four fixed mounts, never editable */}
+        {/* Storage: four paths, editable, blank disables the role */}
         <Card id="storage" className="scroll-mt-20">
           <CardHeader>
-            <CardTitle className="text-2xl">Storage mounts</CardTitle>
+            <CardTitle className="text-2xl">Storage</CardTitle>
             <CardDescription>
-              Warrden expects exactly four bind mounts. Set them when you create the container. This page only checks
-              that they are reachable.
+              Where Warrden looks for each library. Under Docker these are the container paths you bind to. Running
+              directly or in an LXC, they are paths on this machine. Leave one blank if you do not have that library.
             </CardDescription>
             <CardAction>
-              <MountHealth checks={storageChecks} />
+              <StorageHealth checks={storageChecks} />
             </CardAction>
           </CardHeader>
           <CardContent className="space-y-3">
             {storageError && <StatusNotice message={storageError} onRetry={loadStorage} />}
             <div className="space-y-1">
-              {STANDARD_MOUNT_ROWS.map((row) => {
+              {STORAGE_ROWS.map((row) => {
                 const check = storageChecks.find((c) => c.id === row.id);
                 const status = check?.status;
                 return (
                   <div key={row.id} className="flex flex-wrap items-center gap-3 border-t py-3">
                     <StatusDot tone={status ? storageStatusTone(status) : 'neutral'} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-baseline gap-2">
-                        <span className="text-sm font-medium">{row.label}</span>
-                        <code className="text-xs text-muted-foreground">{check?.path ?? row.path}</code>
-                      </div>
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <Label htmlFor={`storage-${row.id}`} className="text-sm font-medium">
+                        {row.label}
+                      </Label>
+                      <Input
+                        id={`storage-${row.id}`}
+                        value={draft.storage[row.id]}
+                        placeholder={row.placeholder}
+                        onChange={(e) => patch({ storage: { ...draft.storage, [row.id]: e.target.value } })}
+                      />
                       <p className="text-xs text-muted-foreground">{check?.detail ?? row.blurb}</p>
                     </div>
                     <div className="flex items-baseline gap-3">
