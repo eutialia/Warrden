@@ -86,7 +86,22 @@ interface RunState {
   /** episodeId -> how many candidates were quarantined for it this run, for the end-of-run
    * rollup (the per-candidate events are warn-level and carry no attention item). */
   quarantined: Map<number, number>;
+  /** episodeId -> how many candidates got as far as the drift gate for it this run, which is
+   * what `MAX_CANDIDATES_PER_EPISODE` counts. Only the expensive path is tallied: a file in
+   * the wrong language, one that vanished, one whose destination is spoken for, all cost
+   * nothing and are not attempts. */
+  attempts: Map<number, number>;
 }
+
+/**
+ * How many candidates one episode is worth per run. Every one past the cheap gates costs a
+ * drift assessment and, when it drifts, an alass run plus an ffsubsync run against the
+ * video: call it half a minute each. A big pack holds twenty releases of the same episode,
+ * and a job that spends twelve minutes failing on three stragglers is twelve minutes it did
+ * not spend on the three seasons that had nothing at all. Four is enough for the case this
+ * is really for (the pack holds one good copy behind a few bad ones), and cheap to lose.
+ */
+export const MAX_CANDIDATES_PER_EPISODE = 4;
 
 /**
  * The subtitle pipeline runner for a series or movie target. Mounts-guard, reconciles
@@ -161,6 +176,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       refDir,
       rawDir,
       quarantined: new Map(),
+      attempts: new Map(),
       allEpisodes: targets,
     };
 
@@ -633,13 +649,38 @@ async function driftAndPlace(
     return undefined;
   }
 
+  // Everything below here is measured in tens of seconds, so this is where the cap sits:
+  // after the free gates, before the first probe/resync of this candidate.
+  const tried = state.attempts.get(t.episodeId) ?? 0;
+  if (tried >= MAX_CANDIDATES_PER_EPISODE) return undefined;
+  state.attempts.set(t.episodeId, tried + 1);
+
   const plan = await decideCandidate(entry, t, state);
   if (plan.kind === 'quarantine') {
     quarantine(ctx, job, state, t, entry.path);
+    // The trip fires here rather than at the first skipped candidate, so it is exactly one
+    // event per episode whether the pack held five more candidates or none.
+    if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
     return undefined;
   }
 
   return placeSubtitle(ctx, job, state, t, targetPath, plan, row, entry, site);
+}
+
+/** The warn event for an episode that has used up its candidates. Warn like the quarantines
+ * it follows, and for the same reason: the human-facing fact is the run's one
+ * `subtitle.unresolved` rollup, which counts these candidates per episode. This event is what
+ * makes that rollup explicable, since "nothing was found" and "four things were found and
+ * none of them fit" look identical from outside without it. */
+function reportCapped(ctx: AppContext, job: JobRow, t: EpisodeTarget): void {
+  const label = job.target_kind === 'movie' ? basename(t.videoPath) : describeEpisodeRanges([t]);
+  ctx.events.append({
+    kind: 'subtitle.candidates-capped',
+    level: 'warn',
+    jobId: job.id,
+    message: `${label}: ${MAX_CANDIDATES_PER_EPISODE} candidates tried, none verified; giving up on it this run`,
+    data: targetEventData(job, { episodeId: t.episodeId, tried: MAX_CANDIDATES_PER_EPISODE }),
+  });
 }
 
 /** Runs the drift gate for one candidate, returning what to do with it (and the source path
@@ -875,6 +916,10 @@ async function siteSearchPass(
   if (sites.length === 0) return; // missing-resolution emissions happen back in runSubtitleJob
 
   const profiles = new SiteProfiles(ctx.db);
+  // What this library already holds for this target, read once for the whole pass. Round 1
+  // used to start blind, since the "already fetched" list only began filling at round 2, so a
+  // re-run's first round happily re-picked the pack the cache pass had just replayed.
+  const cached = cachedPacks(cache, job);
 
   for (const site of sites) {
     if (missing.length === 0) break;
@@ -887,21 +932,34 @@ async function siteSearchPass(
     const profile = profiles.get(site.baseUrl);
     if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
 
-    await searchSiteRounds(ctx, job, site, meta, missing, state, cache, deps, profiles);
+    await searchSiteRounds(ctx, job, site, meta, missing, state, cache, deps, profiles, cached);
   }
+}
+
+/** Every pack url this target has in the archive cache, deduped, in the shape the search
+ * prompt names them by. */
+function cachedPacks(cache: ArchiveCache, job: JobRow): FetchedPack[] {
+  const byUrl = new Map<string, FetchedPack>();
+  for (const row of cache.forTarget(job.arr_instance, job.target_kind, job.target_id)) {
+    if (!byUrl.has(row.source_url)) byUrl.set(row.source_url, { url: row.source_url, ...packTitleFromUrl(row.source_url) });
+  }
+  return [...byUrl.values()];
 }
 
 /**
  * Every round one site gets this job. A round is a whole `searchSite` call — its own
  * `subtitle_runs` row, its own agent loop, its own reflection — and the site gets another
- * one as long as the last round actually placed a file and something is still missing, up to
- * `MAX_SEARCH_ROUNDS`. That is what turns "one pack per site per job" into "keep pulling from
- * a site that is working": a pack covering S1+S2 used to end the job with S3 and S4
- * untouched.
+ * one as long as the last round brought back a pack this job did not already have and
+ * something is still missing, up to `MAX_SEARCH_ROUNDS`. That is what turns "one pack per
+ * site per job" into "keep pulling from a site that is working": a pack covering S1+S2 used
+ * to end the job with S3 and S4 untouched.
  *
- * A round that ends without a download, or that downloads and places nothing, ends the site:
- * both mean this site has stopped producing for this target, and the next round would replay
- * the same search at full step budget for the same result.
+ * A round that ends without a download ends the site, and so does one that hands back a pack
+ * already in `alreadyFetched` (which starts the job holding every pack the archive cache has
+ * for this target). Both mean the next round would replay the same search at full step budget
+ * for the same result. Placing nothing does NOT: a pack that fit no episode says something
+ * about that pack, not about the seasons nobody has searched for yet, and treating it as the
+ * site's last word is what left a re-run's S3 and S4 untouched.
  */
 async function searchSiteRounds(
   ctx: AppContext,
@@ -913,10 +971,12 @@ async function searchSiteRounds(
   cache: ArchiveCache,
   deps: RunSubtitleDeps,
   profiles: SiteProfiles,
+  cached: FetchedPack[],
 ): Promise<void> {
   const search = deps.searchSite ?? searchSite;
   const reflect = deps.reflectOnRun ?? reflectOnRun;
-  const alreadyFetched: FetchedPack[] = [];
+  const alreadyFetched: FetchedPack[] = [...cached];
+  let downloadedHere = false;
 
   for (let round = 0; round < MAX_SEARCH_ROUNDS; round++) {
     if (missing.length === 0) break;
@@ -939,6 +999,22 @@ async function searchSiteRounds(
     // to its notes file. Every other outcome (a download that placed nothing, an archive
     // that failed to extract, a give-up, a hard failure) is a completed run and reflects.
     if (result.outcome === 'cooldown') return;
+
+    // A pack this job already has, from an earlier round or from a run that cached it, means
+    // the agent is circling, and this is the cheapest possible moment to say so: before
+    // extracting it, before matching it, before reflecting on a round that navigated exactly
+    // where the last one did. It downloaded, so `searchSite` has already booked the round as
+    // a site success; there is nothing to repair, and nothing more this site will give.
+    const fetchedUrl = result.download?.url;
+    if (fetchedUrl !== undefined && alreadyFetched.some((p) => p.url === fetchedUrl)) {
+      ctx.trace.event({
+        jobId: job.id,
+        kind: 'subtitle.duplicate-pack',
+        summary: `round ${round + 1} fetched a pack this job already has`,
+        payload: () => ({ site: site.baseUrl, url: fetchedUrl }),
+      });
+      return;
+    }
 
     const today = new Date(Date.now()).toISOString().slice(0, 10);
     let verifiedSuccess = false;
@@ -968,20 +1044,19 @@ async function searchSiteRounds(
       raiseUnusable(ctx, job, site, reflection.reason, result.transcript);
     }
 
-    const earlierRoundDownloaded = alreadyFetched.length > 0;
-    if (result.download) {
-      alreadyFetched.push({ url: result.download.url, ...packTitleFromUrl(result.download.url) });
-    }
-    if (!verifiedSuccess) {
+    if (!result.download) {
       // The site is done for this target. If an earlier round DID download, that is the
       // fact worth remembering: a round that came up empty has just been booked by
       // `searchSite` as a site failure (fail_count up, last_failure_at set), which would put
       // a site that worked twice today into cooldown for the next job. Restore what its own
       // successful round left behind. last_working_tier and last_success_at survive a
       // failure untouched, so only these two need putting back.
-      if (earlierRoundDownloaded) profiles.update(site.baseUrl, { failCount: 0, lastFailureAt: null });
+      if (downloadedHere) profiles.update(site.baseUrl, { failCount: 0, lastFailureAt: null });
       return;
     }
+
+    downloadedHere = true;
+    alreadyFetched.push({ url: result.download.url, ...packTitleFromUrl(result.download.url) });
   }
 }
 

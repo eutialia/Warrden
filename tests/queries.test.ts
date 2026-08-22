@@ -100,7 +100,7 @@ describe('formatSearchHintsForPrompt', () => {
     expect(text).toContain('A pack covering only some of these seasons is still worth downloading');
   });
 
-  it('names the packs this run already fetched so a later round does not refetch them', () => {
+  it('names the packs already fetched for this title so no round refetches them', () => {
     const text = formatSearchHintsForPrompt(
       buildSearchHints({
         title: 'X',
@@ -109,7 +109,7 @@ describe('formatSearchHintsForPrompt', () => {
       }),
     );
     expect(text).toContain(
-      'Already downloaded this run (do not fetch these again): "Season 1 pack" https://a.test/s1.zip, https://a.test/s2.zip.',
+      'Already downloaded for this title (do not fetch these again): "Season 1 pack" https://a.test/s1.zip, https://a.test/s2.zip.',
     );
   });
 

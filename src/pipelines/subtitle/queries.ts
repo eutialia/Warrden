@@ -17,8 +17,9 @@ export interface MissingSeason {
   titles: string[];
 }
 
-/** One pack this job already pulled from this site. Carried into the next round's prompt so
- * the agent spends its steps on something new instead of re-fetching what it just had. */
+/** One pack this library already holds for the target: pulled earlier in this job, or by a
+ * run that cached it. Named in the prompt so the agent spends its steps on something new
+ * instead of re-fetching what is already on disk. */
 export interface FetchedPack {
   url: string;
   /** The pack's own name, when the URL carries one worth showing. */
@@ -38,8 +39,8 @@ export interface SearchHints {
   preferCjkQueries: boolean;
   /** Seasons still uncovered when this search starts, lowest first. Empty for a movie. */
   missingSeasons: MissingSeason[];
-  /** Packs already downloaded from this site earlier in the same job. Empty on the first
-   * round. */
+  /** Packs the target already has, from this job's earlier rounds and from the archive
+   * cache. Empty only when nothing has ever been fetched for this target. */
   alreadyFetched: FetchedPack[];
 }
 
@@ -116,7 +117,7 @@ export function formatSearchHintsForPrompt(hints: SearchHints): string {
   }
   if (hints.alreadyFetched.length > 0) {
     const packs = hints.alreadyFetched.map((p) => (p.title ? `"${p.title}" ${p.url}` : p.url));
-    parts.push(`Already downloaded this run (do not fetch these again): ${packs.join(', ')}.`);
+    parts.push(`Already downloaded for this title (do not fetch these again): ${packs.join(', ')}.`);
   }
   if (hints.preferCjkQueries) {
     parts.push(
