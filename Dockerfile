@@ -31,6 +31,11 @@ RUN npm prune --omit=dev
 # Stage 2: runtime image. No compiler toolchain needed — node_modules is copied prebuilt
 # from the builder stage.
 FROM node:22-bookworm-slim
+
+# unrar (and anything else that writes CJK filenames) falls back to `?` for every
+# non-ASCII byte without a UTF-8 locale, which turns distinct pack folders into one
+# colliding name. Debian slim ships C.UTF-8, so no locale package is needed.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 WORKDIR /app
 ENV NODE_ENV=production
 ENV WARRDEN_DATA_DIR=/data
