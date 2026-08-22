@@ -44,18 +44,19 @@ interface RunSubtitleDeps {
   reflectOnRun?: typeof reflectOnRun;
 }
 
-/** One episode the pipeline is trying to cover: its on-disk video, which configured language
- * tags it still lacks, whether any one of them is already present, and the embedded subtitle
- * streams (used as a drift reference when present). `covered` is the line between the two
- * jobs a run does: uncovered episodes are what it goes searching for, `lacking` is what it
- * collects from whatever it finds. */
+/** One episode as the arr reports it: ids plus its on-disk (mapped) video path. */
 interface VideoTarget {
   episodeId: number;
   seasonNumber: number;
   episodeNumber: number;
-  videoPath: string; // local (mapped) path on disk
+  videoPath: string;
 }
 
+/** A VideoTarget the pipeline is trying to cover: which configured language tags it still
+ * lacks, whether any one of them is already present, and the embedded subtitle streams (used
+ * as a drift reference when present). `covered` is the line between the two jobs a run does:
+ * uncovered episodes are what it goes searching for, `lacking` is what it collects from
+ * whatever it finds. */
 interface EpisodeTarget extends VideoTarget {
   lacking: string[];
   covered: boolean;
