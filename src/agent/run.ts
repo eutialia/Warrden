@@ -65,12 +65,23 @@ export interface SiteRunResult {
   outcome: 'downloaded' | 'gave-up' | 'exhausted' | 'cooldown' | 'error';
 }
 
-export interface SearchSiteDeps {
+export interface SearchSiteOptions {
   tiers?: TierFactory;
   /** Overrides `defaultSeedsDir()`. Tests always set it, pointing at a fixture directory
    * (usually an empty one), so a real shipped seed can never leak into a test that
    * happens to use the same base URL. */
   seedsDir?: string;
+  /** Which round of this job's site search this call is, and how many it may get — the
+   * caller owns the counter; this is only here so the round event can name it. */
+  round?: number;
+  maxRounds?: number;
+  /**
+   * Whether a tier wall may be answered by climbing the ladder. False keeps the run on the
+   * site's remembered starting tier (curl on a fresh profile): the fresh-episode case, where
+   * an empty result is about the calendar rather than the wall, and paying for chromium to
+   * confirm the same emptiness is waste.
+   */
+  escalate?: boolean;
 }
 
 /**
@@ -137,11 +148,13 @@ export async function searchSite(
   site: SubtitleSiteConfig,
   query: string | SearchHints,
   destDir: string,
-  deps: SearchSiteDeps = {},
+  opts: SearchSiteOptions = {},
 ): Promise<SiteRunResult> {
   // Fresh jar per invocation when using the real factory (each call builds a new one;
-  // deps.tiers from tests is left alone).
-  const tiers = deps.tiers ?? createRunTiers();
+  // opts.tiers from tests is left alone).
+  const tiers = opts.tiers ?? createRunTiers();
+  const round = opts.round ?? 1;
+  const maxRounds = opts.maxRounds ?? 1;
 
   const profiles = new SiteProfiles(ctx.db);
   const runs = new SubtitleRuns(ctx.db);
@@ -175,7 +188,7 @@ export async function searchSite(
     return { download: null, transcript: [], outcome: 'cooldown' };
   }
 
-  const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, deps.seedsDir ?? defaultSeedsDir());
+  const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, opts.seedsDir ?? defaultSeedsDir());
 
   const runId = runs.start(job.id, siteLabel(site.baseUrl));
   // One top-level step per site, so every agent step, LLM call and tier escalation of this
@@ -222,6 +235,22 @@ export async function searchSite(
     });
   };
 
+  /**
+   * One line per round, so an operator reading the run can see what ended each one without
+   * opening the transcript: which tier it ran on, how many steps it spent, and whether it
+   * downloaded, gave up (in the agent's own words), ran out of budget, or broke. Emitted
+   * once per `searchSite` call — a call that climbs two rungs is still one round, reported
+   * against the rung it finished on.
+   */
+  const reportRound = (tier: AccessTier, outcome: string, detail: string, extra: Record<string, unknown>): void => {
+    ctx.events.append({
+      kind: 'subtitle.search-round',
+      jobId: job.id,
+      message: `[${siteLabel(site.baseUrl)}] round ${round}/${maxRounds} (${tier}): ${detail}`,
+      data: targetEventData(job, { site: siteLabel(site.baseUrl), round, tier, outcome, ...extra }),
+    });
+  };
+
   /** Persist a site-level failure (genuine error or every rung empty) and emit the event. */
   const failSite = (
     kind: 'subtitle.site-failed' | 'subtitle.site-exhausted',
@@ -246,13 +275,23 @@ export async function searchSite(
     // refusing) — carried into the final "every rung came up empty" outcome so a caller can
     // tell a deliberate give-up from a ladder that genuinely ran dry.
     let lastAttemptOutcome: 'exhausted' | 'gave-up' = 'exhausted';
+    // The rung the last attempt ran on — what the round event reports against. Starts at the
+    // rung the ladder opens on so a factory throw before the first tier exists still names one.
+    let lastTier: AccessTier = TIER_ORDER[startIdx]!;
+    // Carried out of the loop so the round event can name the step count and the model's own
+    // give-up sentence after the ladder has ended.
+    let lastSteps = 0;
+    let lastReason: string | null = null;
 
-    for (let i = startIdx; i < TIER_ORDER.length; i++) {
+    // Without escalation the ladder is one rung tall: the site's remembered starting tier.
+    const lastIdx = opts.escalate === false ? startIdx : TIER_ORDER.length - 1;
+    for (let i = startIdx; i <= lastIdx; i++) {
       const tierName = TIER_ORDER[i]!;
       // make() lives inside the try so a factory throw cannot escape searchSite's
       // never-throws contract — it is handled like any other tier failure.
       try {
         const tier = tiers.make(tierName);
+        lastTier = tierName;
         activeTiers.push(tier);
         const outcome = await runAgentLoop({
           llm: ctx.llm,
@@ -268,6 +307,7 @@ export async function searchSite(
           trace: siteStep.seq !== null ? { jobId: job.id, parentSeq: siteStep.seq } : undefined,
         });
 
+        lastSteps = outcome.steps;
         if (outcome.kind === 'downloaded') {
           runs.finish(runId, 'done');
           siteStep.end('ok');
@@ -286,6 +326,7 @@ export async function searchSite(
             lastFailureAt: null,
             searchUrlPatterns: learned,
           });
+          reportRound(tierName, 'downloaded', `downloaded ${outcome.url}`, { steps: outcome.steps });
           return { download: { filePath: outcome.filePath, url: outcome.url }, transcript, outcome: 'downloaded' };
         }
         if (outcome.kind === 'refused-repeatedly') {
@@ -293,6 +334,7 @@ export async function searchSite(
           // guards refuse. Escalating would replay the same refusals on every remaining
           // rung at full step budget, so the site stops here and takes the usual failure
           // backoff — the next job retries it, after a human has had the chance to look.
+          reportRound(tierName, 'refused-repeatedly', `refused ${outcome.refusals} times`, { steps: outcome.steps });
           return failSite(
             'subtitle.site-failed',
             `Site ${siteLabel(site.baseUrl)} failed: ${outcome.refusals} steps targeted a refused address`,
@@ -301,10 +343,13 @@ export async function searchSite(
         }
         // exhausted/gave-up: fall through to the next rung.
         lastAttemptOutcome = outcome.kind === 'gave-up' ? 'gave-up' : 'exhausted';
+        lastReason = outcome.kind === 'gave-up' ? outcome.reason : null;
       } catch (err) {
         if (!(err instanceof TierBlockedError)) {
           // A genuine error (bad LLM output after retries, FS failure, factory throw, ...)
           // is a site-level failure, not an escalation signal.
+          // Steps are not reported for a throw: the loop never returned an outcome to count.
+          reportRound(lastTier, 'error', `error: ${errorMessage(err)}`, { steps: 0, error: errorMessage(err) });
           return failSite('subtitle.site-failed', `Site ${siteLabel(site.baseUrl)} failed: ${errorMessage(err)}`, 'error');
         }
         // TierBlockedError: note the wall in the run's transcript and try the next rung.
@@ -313,9 +358,17 @@ export async function searchSite(
     }
 
     // Every rung came up empty.
+    if (lastAttemptOutcome === 'gave-up') {
+      reportRound(lastTier, 'gave-up', `gave up: ${lastReason ?? 'no reason given'}`, {
+        steps: lastSteps,
+        reason: lastReason ?? 'no reason given',
+      });
+    } else {
+      reportRound(lastTier, 'exhausted', `step budget exhausted after ${lastSteps} steps`, { steps: lastSteps });
+    }
     return failSite(
       'subtitle.site-exhausted',
-      `Site ${siteLabel(site.baseUrl)} produced no download across ${TIER_ORDER.length - startIdx} tier(s)`,
+      `Site ${siteLabel(site.baseUrl)} produced no download across ${lastIdx - startIdx + 1} tier(s)`,
       lastAttemptOutcome,
     );
   } finally {
