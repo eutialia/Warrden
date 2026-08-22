@@ -276,9 +276,13 @@ export function attentionKindLabel(kind: string): string {
       return 'Import approval';
     case 'ingest.settle-timeout':
       return 'Import waiting';
+    case 'subtitle.settle-timeout':
+      return 'Subtitles waiting';
     case 'ingest.mount-missing':
     case 'subtitle.mount-missing':
       return 'Storage';
+    case 'subtitle.videos-unreachable':
+      return 'Videos unreachable';
     case 'subtitle.tool-missing':
       return 'Missing tool';
     case 'acquire.no-candidates':
@@ -319,10 +323,18 @@ export function siteLabel(baseUrl: string): string {
   }
 }
 
-/** A paused pipeline (unreachable storage, a missing binary) and outright job failures are
- * errors; everything else in the queue is a decision waiting on a human. */
+/** A stopped pipeline (unreachable storage, videos nowhere near their mapped paths, a
+ * missing binary) and outright job failures are errors; everything else in the queue is a
+ * decision waiting on a human. */
 export function attentionKindTone(kind: string): Tone {
-  if (kind.endsWith('.mount-missing') || kind === 'subtitle.tool-missing' || kind === 'job.attention') return 'danger';
+  if (
+    kind.endsWith('.mount-missing') ||
+    kind === 'subtitle.videos-unreachable' ||
+    kind === 'subtitle.tool-missing' ||
+    kind === 'job.attention'
+  ) {
+    return 'danger';
+  }
   return 'warning';
 }
 

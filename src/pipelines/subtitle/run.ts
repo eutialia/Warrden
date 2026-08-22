@@ -112,6 +112,10 @@ export const MAX_CANDIDATES_PER_EPISODE = 4;
  * per-target archive cache, searches each configured site for what's still missing, and
  * drift-gates + places every candidate with full `placed_files` provenance.
  *
+ * A video the arr lists but that is not on disk is skipped, and when that is every video the
+ * run stops with a `subtitle.videos-unreachable` attention item rather than reporting a fully
+ * covered library.
+ *
  * Movies: one video slot (the arr's movie file); archive files map onto that single slot.
  * Series: per-episode matching as before. Ingest sidecars still cover packs that already
  * shipped `.srt`/`.ass`; site search covers the rest (design: movie no-op was a bug).
@@ -168,11 +172,34 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       return;
     }
 
-    const missingList = await findMissingSubtitles({
+    const { missing: missingList, absent } = await findMissingSubtitles({
       videos: targets.map((t) => ({ videoPath: t.videoPath, episodeId: t.episodeId })),
       languages: ctx.config.subtitle.languages,
       media,
     });
+
+    // Every video gone at once is not a library that emptied itself, it is a path that does
+    // not resolve: a wrong `pathMappings` entry, or a share the arr can see and we cannot.
+    // Reporting it as "nothing missing" is how a whole series silently never gets subtitles.
+    if (absent.length === targets.length) {
+      ctx.events.append({
+        kind: 'subtitle.videos-unreachable',
+        level: 'attention',
+        jobId: job.id,
+        message: `None of the ${targets.length} video files for "${title}" exist at their mapped paths (first: ${absent[0]}). Check Settings, Path mappings.`,
+        data: targetEventData(job, { absent: absent.slice(0, 5), total: targets.length }),
+      });
+      return;
+    }
+    if (absent.length > 0) {
+      ctx.events.append({
+        kind: 'subtitle.videos-absent',
+        level: 'warn',
+        jobId: job.id,
+        message: `${absent.length} of ${targets.length} video files for "${title}" are not at their mapped paths (first: ${absent[0]}); carrying on with the rest`,
+        data: targetEventData(job, { absent: absent.slice(0, 5), total: targets.length }),
+      });
+    }
     const state: RunState = {
       media,
       placedFiles,
@@ -1198,10 +1225,10 @@ async function extractAndMatch(
   const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${safeUrlTailName(download.url)}`);
   let files: string[];
   try {
-    // Extract fresh: the tar/7z path collects whatever already sits in the dir, so extracting
-    // over a populated one would re-emit stale files alongside the new ones (and can rename a
-    // fresh file onto a path it just collected). The same pack regenerates the same numbered
-    // paths, so another target's row pointing here stays valid.
+    // Extract fresh: extraction preserves the pack's directory structure and `collectFrom`
+    // walks whatever sits in the dir afterwards, so extracting over a populated one would
+    // re-collect stale files from an earlier pack alongside the new ones. The same pack
+    // regenerates the same relative paths, so another target's row pointing here stays valid.
     rmSync(cacheDir, { recursive: true, force: true });
     files = await extractArchive(download.filePath, cacheDir);
   } catch (err) {

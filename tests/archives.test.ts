@@ -164,6 +164,22 @@ describe('extractArchive', () => {
     expect(existsSync(join(dest, 'Show Season 2', 'inner.zip'))).toBe(false);
   });
 
+  it('skips an inner archive no extractor can open and keeps the rest of the pack', async () => {
+    // AdmZip throws a plain Error on a file that is not a zip at all, so a corrupt inner
+    // entry used to fail the whole pack instead of just itself.
+    const zip = new AdmZip();
+    zip.addFile('good.zip', zipBytes({ 'Show - 03.chs.ass': Buffer.from('dialogue') }));
+    zip.addFile('broken.zip', Buffer.from('not a zip, just bytes'));
+    const zipPath = join(tmpDir(), 'mixed.zip');
+    zip.writeZip(zipPath);
+
+    const dest = tmpDir();
+    const files = await extractArchive(zipPath, dest);
+
+    expect(files).toEqual([join(dest, 'good.zip.d', 'Show - 03.chs.ass')]);
+    expect(existsSync(join(dest, 'broken.zip'))).toBe(true); // left on disk, nothing lost silently
+  });
+
   it('unpacks up to four archives deep', async () => {
     const dest = tmpDir();
     const files = await extractArchive(nestedZipChain(4), dest);

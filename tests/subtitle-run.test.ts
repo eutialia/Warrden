@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { describe, expect, it, vi } from 'vitest';
@@ -246,6 +246,38 @@ describe('runSubtitleJob', () => {
 
     expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
+  });
+
+  it('every video missing from disk -> one subtitle.videos-unreachable attention event, no site search', async () => {
+    // What a wrong pathMappings looks like from inside the run: the arr reports files, none
+    // of the mapped paths resolve. Before this the whole series read as "nothing missing".
+    const fx = subtitleFixture();
+    rmSync(fx.videoPath);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    const event = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.videos-unreachable');
+    expect(event).toBeTruthy();
+    expect(event!.message).toContain(fx.videoPath);
+    expect(event!.data).toMatchObject({ absent: [fx.videoPath], total: 1 });
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.complete')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
+  });
+
+  it('some videos missing from disk -> a subtitle.videos-absent warning and the rest still gets subtitles', async () => {
+    const fx = multiSeasonFixture(2);
+    const goneSeason2 = join(fx.libraryDir, 'Show - S02E05.mkv');
+    rmSync(goneSeason2);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub(PACK));
+
+    const event = findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.videos-absent');
+    expect(event).toBeTruthy();
+    expect(event!.data).toMatchObject({ absent: [goneSeason2], total: 2 });
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.videos-unreachable')).toBe(false);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(true);
   });
 
   it('cache hit: an archive_cache row with an entry matching the missing episode -> placed with provenance + subtitle.cache-hit + subtitle.placed, no LLM/site calls', async () => {

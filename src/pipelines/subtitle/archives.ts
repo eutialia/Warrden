@@ -104,9 +104,11 @@ async function binAvailable(bin: string): Promise<boolean> {
 }
 
 /**
- * Extract rar/7z via `7z` (p7zip) when present, else `unrar` for .rar only.
- * Throws UnsupportedArchiveError when no binary can handle the format, or the binary
- * rejects the archive (corrupt / not actually rar-7z) — callers treat that like skip.
+ * Extracts a rar/7z archive with whichever external binary is on PATH. For .rar, rarlab's
+ * `unrar` goes first: p7zip rejects the newer RAR methods fansub packs ship with, so `7z`
+ * is only the fallback there. Everything else goes to `7z`.
+ * Throws UnsupportedArchiveError when neither binary is installed, or the one that ran
+ * rejected the archive (corrupt, or not actually rar/7z); callers treat that like skip.
  */
 async function extractWithExternalTool(archivePath: string, destDir: string): Promise<void> {
   const lower = archivePath.toLowerCase();
@@ -205,9 +207,11 @@ async function extractInto(archivePath: string, destDir: string): Promise<void> 
  * too. `depth` counts the extractions already done along this branch, and nothing past
  * `MAX_ARCHIVE_DEPTH` is opened — the archive just stays on disk, unread.
  *
- * An inner archive no extractor can open is skipped, not fatal: the rest of the pack is
+ * An inner archive that fails to extract is skipped, not fatal: the rest of the pack is
  * still worth having, and the file is left in place rather than deleted so nothing is lost
- * silently. Only the outermost archive failing to open reaches the caller as an error.
+ * silently. Any failure counts, not just `UnsupportedArchiveError`: AdmZip throws a plain
+ * Error on a corrupt .zip and tar throws on a truncated one, and one bad member should not
+ * cost the pack. Only the outermost archive failing to open reaches the caller as an error.
  */
 async function collectFrom(dir: string, out: string[], depth: number): Promise<void> {
   const nested: string[] = [];
@@ -224,9 +228,8 @@ async function collectFrom(dir: string, out: string[], depth: number): Promise<v
     const innerDir = `${archive}.d`;
     try {
       await extractInto(archive, innerDir);
-    } catch (err) {
-      if (err instanceof UnsupportedArchiveError) continue;
-      throw err;
+    } catch {
+      continue;
     }
     rmSync(archive, { force: true });
     await collectFrom(innerDir, out, depth + 1);

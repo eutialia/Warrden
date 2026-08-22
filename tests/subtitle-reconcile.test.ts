@@ -35,13 +35,14 @@ describe('findMissingSubtitles', () => {
   it('flags a video with no subtitle streams at all', async () => {
     const { video } = videoDir();
     const videos: VideoEntry[] = [{ videoPath: video, episodeId: 1 }];
-    const missing = await findMissingSubtitles({ videos, languages: ['zh-Hans'], media: fakeMedia({ [video]: [] }) });
+    const { missing, absent } = await findMissingSubtitles({ videos, languages: ['zh-Hans'], media: fakeMedia({ [video]: [] }) });
     expect(missing).toEqual([{ videoPath: video, episodeId: 1, languages: ['zh-Hans'], embeddedRefs: [] }]);
+    expect(absent).toEqual([]);
   });
 
   it('passes a video whose embedded track covers the language', async () => {
     const { video } = videoDir();
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: ZH_EMBEDDED }),
@@ -52,7 +53,7 @@ describe('findMissingSubtitles', () => {
   it('passes a video covered by an external sibling sub with a matching lang tag', async () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.zh-Hans.ass'), 'x');
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: [] }),
@@ -62,7 +63,7 @@ describe('findMissingSubtitles', () => {
 
   it('reports embeddedRefs for drift-gate reference extraction when other languages are missing', async () => {
     const { video } = videoDir();
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans', 'zh-Hant'],
       media: fakeMedia({ [video]: ZH_EMBEDDED }),
@@ -75,7 +76,7 @@ describe('findMissingSubtitles', () => {
   it('matches language tags case-insensitively and by primary subtag', async () => {
     const { video } = videoDir();
     const media = fakeMedia({ [video]: [stream({ index: 2, codecName: 'ass', language: 'ZH' })] });
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media,
@@ -86,7 +87,7 @@ describe('findMissingSubtitles', () => {
   it('treats an untagged external sibling sub as covering nothing', async () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.ass'), 'x');
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: [] }),
@@ -97,7 +98,7 @@ describe('findMissingSubtitles', () => {
   it('does not let a longer same-prefix sibling sub cover an episode', async () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05 Special.zh-Hans.ass'), 'x');
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({ [video]: [] }),
@@ -105,7 +106,7 @@ describe('findMissingSubtitles', () => {
     expect(missing).toEqual([{ videoPath: video, episodeId: 1, languages: ['zh-Hans'], embeddedRefs: [] }]);
   });
 
-  it('skips a video that is gone from disk without probing it', async () => {
+  it('reports a video that is gone from disk as absent, without probing it', async () => {
     const { dir, video } = videoDir();
     const gone = join(dir, 'Show - S02E01.mkv');
     const probed: string[] = [];
@@ -117,7 +118,7 @@ describe('findMissingSubtitles', () => {
         return media.probeStreams(p);
       },
     };
-    const missing = await findMissingSubtitles({
+    const { missing, absent } = await findMissingSubtitles({
       videos: [
         { videoPath: gone, episodeId: 2 },
         { videoPath: video, episodeId: 1 },
@@ -126,6 +127,7 @@ describe('findMissingSubtitles', () => {
       media: spyMedia,
     });
     expect(missing.map((m) => m.videoPath)).toEqual([video]);
+    expect(absent).toEqual([gone]);
     expect(probed).toEqual([video]);
   });
 
@@ -149,7 +151,7 @@ describe('findMissingSubtitles', () => {
   it('ranks the full track first when the forced track comes first in the probe', async () => {
     const { video } = videoDir();
     // TARDiS MULTi layout: the forced FR track is stream 3, the full FR track is stream 4.
-    const missing = await findMissingSubtitles({
+    const { missing } = await findMissingSubtitles({
       videos: [{ videoPath: video, episodeId: 1 }],
       languages: ['zh-Hans'],
       media: fakeMedia({

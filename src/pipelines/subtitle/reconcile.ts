@@ -78,22 +78,32 @@ function externalSubsFor(videoPath: string): string[] {
  * result entirely; the agent only ever hears about actual gaps. `embeddedRefs` rides along
  * so the drift gate can extract a reference track later without re-probing, ranked by
  * `rankReferenceStreams` because the gate only ever reads the first entry.
+ *
+ * `absent` collects the videos that were not on disk at all. They are not gaps and not
+ * failures here, but the caller needs them: a whole target coming back absent means the
+ * paths are wrong, not that the library is complete.
  */
 export async function findMissingSubtitles(input: {
   videos: VideoEntry[];
   languages: string[];
   media: MediaTools;
-}): Promise<MissingSubtitle[]> {
+}): Promise<{ missing: MissingSubtitle[]; absent: string[] }> {
   const { videos, languages, media } = input;
-  if (languages.length === 0) return [];
+  if (languages.length === 0) return { missing: [], absent: [] };
   const missing: MissingSubtitle[] = [];
+  const absent: string[] = [];
 
   for (const video of videos) {
-    // A video can vanish mid-run (a torrent client moving files on a live share): skip it
-    // rather than report a gap for a file that is no longer there. Every other probe
-    // failure (no ffprobe on PATH, an unmapped path, a timeout) propagates, because
-    // swallowing it would read as "this video already has every language".
-    if (!existsSync(video.videoPath)) continue;
+    // A video can vanish mid-run (a torrent client moving files on a live share), and a
+    // mis-configured path mapping makes every video look that way: skip it rather than
+    // report a gap for a file that is not there, but hand the path back in `absent` so the
+    // caller can tell "this one moved" from "none of these paths resolve". Every other probe
+    // failure (no ffprobe on PATH, a timeout) propagates, because swallowing it would read
+    // as "this video already has every language".
+    if (!existsSync(video.videoPath)) {
+      absent.push(video.videoPath);
+      continue;
+    }
     const streams = await media.probeStreams(video.videoPath);
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
     const externalLangs = externalSubsFor(video.videoPath).map((p) => parseLangTag(basename(p)));
@@ -113,5 +123,5 @@ export async function findMissingSubtitles(input: {
       });
     }
   }
-  return missing;
+  return { missing, absent };
 }
