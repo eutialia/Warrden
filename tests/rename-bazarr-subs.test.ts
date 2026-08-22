@@ -10,6 +10,8 @@ const SCRIPT = join(import.meta.dirname, '..', 'scripts', 'rename-bazarr-subs.sh
 // Simplified, and Simplified text using none of them.
 const SIMPLIFIED_TEXT = '这是简体字幕';
 const TRADITIONAL_TEXT = '這是繁體字幕';
+// A Simplified file with one stray Traditional character, the way fansub credits often are.
+const MOSTLY_SIMPLIFIED_TEXT = '这是简体字幕 制作：刘 後期';
 
 function run(args: string[], env?: Record<string, string>) {
   const result = spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
@@ -26,6 +28,7 @@ function seedFixtures(dir: string) {
 
   writeFileSync(join(nested, 'simple ep.zh.srt'), SIMPLIFIED_TEXT);
   writeFileSync(join(nested, 'trad ep.zh.srt'), TRADITIONAL_TEXT);
+  writeFileSync(join(nested, 'mostly simple ep.zh.srt'), MOSTLY_SIMPLIFIED_TEXT);
   writeFileSync(join(nested, 'hi ep.zh.hi.srt'), SIMPLIFIED_TEXT);
   writeFileSync(join(nested, '龍與鳳 特別篇.zh.forced.sdh.srt'), TRADITIONAL_TEXT);
   writeFileSync(join(nested, 'already.zh-Hans.srt'), 'untouched');
@@ -62,7 +65,7 @@ describe('rename-bazarr-subs.sh', () => {
     expect(result.stdout).toContain('trad ep.zh.srt -> ');
     expect(result.stdout).toContain('.zh-Hant.srt');
     expect(result.stdout).toContain('skip (exists): ');
-    expect(result.stdout).toContain('2 -> zh-Hans, 2 -> zh-Hant, 1 skipped (exists)');
+    expect(result.stdout).toContain('3 -> zh-Hans, 2 -> zh-Hant, 1 skipped (exists)');
     expect(readdirSync(nested).sort()).toEqual(before);
   });
 
@@ -80,6 +83,7 @@ describe('rename-bazarr-subs.sh', () => {
         'collide.zh-Hans.srt',
         'collide.zh.srt',
         'hi ep.zh-Hans.hi.srt',
+        'mostly simple ep.zh-Hans.srt',
         'simple ep.zh-Hans.srt',
         'trad ep.zh-Hant.srt',
         'unrelated.txt',

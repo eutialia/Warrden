@@ -61,6 +61,13 @@ elif locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
 fi
 
 TRAD_CHARS='們這說來時過後為國學會對還沒種樣裡發經點麼開關體書長東車門見馬魚鳥風雲電龍華'
+SIMP_CHARS='们这说来时过后为国学会对还没种样里发经点么开关体书长东车门见马鱼鸟风云电龙华'
+
+# Fansub files mix scripts (a Traditional name in a Simplified file is routine), so one
+# stray character must not decide: the script with more distinctive characters wins.
+count_chars() {
+  grep -o "[$1]" -- "$2" 2>/dev/null | wc -l | tr -d ' '
+}
 
 hans_count=0
 hant_count=0
@@ -119,7 +126,7 @@ for dir in "${DIRS[@]}"; do
       *) continue ;;
     esac
 
-    if grep -q "[$TRAD_CHARS]" -- "$file" 2>/dev/null; then
+    if [ "$(count_chars "$TRAD_CHARS" "$file")" -gt "$(count_chars "$SIMP_CHARS" "$file")" ]; then
       lang=zh-Hant
     else
       lang=zh-Hans
