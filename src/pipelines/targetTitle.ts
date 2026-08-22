@@ -24,10 +24,29 @@ export async function resolveTargetTitle(client: ArrApi, job: JobRow): Promise<s
 export interface TargetMeta {
   title: string;
   alternates: string[];
+  /** Season number -> the titles that season alone is released under (Sonarr's
+   * `sceneSeasonNumber` alternates). Empty for a movie, and for a series whose alternates
+   * are all series-wide. A title identical to the canonical one is left out: it tells a
+   * searcher nothing it doesn't already have. */
+  seasonTitles: Map<number, string[]>;
 }
 
 function alternatesFromSeries(s: SeriesResource): string[] {
   return (s.alternateTitles ?? []).map((a) => a.title).filter((t) => t.trim().length > 0);
+}
+
+function seasonTitlesFromSeries(s: SeriesResource, title: string): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  for (const alt of s.alternateTitles ?? []) {
+    const season = alt.sceneSeasonNumber;
+    const name = alt.title.trim();
+    if (typeof season !== 'number' || season < 0 || name.length === 0) continue;
+    if (name.toLowerCase() === title.trim().toLowerCase()) continue;
+    const titles = out.get(season) ?? [];
+    if (!titles.some((t) => t.toLowerCase() === name.toLowerCase())) titles.push(name);
+    out.set(season, titles);
+  }
+  return out;
 }
 
 function alternatesFromMovie(m: MovieResource): string[] {
@@ -50,9 +69,9 @@ export async function resolveTargetMeta(client: ArrApi, job: JobRow): Promise<Ta
     const movies = await client.listMovies();
     const movie = movies.find((m) => m.id === job.target_id);
     const title = payloadTitle ?? movie?.title ?? `movie #${job.target_id}`;
-    return { title, alternates: movie ? alternatesFromMovie(movie) : [] };
+    return { title, alternates: movie ? alternatesFromMovie(movie) : [], seasonTitles: new Map() };
   }
   const series = await client.getSeries(job.target_id);
   const title = payloadTitle ?? series.title;
-  return { title, alternates: alternatesFromSeries(series) };
+  return { title, alternates: alternatesFromSeries(series), seasonTitles: seasonTitlesFromSeries(series, title) };
 }

@@ -34,9 +34,13 @@ export interface SeasonResource {
   statistics?: SeasonStatistics;
 }
 
-/** One alternate title as returned by Sonarr/Radarr (shape varies; we only need the string). */
+/** One alternate title as returned by Sonarr/Radarr (shape varies; we only need the string
+ * and, on Sonarr, the season it belongs to). `sceneSeasonNumber` is Sonarr's marker for
+ * "this title names one season, not the series" — the name a multi-cour show's later
+ * seasons are actually released under. Absent on Radarr and on series-wide alternates. */
 export interface AlternateTitle {
   title: string;
+  sceneSeasonNumber?: number | null;
 }
 
 export interface SeriesResource {

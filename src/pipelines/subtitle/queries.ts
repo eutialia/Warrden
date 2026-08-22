@@ -5,6 +5,18 @@
  * on disk and soft-prefers known fansub groups.
  */
 
+/** One season the target still needs subtitles for, with the titles that season is
+ * released under (Sonarr's scene-season alternates) — a multi-cour show is sold as a
+ * separate title per season on most fansub indexes, so "still missing season 3" is only
+ * actionable with season 3's own name beside it. */
+export interface MissingSeason {
+  seasonNumber: number;
+  /** How many episodes of this season are still missing. */
+  episodes: number;
+  /** Titles this season is known by, beyond the series title. */
+  titles: string[];
+}
+
 export interface SearchHints {
   /** Primary title (arr canonical). Always the first query the agent should try. */
   title: string;
@@ -16,6 +28,8 @@ export interface SearchHints {
   preferredGroups: string[];
   /** True when any language looks Chinese — agent should prefer CJK title forms when known. */
   preferCjkQueries: boolean;
+  /** Seasons still uncovered when this search starts, lowest first. Empty for a movie. */
+  missingSeasons: MissingSeason[];
 }
 
 /** Primary-subtag check: zh, zh-Hans, zh-Hant, yue, … */
@@ -34,6 +48,7 @@ export function buildSearchHints(input: {
   languages: string[];
   preferredGroups?: string[];
   alternates?: string[];
+  missingSeasons?: MissingSeason[];
 }): SearchHints {
   const title = input.title.trim();
   const seen = new Set<string>([title.toLowerCase()]);
@@ -54,7 +69,16 @@ export function buildSearchHints(input: {
     languages,
     preferredGroups,
     preferCjkQueries: languages.some(languageLooksChinese),
+    missingSeasons: [...(input.missingSeasons ?? [])].sort((a, b) => a.seasonNumber - b.seasonNumber),
   };
+}
+
+/** `Season 3 (24 episodes, also known as "…")` — the season's own titles ride along so the
+ * agent can search for the season under the name the indexes actually use. */
+function describeMissingSeason(s: MissingSeason): string {
+  const count = `${s.episodes} episode${s.episodes === 1 ? '' : 's'}`;
+  const titles = s.titles.length > 0 ? `, also known as ${s.titles.map((t) => `"${t}"`).join(', ')}` : '';
+  return `Season ${s.seasonNumber} (${count}${titles})`;
 }
 
 /** Renders the search-hints block for the site-search system/user prompt. */
@@ -70,6 +94,12 @@ export function formatSearchHintsForPrompt(hints: SearchHints): string {
   }
   if (hints.alternateQueries.length > 0) {
     parts.push(`Also try these search terms if the primary title finds nothing: ${hints.alternateQueries.join(' | ')}.`);
+  }
+  if (hints.missingSeasons.length > 0) {
+    parts.push(`Still missing: ${hints.missingSeasons.map(describeMissingSeason).join(', ')}.`);
+    parts.push(
+      'A pack covering only some of these seasons is still worth downloading; after it, keep searching for the remaining seasons under their own titles.',
+    );
   }
   if (hints.preferCjkQueries) {
     parts.push(

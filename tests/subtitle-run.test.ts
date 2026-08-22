@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { describe, expect, it, vi } from 'vitest';
 import { ArchiveCache } from '../src/db/archiveCache.js';
@@ -12,7 +12,8 @@ import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
 import type { MediaStream } from '../src/media/tools.js';
-import { enqueueAndClaim, FakeGenerator, findEvent, hasEvent, seriesResource, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
+import type { SearchHints } from '../src/pipelines/subtitle/queries.js';
+import { enqueueAndClaim, episodeResource, FakeGenerator, findEvent, hasEvent, seriesResource, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
 
 /** A video with one embedded ASS track (stream index 2) — the drift reference. The track's
  * language must NOT be a target language: reconcile treats an embedded zh-Hans track as
@@ -118,10 +119,12 @@ function reflectSpy(calls: Array<{ verifiedSuccess: boolean }>) {
   };
 }
 
-// The fixture's library holds one video (S01E05), so a candidate named `Show - S01E05.ass`
-// parses to { season: null, episode: 5 } and deterministically matches it via the
-// single-regular-season rule in matchSidecarDeterministic — no LLM involved.
-const PACK = { 'Show - S01E05.ass': SRT };
+// The fixture's library holds one video (S01E05), so a candidate named
+// `Show - S01E05.chs.ass` parses to { season: null, episode: 5 } and deterministically
+// matches it via the single-regular-season rule in matchSidecarDeterministic — no LLM
+// involved. The `.chs` tag is what gets it past the language gate: an untagged file is in
+// no language anyone asked for, and the pipeline never places one (see the gate test).
+const PACK = { 'Show - S01E05.chs.ass': SRT };
 
 describe('runSubtitleJob', () => {
   it('movie target: missing langs -> site pack places beside the movie file', async () => {
@@ -165,7 +168,7 @@ describe('runSubtitleJob', () => {
     const fx = subtitleFixture();
     // No embedded ref -> the candidate places unverified, no drift gate, no extraction.
     const extractDir = tmpDir();
-    const filePath = join(extractDir, '0-Show - S01E05.ass');
+    const filePath = join(extractDir, '0-Show - S01E05.chs.ass');
     writeFileSync(filePath, SRT);
     new ArchiveCache(fx.ctx.db).upsert({
       arrInstance: fx.arrInstance,
@@ -278,7 +281,7 @@ describe('runSubtitleJob', () => {
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      data: { matchedBy: 'pipeline', drift: 'in-sync', site: 'acg.rip', sourceFile: expect.stringContaining('Show - S01E05.ass') },
+      data: { matchedBy: 'pipeline', drift: 'in-sync', site: 'acg.rip', sourceFile: expect.stringContaining('Show - S01E05.chs.ass') },
     });
   });
 
@@ -309,7 +312,7 @@ describe('runSubtitleJob', () => {
     fx.media.setAlassResult(SRT);
 
     const job = claimSubtitleJob(fx);
-    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ass': SRT_SHIFTED }));
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_SHIFTED }));
 
     expect(fx.media.alassCalls).toHaveLength(1); // the drifted path entered resync
     expect(fx.media.ffsubsyncCalls).toHaveLength(0); // alass landed in-sync — no fallback needed
@@ -318,48 +321,204 @@ describe('runSubtitleJob', () => {
     expect(existsSync(expected)).toBe(true);
   });
 
-  it('unscorable candidate -> quarantined + subtitle.quarantined attention; episode -> subtitle.unresolved', async () => {
+  it('unscorable candidate -> quarantined as a warn event, counted into the one unresolved item', async () => {
     const fx = subtitleFixture();
     fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
     fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
 
     const job = claimSubtitleJob(fx);
-    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ass': SRT_UNRELATED }));
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_UNRELATED }));
 
-    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.quarantined')).toBe(true);
-    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+    // Per candidate it's a warn event with no attention item of its own: 400 set-aside files
+    // in one pack are one problem ("this pack doesn't fit"), not 400 things to click.
+    expect(findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.quarantined')).toBeTruthy();
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.quarantined')).toBe(false);
+
+    const unresolved = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved');
+    expect(unresolved!.data).toMatchObject({
+      dedupeKey: 'unresolved',
+      episodes: [{ episodeId: 1, seasonNumber: 1, episodeNumber: 5, missingLanguages: ['zh-Hans'], quarantined: 1 }],
+    });
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(0);
   });
 
-  it('no sites configured -> subtitle.unresolved attention for the missing episode', async () => {
+  it('no sites configured -> one subtitle.unresolved attention item naming the episode', async () => {
     const fx = subtitleFixture({ sites: [] });
     const job = claimSubtitleJob(fx);
     await runSubtitleJob(fx.ctx, job);
 
     const unresolved = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved');
     expect(unresolved).toBeTruthy();
-    expect(unresolved!.data).toMatchObject({ episodeId: 1, dedupeKey: '1' });
+    expect(unresolved!.message).toBe('Frieren: 1 episode(s) still without zh-Hans (S1E5)');
+    expect(unresolved!.data).toMatchObject({
+      dedupeKey: 'unresolved',
+      episodes: [{ episodeId: 1, seasonNumber: 1, episodeNumber: 5, missingLanguages: ['zh-Hans'], quarantined: 0 }],
+    });
   });
 
-  it('foreign file at target path -> skipped (warn event), no overwrite', async () => {
-    // A blocker AT the placement target for the missing language would count as reconcile
-    // coverage (a `Show - S01E05.zh-Hans.ass` sibling IS the zh-Hans coverage), which would
-    // pre-empt the run before placement — so the foreign-file guard can only fire when the
-    // candidate's OWN lang tag points the target at a path reconcile doesn't count as
-    // covering the missing language. A ja-tagged candidate targets `.ja.ass`, which reconcile
-    // ignores for the missing zh-Hans: the episode is still "missing zh-Hans", placement aims
-    // at `.ja.ass`, and the foreign file sitting there blocks it.
+  it('one attention item for the whole job, with the still-missing episodes collapsed into ranges', async () => {
+    const fx = subtitleFixture({ sites: [] });
+    // Season 1 keeps E5 (the fixture's own video) and gains E6/E7; season 2 gets E1 alone.
+    for (const [id, season, episode] of [[2, 1, 6], [3, 1, 7], [4, 2, 1]] as const) {
+      const path = join(fx.libraryDir, `Show - S0${season}E0${episode}.mkv`);
+      writeFileSync(path, 'video');
+      fx.client.episodes.push(
+        episodeResource({ id, seriesId: fx.targetId, seasonNumber: season, episodeNumber: episode, episodeFileId: id * 10, hasFile: true }),
+      );
+      fx.client.episodeFiles.push({ id: id * 10, seriesId: fx.targetId, seasonNumber: season, relativePath: basename(path), path });
+    }
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job);
+
+    const unresolved = fx.ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'subtitle.unresolved');
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0]!.message).toBe('Frieren: 4 episode(s) still without zh-Hans (S1E5-E7, S2E1)');
+    expect((unresolved[0]!.data as { episodes: unknown[] }).episodes).toHaveLength(4);
+    expect(new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.unresolved')).toHaveLength(1);
+  });
+
+  it('movie target: the unresolved item counts the candidates set aside instead of episodes', async () => {
+    const fx = subtitleFixture({ targetKind: 'movie', targetId: 7 });
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Perfect Blue.chs.ass': SRT_UNRELATED }));
+
+    const unresolved = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved');
+    expect(unresolved!.message).toBe('Perfect Blue: still without zh-Hans (1 candidate(s) set aside)');
+  });
+
+  it('foreign file appearing at the target path mid-run -> skipped (warn event), no overwrite', async () => {
+    // Reconcile counts a `Show - S01E05.zh-Hans.ass` sibling AS the zh-Hans coverage, so a
+    // foreign file that was already there when the run started would have ended the job
+    // before placement. The guard covers the other case: a file landing at the target path
+    // AFTER reconcile ran (another process writing into a live library). The site stub is
+    // the seam that reproduces it deterministically.
     const fx = subtitleFixture();
-    const targetPath = join(fx.libraryDir, 'Show - S01E05.ja.ass');
-    writeFileSync(targetPath, 'foreign-content');
+    const targetPath = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
+    const zipPath = makeZip({ 'Show - S01E05.chs.ass': SRT });
     const job = claimSubtitleJob(fx);
 
-    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ja.ass': SRT }));
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => {
+        writeFileSync(targetPath, 'foreign-content');
+        return { download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], outcome: 'downloaded' as const };
+      },
+    });
 
     expect(readFileSync(targetPath, 'utf-8')).toBe('foreign-content');
     expect(findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.skipped-foreign')).toBeTruthy();
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(0);
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+  });
+
+  it('places only the file whose language tag is wanted, ignoring untagged and other-language siblings', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    const llm = new FakeGenerator([]);
+    fx.ctx.llm = llm;
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(
+      fx.ctx,
+      job,
+      siteStub({
+        'Show - S01E05.ja.ass': SRT,
+        'Show - S01E05.ass': SRT,
+        'Show - S01E05.chs.ass': SRT,
+      }),
+    );
+
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.ja.ass'))).toBe(false);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.ass'))).toBe(false);
+    // An untagged file is never guessed into a target language, so nothing asks the LLM
+    // about it either.
+    expect(llm.calls).toHaveLength(0);
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).toMatchObject({ lang: 'zh-Hans' });
+  });
+
+  it('ignores a candidate in a language this episode no longer needs', async () => {
+    // Config wants both Chinese variants; the video already carries zh-Hans embedded, so
+    // only zh-Hant is missing. The pack's zh-Hans file is wanted by the config and matches
+    // the episode — and must still be left alone, or the library gains a sidecar nobody
+    // asked for beside the one that was.
+    const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT, 'Show - S01E05.cht.ass': SRT }));
+
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(false);
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).toMatchObject({ lang: 'zh-Hant' });
+  });
+
+  it('skips a candidate whose destination is already claimed before doing any media work', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    // Claimed in placed_files by a source that no longer exists on disk, so reconcile still
+    // reports the gap and the candidate still reaches the gate.
+    new PlacedFiles(fx.ctx.db).upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: 'series',
+      targetId: fx.targetId,
+      kind: 'subtitle',
+      placedPath: join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'),
+      videoPath: fx.videoPath,
+      sourcePath: '/somewhere/else/Show - S01E05.chs.ass',
+      jobId: 1,
+      data: { lang: 'zh-Hans' },
+    });
+
+    const job = claimSubtitleJob(fx);
+    // SRT_SHIFTED: without the early check this candidate would extract a reference and run
+    // the resync tools before the collision guard ever fired.
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_SHIFTED }));
+
+    expect(findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.skipped-collision')).toBeTruthy();
+    expect(fx.media.extractCalls).toHaveLength(0);
+    expect(fx.media.alassCalls).toHaveLength(0);
+    expect(fx.media.ffsubsyncCalls).toHaveLength(0);
+    // The only probe is reconcile's own, one per video — nothing probed for the candidate.
+    expect(fx.media.probeCalls).toEqual([fx.videoPath]);
+  });
+
+  it('hands the search agent the seasons still missing, with each season own titles', async () => {
+    const fx = subtitleFixture();
+    fx.client.series[0]!.alternateTitles = [
+      { title: 'Frieren S2', sceneSeasonNumber: 2 },
+      { title: '葬送的芙莉莲' },
+    ];
+    const path = join(fx.libraryDir, 'Show - S02E01.mkv');
+    writeFileSync(path, 'video');
+    fx.client.episodes.push(episodeResource({ id: 2, seriesId: fx.targetId, seasonNumber: 2, episodeNumber: 1, episodeFileId: 20, hasFile: true }));
+    fx.client.episodeFiles.push({ id: 20, seriesId: fx.targetId, seasonNumber: 2, relativePath: basename(path), path });
+
+    let hints: SearchHints | undefined;
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async (_ctx, _job, _site, query) => {
+        hints = query as SearchHints;
+        return { download: null, transcript: [], outcome: 'gave-up' as const };
+      },
+    });
+
+    expect(hints!.missingSeasons).toEqual([
+      { seasonNumber: 1, episodes: 1, titles: [] },
+      { seasonNumber: 2, episodes: 1, titles: ['Frieren S2'] },
+    ]);
   });
 
   it('alass unavailable -> skips alass, ffsubsync fallback lands in-sync -> placed via ffsubsync', async () => {
@@ -370,7 +529,7 @@ describe('runSubtitleJob', () => {
     fx.media.setFfsubsyncResult(SRT); // ffsubsync output lands aligned
 
     const job = claimSubtitleJob(fx);
-    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ass': SRT_SHIFTED }));
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_SHIFTED }));
 
     expect(fx.media.alassCalls).toHaveLength(0); // never attempted
     expect(fx.media.ffsubsyncCalls).toHaveLength(1); // the fallback carried it
@@ -386,12 +545,12 @@ describe('runSubtitleJob', () => {
     fx.media.setAvailability({ alass: false, ffsubsync: false });
 
     const job = claimSubtitleJob(fx);
-    await expect(runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.ass': SRT_SHIFTED }))).resolves.toBeUndefined();
+    await expect(runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_SHIFTED }))).resolves.toBeUndefined();
 
     // Neither binary may even be attempted — a real missing binary would throw ENOENT here.
     expect(fx.media.alassCalls).toHaveLength(0);
     expect(fx.media.ffsubsyncCalls).toHaveLength(0);
-    const quarantined = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.quarantined');
+    const quarantined = findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.quarantined');
     expect(quarantined).toBeTruthy();
     expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
     const quarantinedPath = (quarantined!.data as { quarantinedPath: string }).quarantinedPath;

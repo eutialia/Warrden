@@ -868,11 +868,13 @@ export class FakeMediaTools implements MediaTools {
     };
   }
 
+  probeCalls: string[] = [];
   extractCalls: { videoPath: string; streamIndex: number; destPath: string }[] = [];
   alassCalls: { reference: string; subtitle: string; outPath: string }[] = [];
   ffsubsyncCalls: { videoPath: string; subtitlePath: string; outPath: string }[] = [];
 
   async probeStreams(videoPath: string): Promise<MediaStream[]> {
+    this.probeCalls.push(videoPath);
     return this.opts.streamsByPath?.[videoPath] ?? [];
   }
 
