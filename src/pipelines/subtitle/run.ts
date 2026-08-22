@@ -12,7 +12,7 @@ import type { TranscriptEntry } from '../../db/subtitleRuns.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
 import { mapArrPath, safeUrlTailName } from '../../fs/paths.js';
-import type { ArrApi } from '../../arr/types.js';
+import type { ArrApi, EpisodeResource } from '../../arr/types.js';
 import { traceArrClient } from '../../arr/traced.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import type { JobRow } from '../../jobs/queue.js';
@@ -72,6 +72,11 @@ type Candidate = ArchiveCacheEntry & { lang: string };
 interface RunState {
   media: MediaTools;
   placedFiles: PlacedFiles;
+  /** Every episode of the target that has a video on disk, missing or not. `missing` shrinks
+   * as the run places files and never held the episodes an earlier run already covered, so it
+   * cannot answer "does this filename name an episode of this show at all?" — which is the
+   * question that decides whether a file is worth an LLM call (see `routeEntry`). */
+  allEpisodes: EpisodeTarget[];
   /** videoPath -> extracted reference subtitle path, cached for the whole run so a video with
    * an embedded track is only ever extracted once no matter how many candidates it's tried
    * against (or how many resync rounds each triggers). */
@@ -129,8 +134,6 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   mkdirSync(refDir, { recursive: true });
   mkdirSync(rawDir, { recursive: true });
 
-  const state: RunState = { media, placedFiles, refCache: new Map(), refDir, rawDir, quarantined: new Map() };
-
   try {
     const meta = await resolveTargetMeta(client, job);
     const title = meta.title;
@@ -151,6 +154,16 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       languages: ctx.config.subtitle.languages,
       media,
     });
+    const state: RunState = {
+      media,
+      placedFiles,
+      refCache: new Map(),
+      refDir,
+      rawDir,
+      quarantined: new Map(),
+      allEpisodes: targets,
+    };
+
     const byVideoPath = new Map(missingList.map((m) => [m.videoPath, m]));
     const missing: EpisodeTarget[] = targets
       .filter((t) => byVideoPath.has(t.videoPath))
@@ -383,7 +396,8 @@ function wantedFor(entry: Candidate, t: EpisodeTarget): boolean {
  * Matches one archive's files (from a cached row, or a just-downloaded+extracted pack) to the
  * still-missing episodes and drift-gates + places each match. Deterministic matching first
  * (via the entry's pre-parsed `episodeRef`), then one `mapArchiveWithLlm` call for whatever's
- * left — mirroring ingest's match-then-LLM ordering.
+ * left — mirroring ingest's match-then-LLM ordering. "Whatever's left" is narrower than
+ * "everything that didn't match": see `routeEntry` for what gets dropped before the paid call.
  *
  * Returns two different counts, for two different callers: `resolved` is the episode ids that
  * got FULLY resolved (every target language filled) — what the cache-hit event reports.
@@ -406,18 +420,31 @@ async function matchArchiveRow(
   let placedCount = 0;
 
   const unmatchedPaths: string[] = [];
+  let covered = 0;
   for (const entry of candidates) {
     if (missing.length === 0) break;
-    const t = matchDeterministic(missing, entry, job.target_kind === 'movie');
-    if (t) {
-      const placedLang = await driftAndPlace(ctx, job, row, entry, t, state, site);
-      if (placedLang !== undefined) {
-        placedCount++;
-        notePlacement(missing, resolved, t, placedLang);
-      }
-    } else {
-      unmatchedPaths.push(entry.path);
+    const route = routeEntry(entry, missing, state.allEpisodes, job.target_kind === 'movie');
+    if (route.kind === 'covered') {
+      covered++;
+      continue;
     }
+    if (route.kind === 'llm') {
+      unmatchedPaths.push(entry.path);
+      continue;
+    }
+    const placedLang = await driftAndPlace(ctx, job, row, entry, route.target, state, site);
+    if (placedLang !== undefined) {
+      placedCount++;
+      notePlacement(missing, resolved, route.target, placedLang);
+    }
+  }
+  if (covered > 0) {
+    ctx.trace.event({
+      jobId: job.id,
+      kind: 'subtitle.filter',
+      summary: `skipped ${covered} file(s) naming episodes already covered`,
+      payload: () => ({ archive: row.path, covered }),
+    });
   }
 
   // Movies: a single video slot — every remaining archive file targets that one video
@@ -474,6 +501,61 @@ async function matchArchiveRow(
   return { resolved, placedCount };
 }
 
+/** What happens to one archive entry: place it against an episode, hand it to the LLM
+ * mapper, or drop it because the episode it names is already covered. */
+type EntryRoute =
+  | { kind: 'match'; target: EpisodeTarget }
+  | { kind: 'llm' }
+  | { kind: 'covered' };
+
+/**
+ * Routes one archive entry.
+ *
+ * The `covered` verdict is the point of this function. `missing` holds only the episodes the
+ * run still wants, so matching against it alone reads every file for an already-covered
+ * episode as "unmatched" — and on a re-run against a cached 1,500-file pack that is most of
+ * the pack, several hundred files handed to `mapArchiveWithLlm` in batches to learn what
+ * their own filenames already said. Resolving the ref against every episode on disk tells
+ * "this names an episode we have covered" apart from "this names nothing this show has", and
+ * only the second is worth paying for.
+ *
+ * A season the entry names outright that nothing missing belongs to is the same fact one
+ * level up: whichever episode of season 1 this is, season 1 is done.
+ *
+ * Movies keep the old path: one video slot, no episode refs to resolve, and the caller's
+ * movie branch tries every leftover file against that slot itself.
+ */
+function routeEntry(entry: Candidate, missing: EpisodeTarget[], all: EpisodeTarget[], isMovie: boolean): EntryRoute {
+  const direct = matchDeterministic(missing, entry, isMovie);
+  if (direct) return { kind: 'match', target: direct };
+  if (isMovie) return { kind: 'llm' };
+
+  const ref = entry.episodeRef;
+  if (ref === null) return { kind: 'llm' };
+
+  const hit = matchEpisodeRef(ref, asEpisodeResources(all));
+  if (hit !== null) {
+    const stillMissing = missing.find((m) => m.episodeId === hit.id);
+    return stillMissing ? { kind: 'match', target: stillMissing } : { kind: 'covered' };
+  }
+  if (ref.season !== null && !missing.some((m) => m.seasonNumber === ref.season)) return { kind: 'covered' };
+  return { kind: 'llm' };
+}
+
+/** Episode targets in the shape `matchEpisodeRef` reads. Only the season/episode numbers and
+ * the id carry meaning here; the rest of `EpisodeResource` exists to satisfy the type. */
+function asEpisodeResources(targets: EpisodeTarget[]): EpisodeResource[] {
+  return targets.map((m) => ({
+    id: m.episodeId,
+    seriesId: 0,
+    seasonNumber: m.seasonNumber,
+    episodeNumber: m.episodeNumber,
+    title: '',
+    episodeFileId: 0,
+    hasFile: true,
+  }));
+}
+
 /** Deterministically matches an archive entry to a still-missing episode, using the ref
  * `entriesForFiles` already parsed at cache-write time — that ref carries the season the
  * pack's directory names implied, which re-parsing the basename here would throw away.
@@ -482,18 +564,7 @@ async function matchArchiveRow(
 function matchDeterministic(missing: EpisodeTarget[], entry: ArchiveCacheEntry, isMovie: boolean): EpisodeTarget | null {
   if (isMovie && missing.length === 1) return missing[0]!;
   if (entry.episodeRef === null) return null;
-  const hit = matchEpisodeRef(
-    entry.episodeRef,
-    missing.map((m) => ({
-      id: m.episodeId,
-      seriesId: 0,
-      seasonNumber: m.seasonNumber,
-      episodeNumber: m.episodeNumber,
-      title: '',
-      episodeFileId: 0,
-      hasFile: true,
-    })),
-  );
+  const hit = matchEpisodeRef(entry.episodeRef, asEpisodeResources(missing));
   return hit ? missing.find((m) => m.episodeId === hit.id) ?? null : null;
 }
 

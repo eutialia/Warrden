@@ -1007,3 +1007,66 @@ describe('runSubtitleJob', () => {
     expect(hasEvent(attentionEvents, 'subtitle.site-unusable')).toBe(false);
   });
 });
+
+
+/** The fixture's own S01E05 video, given an embedded track in a TARGET language so reconcile
+ * counts season 1 as already covered — the on-disk state a re-run starts from. */
+function coverSeasonOne(fx: SubtitleFixture): void {
+  fx.media.setStreams(fx.videoPath, [
+    { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+    { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+  ]);
+}
+
+// The re-run case: a cached pack covers every season, most of them already on disk. Every
+// file naming a covered episode used to fail the match against `missing` and go to the LLM
+// mapper in batches, which is hundreds of paid calls to re-read filenames that already said
+// what they were.
+describe('runSubtitleJob LLM remainder', () => {
+  // Season 3 stays missing on purpose: the remainder pass only runs while something is still
+  // wanted, so a pack that closed every gap would prove nothing about what it skipped.
+  it('drops files naming an already-covered episode instead of sending them to the mapper', async () => {
+    const fx = multiSeasonFixture(3);
+    coverSeasonOne(fx);
+    const llm = new FakeGenerator([]);
+    fx.ctx.llm = llm;
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ ...seasonPack(1), ...seasonPack(2) }));
+
+    expect(llm.calls).toHaveLength(0);
+    expect(existsSync(join(fx.libraryDir, 'Show - S02E05.zh-Hans.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(false);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+  });
+
+  it('drops a file whose season is named and fully covered even when no episode matches it', async () => {
+    const fx = multiSeasonFixture(2);
+    coverSeasonOne(fx);
+    const llm = new FakeGenerator([]);
+    fx.ctx.llm = llm;
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E99.chs.ass': SRT }));
+
+    expect(llm.calls).toHaveLength(0);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+  });
+
+  it('still sends a genuinely unparseable name to the mapper, and only that one', async () => {
+    const fx = multiSeasonFixture(3);
+    coverSeasonOne(fx);
+    // File #1 of the batch is the unparseable one, mapped onto the season-3 episode.
+    const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 30 }], reasoning: 'the leftover' }]);
+    fx.ctx.llm = llm;
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ ...seasonPack(1), ...seasonPack(2), 'Show - extras.chs.ass': SRT }));
+
+    expect(llm.calls).toHaveLength(1);
+    const prompt = llm.calls[0]?.prompt ?? '';
+    expect(prompt).toContain('#1 Show - extras.chs.ass');
+    expect(prompt).not.toContain('#2');
+    expect(existsSync(join(fx.libraryDir, 'Show - S03E05.zh-Hans.ass'))).toBe(true);
+  });
+});

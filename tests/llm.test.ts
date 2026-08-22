@@ -7,7 +7,15 @@ import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { isPermanentError } from '../src/jobs/errors.js';
 import type { ModelCapabilities, StructuredOutputTier } from '../src/llm/catalog.js';
-import { AiSdkGenerator, LlmError, modelSettings, resolveModel, withRetry, type EffortIgnoredInfo } from '../src/llm/generator.js';
+import {
+  AiSdkGenerator,
+  LlmError,
+  modelSettings,
+  repairObjectText,
+  resolveModel,
+  withRetry,
+  type EffortIgnoredInfo,
+} from '../src/llm/generator.js';
 import { NOOP_TRACER, SqlTracer } from '../src/trace/tracer.js';
 import { baseConfig, freshDb } from './helpers.js';
 
@@ -843,5 +851,83 @@ describe('AiSdkGenerator tracing', () => {
     const attempt = new TraceEntries(db).listByJob(11).find((r) => r.kind === 'llm.attempt');
     const payload = JSON.parse(attempt?.payload ?? '') as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual(['error', 'model', 'provider']);
+  });
+});
+
+
+describe('repairObjectText', () => {
+  it('strips a ```json fence', () => {
+    expect(repairObjectText('```json\n{"ok": true}\n```')).toBe('{"ok": true}');
+  });
+
+  it('strips a bare ``` fence, whatever the casing of its tag', () => {
+    expect(repairObjectText('```JSON\n{"ok": true}\n```')).toBe('{"ok": true}');
+    expect(repairObjectText('```\n{"ok": true}\n```')).toBe('{"ok": true}');
+  });
+
+  it('cuts the object out of a sentence of preamble', () => {
+    expect(repairObjectText('Here is the answer: {"ok": true} — hope that helps.')).toBe('{"ok": true}');
+  });
+
+  it('handles a fence that also carries preamble inside it', () => {
+    expect(repairObjectText('```json\nSure thing:\n{"ok": true}\n```')).toBe('{"ok": true}');
+  });
+
+  // Null is the SDK's "no repair", which leaves the original parse error to speak for itself.
+  it('returns null for a clean object', () => {
+    expect(repairObjectText('{"ok": true}')).toBeNull();
+  });
+
+  it('returns null when there is no brace pair to find', () => {
+    expect(repairObjectText('I cannot answer that.')).toBeNull();
+    expect(repairObjectText('{ but never closed')).toBeNull();
+  });
+});
+
+describe('AiSdkGenerator object repair', () => {
+  const schema = z.object({ ok: z.boolean() });
+
+  /** A `generateObject` stand-in that answers with `text` and parses it the way the real SDK
+   * does: try it, and on failure hand it to the call's own `repairText` hook before giving
+   * up. Enough of the SDK's contract to prove the hook is wired and does the job. */
+  function modelAnswering(text: string): (opts: unknown) => Promise<{ object: unknown }> {
+    return async (opts) => {
+      const { schema: callSchema, repairText } = opts as {
+        schema: z.ZodType<unknown>;
+        repairText?: (input: { text: string; error: Error }) => Promise<string | null>;
+      };
+      const error = new Error('could not parse the response');
+      const repaired = (await repairText?.({ text, error })) ?? text;
+      try {
+        return { object: callSchema.parse(JSON.parse(repaired)) };
+      } catch {
+        throw error;
+      }
+    };
+  }
+
+  async function generateOnTier(tier: StructuredOutputTier, text: string): Promise<unknown> {
+    generateObjectMock.mockReset();
+    generateObjectMock.mockImplementation(modelAnswering(text));
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'stealth/ox-alpha', structuredOutput: tier };
+    return new AiSdkGenerator(() => cfg).generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
+  }
+
+  it('recovers a fenced answer on the json_object tier without a second attempt', async () => {
+    await expect(generateOnTier('json_object', '```json\n{"ok": true}\n```')).resolves.toEqual({ ok: true });
+    expect(generateObjectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers a fenced answer on the none tier without a second attempt', async () => {
+    await expect(generateOnTier('none', '```json\n{"ok": true}\n```')).resolves.toEqual({ ok: true });
+    expect(generateObjectMock).toHaveBeenCalledTimes(1);
+  });
+
+  // A route that declares structured outputs and still fences its answer has a problem worth
+  // seeing, so nothing is quietly patched up there.
+  it('sends no repair hook on the native tier', async () => {
+    await expect(generateOnTier('native', '```json\n{"ok": true}\n```')).rejects.toThrow(LlmError);
+    expect(generateObjectMock).toHaveBeenCalledTimes(2);
   });
 });

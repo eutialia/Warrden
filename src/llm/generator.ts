@@ -242,6 +242,34 @@ function schemaAppendix(schema: z.ZodType<unknown>): string {
 }
 
 /**
+ * Pulls a bare JSON object out of what a model actually sent when the prompt was the only
+ * thing holding it to the schema. Two shapes, both observed from ox-alpha: the object inside
+ * a ```json fence, and a sentence of preamble before it. Returns null when there is nothing
+ * to fix or nothing recoverable — the SDK reads null as "no repair" and lets the original
+ * parse error stand, which is the honest answer for a refusal or a page of prose.
+ *
+ * Pure and exported so the shapes can be tested without a model in the loop.
+ */
+export function repairObjectText(text: string): string | null {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```[a-zA-Z]*[ \t]*\r?\n?([\s\S]*?)\r?\n?```$/);
+  let out = (fenced?.[1] ?? trimmed).trim();
+
+  if (!out.startsWith('{')) {
+    const start = out.indexOf('{');
+    const end = out.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    out = out.slice(start, end + 1);
+  }
+  return out === text ? null : out;
+}
+
+/** `repairObjectText` in the shape the AI SDK's repair hook takes. */
+async function repairText({ text }: { text: string }): Promise<string | null> {
+  return repairObjectText(text);
+}
+
+/**
  * The `generateObject` options for one call, model aside.
  *
  * The system half rides on `instructions`, not a `role: 'system'` entry in `messages`: AI SDK
@@ -258,6 +286,10 @@ function schemaAppendix(schema: z.ZodType<unknown>): string {
  * endpoint as a constraint. It goes first, not last: with the schema trailing a long
  * instruction block, ox-alpha answered the agent loop in prose five times out of six;
  * leading with it, the same prompts came back as valid objects every time.
+ *
+ * Those same tiers get `repairText`: a model held to the schema by nothing but the prompt
+ * still fences its answer or leads with a sentence often enough that the alternative is a
+ * `NoObjectGeneratedError` and a second full-price call to ask again.
  */
 export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCachePlan, tier: StructuredOutputTier) {
   const system = tier === 'native' ? opts.system : `${schemaAppendix(opts.schema)}\n\n${opts.system}`;
@@ -268,6 +300,9 @@ export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCach
       : system,
     messages: [{ role: 'user' as const, content: opts.prompt }],
     ...(cache.callProviderOptions ? { providerOptions: cache.callProviderOptions } : {}),
+    // Only where nothing but the prompt asks for JSON. A native-tier endpoint that returns a
+    // fence has a real problem worth surfacing, and the hook would hide it.
+    ...(tier === 'native' ? {} : { repairText }),
     // Our own `withRetry` owns the retry count; the AI SDK's default internal retries would
     // otherwise multiply each attempt into up to 3 provider calls of its own.
     maxRetries: 0,
