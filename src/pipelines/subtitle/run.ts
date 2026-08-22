@@ -49,11 +49,14 @@ interface RunSubtitleDeps {
  * streams (used as a drift reference when present). `covered` is the line between the two
  * jobs a run does: uncovered episodes are what it goes searching for, `lacking` is what it
  * collects from whatever it finds. */
-interface EpisodeTarget {
+interface VideoTarget {
   episodeId: number;
   seasonNumber: number;
   episodeNumber: number;
   videoPath: string; // local (mapped) path on disk
+}
+
+interface EpisodeTarget extends VideoTarget {
   lacking: string[];
   covered: boolean;
   embeddedRefs: { streamIndex: number; lang: string | null }[];
@@ -82,7 +85,7 @@ interface RunState {
    * shrinks as the run places files and never held the episodes an earlier run already filled,
    * so it cannot answer "does this filename name an episode of this show at all?" — which is
    * the question that decides whether a file is worth an LLM call (see `routeEntry`). */
-  allEpisodes: EpisodeTarget[];
+  allEpisodes: VideoTarget[];
   /** videoPath -> extracted reference subtitle path, cached for the whole run so a video with
    * an embedded track is only ever extracted once no matter how many candidates it's tried
    * against (or how many resync rounds each triggers). */
@@ -225,27 +228,21 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
 
     const langs = describeLanguages(ctx.config.subtitle.languages);
     const withoutSubs = uncovered(gaps);
-    if (withoutSubs.length === 0) {
+    if (withoutSubs.length > 0) {
       ctx.events.append({
-        kind: 'subtitle.complete',
+        kind: 'subtitle.missing',
         jobId: job.id,
-        message: `Nothing missing — every video already has subtitles in ${langs}`,
-        data: targetEventData(job, { counts: { missing: 0, placed: 0 } }),
+        message: `${withoutSubs.length} video(s) without subtitles in ${langs}`,
+        data: targetEventData(job, {
+          counts: { missing: withoutSubs.length, byEpisode: withoutSubs.map((t) => t.episodeId) },
+        }),
       });
-      return;
     }
 
-    ctx.events.append({
-      kind: 'subtitle.missing',
-      jobId: job.id,
-      message: `${withoutSubs.length} video(s) without subtitles in ${langs}`,
-      data: targetEventData(job, {
-        counts: { missing: withoutSubs.length, byEpisode: withoutSubs.map((t) => t.episodeId) },
-      }),
-    });
-
     // Cache pass first — a previously-downloaded pack can cover a mid-season episode that
-    // landed after the pack was fetched, avoiding a re-download.
+    // landed after the pack was fetched, avoiding a re-download. It runs even when every
+    // episode is already covered: reading packs we already hold costs nothing, and it is the
+    // only way a lower-preference tag is ever collected for a series nobody has to search for.
     for (const row of cache.forTarget(job.arr_instance, job.target_kind, job.target_id)) {
       if (gaps.length === 0) break;
       const { resolved } = await matchArchiveRow(ctx, job, row, gaps, title, state, undefined);
@@ -257,6 +254,18 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
           data: targetEventData(job, { count: resolved.length, episodeIds: resolved, archive: row.path }),
         });
       }
+    }
+
+    // Only an uncovered episode is worth a site search, and nothing the cache pass does can
+    // uncover one — so a run that opened with everything covered ends here.
+    if (withoutSubs.length === 0) {
+      ctx.events.append({
+        kind: 'subtitle.complete',
+        jobId: job.id,
+        message: `Nothing missing — every video already has subtitles in ${langs}`,
+        data: targetEventData(job, { counts: { missing: 0, placed: 0 } }),
+      });
+      return;
     }
 
     await siteSearchPass(ctx, job, meta, gaps, state, cache, deps);
@@ -300,7 +309,7 @@ async function settleGate(ctx: AppContext, job: JobRow, client: ArrApi): Promise
 
 /** Series: every hasFile episode with an episode file. Movie: the single movie file, if any.
  * `episodeId` for movies is the movie id so resolved tracking / attention de-dup still work. */
-async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): Promise<EpisodeTarget[]> {
+async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): Promise<VideoTarget[]> {
   if (job.target_kind === 'movie') {
     const movieFiles = await client.listMovieFiles(job.target_id);
     const file = movieFiles[0];
@@ -311,9 +320,6 @@ async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): P
         seasonNumber: 0,
         episodeNumber: 0,
         videoPath: mapArrPath(ctx.config.pathMappings, file.path),
-        lacking: [],
-        covered: false,
-        embeddedRefs: [],
       },
     ];
   }
@@ -329,9 +335,6 @@ async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): P
         seasonNumber: e.seasonNumber,
         episodeNumber: e.episodeNumber,
         videoPath: mapArrPath(ctx.config.pathMappings, file.path),
-        lacking: [],
-        covered: false,
-        embeddedRefs: [],
       };
     });
 }
@@ -608,7 +611,7 @@ type EntryRoute =
  * Movies keep the old path: one video slot, no episode refs to resolve, and the caller's
  * movie branch tries every leftover file against that slot itself.
  */
-function routeEntry(entry: Candidate, gaps: EpisodeTarget[], all: EpisodeTarget[], isMovie: boolean): EntryRoute {
+function routeEntry(entry: Candidate, gaps: EpisodeTarget[], all: VideoTarget[], isMovie: boolean): EntryRoute {
   const direct = matchDeterministic(gaps, entry, isMovie);
   if (direct) return { kind: 'match', target: direct };
   if (isMovie) return { kind: 'llm' };
@@ -627,7 +630,7 @@ function routeEntry(entry: Candidate, gaps: EpisodeTarget[], all: EpisodeTarget[
 
 /** Episode targets in the shape `matchEpisodeRef` reads. Only the season/episode numbers and
  * the id carry meaning here; the rest of `EpisodeResource` exists to satisfy the type. */
-function asEpisodeResources(targets: EpisodeTarget[]): EpisodeResource[] {
+function asEpisodeResources(targets: VideoTarget[]): EpisodeResource[] {
   return targets.map((m) => ({
     id: m.episodeId,
     seriesId: 0,

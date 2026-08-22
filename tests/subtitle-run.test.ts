@@ -628,6 +628,73 @@ describe('runSubtitleJob', () => {
     expect(findEvent(fx.ctx.events.list(), 'subtitle.missing')!.data).toMatchObject({ counts: { missing: 1 } });
   });
 
+  it('every episode covered but lacking a second language -> the cache still fills it, no site search', async () => {
+    // The cache pass costs nothing but local file reads, so it runs even when no episode is
+    // uncovered: a pack already on disk can hand over zh-Hant without anyone going looking.
+    const fx = subtitleFixture();
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+    const extractDir = tmpDir();
+    const filePath = join(extractDir, '0-Show - S01E05.cht.ass');
+    writeFileSync(filePath, SRT);
+    new ArchiveCache(fx.ctx.db).upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: 'series',
+      targetId: fx.targetId,
+      sourceUrl: 'https://example.test/pack.zip',
+      path: extractDir,
+      files: entriesForFiles([filePath], extractDir),
+    });
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
+  });
+
+  it('every episode covered and the cache empty -> subtitle.complete, no site search', async () => {
+    const fx = subtitleFixture();
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(false);
+  });
+
+  it('leaves a covered season out of the search hints', async () => {
+    // Season 1 is covered by its embedded zh-Hans and still lacks zh-Hant, but the search is
+    // for season 2 alone — a covered episode is never a reason to go looking.
+    const fx = multiSeasonFixture(2);
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+
+    let hints: SearchHints | undefined;
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async (_ctx, _job, _site, query) => {
+        hints = query as SearchHints;
+        return { download: null, transcript: [], outcome: 'gave-up' as const };
+      },
+    });
+
+    expect(hints!.missingSeasons).toEqual([{ seasonNumber: 2, episodes: 1, titles: [] }]);
+  });
+
   it('skips a candidate whose destination is already claimed before doing any media work', async () => {
     const fx = subtitleFixture();
     fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
