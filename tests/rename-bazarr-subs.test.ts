@@ -11,8 +11,8 @@ const SCRIPT = join(import.meta.dirname, '..', 'scripts', 'rename-bazarr-subs.sh
 const SIMPLIFIED_TEXT = '这是简体字幕';
 const TRADITIONAL_TEXT = '這是繁體字幕';
 
-function run(...args: string[]) {
-  const result = spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8' });
+function run(args: string[], env?: Record<string, string>) {
+  const result = spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -38,13 +38,13 @@ function seedFixtures(dir: string) {
 
 describe('rename-bazarr-subs.sh', () => {
   it('prints -h/--help usage and exits 0 without touching a real directory', () => {
-    const result = run('-h');
+    const result = run(['-h']);
     expect(result.status).toBe(0);
     expect(result.stdout).toMatch(/Usage: rename-bazarr-subs\.sh/);
   });
 
   it('exits non-zero with usage on stderr when no directory is given', () => {
-    const result = run();
+    const result = run([]);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/Usage: rename-bazarr-subs\.sh/);
   });
@@ -54,7 +54,7 @@ describe('rename-bazarr-subs.sh', () => {
     const nested = seedFixtures(dir);
     const before = readdirSync(nested).sort();
 
-    const result = run(dir);
+    const result = run([dir]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('simple ep.zh.srt -> ');
@@ -70,7 +70,7 @@ describe('rename-bazarr-subs.sh', () => {
     const dir = tmpDir();
     const nested = seedFixtures(dir);
 
-    const result = run('--apply', dir);
+    const result = run(['--apply', dir]);
 
     expect(result.status).toBe(0);
     const after = readdirSync(nested).sort();
@@ -92,7 +92,7 @@ describe('rename-bazarr-subs.sh', () => {
     const dir = tmpDir();
     const nested = seedFixtures(dir);
 
-    run('--apply', dir);
+    run(['--apply', dir]);
 
     expect(existsSync(join(nested, 'collide.zh.srt'))).toBe(true);
     expect(existsSync(join(nested, 'collide.zh-Hans.srt'))).toBe(true);
@@ -102,13 +102,27 @@ describe('rename-bazarr-subs.sh', () => {
     const dir = tmpDir();
     const nested = seedFixtures(dir);
 
-    run('--apply', dir);
+    run(['--apply', dir]);
     const afterFirst = readdirSync(nested).sort();
 
-    const second = run('--apply', dir);
+    const second = run(['--apply', dir]);
 
     expect(second.stdout).toContain('0 -> zh-Hans, 0 -> zh-Hant, 1 skipped (exists)');
     expect(readdirSync(nested).sort()).toEqual(afterFirst);
+  });
+
+  it('classifies by script even when a non-UTF-8 LC_ALL is inherited', () => {
+    // A C locale makes grep's bracket expression a set of bytes, and Simplified text shares
+    // bytes with the Traditional set: the script has to insist on UTF-8, not defer to what
+    // it was handed.
+    const dir = tmpDir();
+    const nested = seedFixtures(dir);
+
+    const result = run(['--apply', dir], { LC_ALL: 'C' });
+
+    expect(result.status).toBe(0);
+    expect(readdirSync(nested)).toContain('simple ep.zh-Hans.srt');
+    expect(readdirSync(nested)).toContain('trad ep.zh-Hant.srt');
   });
 
   it('never touches files outside the given directory', () => {
@@ -117,7 +131,7 @@ describe('rename-bazarr-subs.sh', () => {
     const dir = tmpDir();
     seedFixtures(dir);
 
-    run('--apply', dir);
+    run(['--apply', dir]);
 
     expect(readdirSync(outside)).toEqual(['sibling.zh.srt']);
   });

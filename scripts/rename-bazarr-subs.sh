@@ -50,12 +50,14 @@ if [ ${#DIRS[@]} -eq 0 ]; then
   exit 1
 fi
 
-if [ -z "${LC_ALL:-}" ]; then
-  if locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
-    export LC_ALL=C.UTF-8
-  elif locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
-    export LC_ALL=en_US.UTF-8
-  fi
+# Classification greps for Traditional characters in a bracket expression, which only
+# works per-character under a UTF-8 locale. An inherited LC_ALL=C would make it a set of
+# bytes, and Simplified text shares bytes with the Traditional set, so override whatever
+# came in whenever a UTF-8 locale exists at all.
+if locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+  export LC_ALL=C.UTF-8
+elif locale -a 2>/dev/null | grep -qi '^en_US\.UTF-8$'; then
+  export LC_ALL=en_US.UTF-8
 fi
 
 TRAD_CHARS='們這說來時過後為國學會對還沒種樣裡發經點麼開關體書長東車門見馬魚鳥風雲電龍華'
