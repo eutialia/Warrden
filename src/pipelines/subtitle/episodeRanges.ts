@@ -18,6 +18,17 @@ const MAX_GROUPS = 8;
  * still missing, not how many runs it broke into. Empty input renders as the empty string.
  */
 export function describeEpisodeRanges(episodes: EpisodeRef[]): string {
+  const groups = collapseRuns(episodes);
+  const shown = groups.slice(0, MAX_GROUPS);
+  const parts = shown.map((g) => (g.from === g.to ? `S${g.season}E${g.from}` : `S${g.season}E${g.from}-E${g.to}`));
+  const hidden = groups.slice(MAX_GROUPS).reduce((n, g) => n + (g.to - g.from + 1), 0);
+  if (hidden > 0) parts.push(`+${hidden} more episodes`);
+  return parts.join(', ');
+}
+
+/** Consecutive episodes of one season collapsed into runs, sorted and deduped. A season
+ * boundary always breaks a run. */
+function collapseRuns(episodes: EpisodeRef[]): { season: number; from: number; to: number }[] {
   const sorted = [...episodes].sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
   const groups: { season: number; from: number; to: number }[] = [];
   for (const e of sorted) {
@@ -28,9 +39,13 @@ export function describeEpisodeRanges(episodes: EpisodeRef[]): string {
     }
     groups.push({ season: e.seasonNumber, from: e.episodeNumber, to: e.episodeNumber });
   }
-  const shown = groups.slice(0, MAX_GROUPS);
-  const parts = shown.map((g) => (g.from === g.to ? `S${g.season}E${g.from}` : `S${g.season}E${g.from}-E${g.to}`));
-  const hidden = groups.slice(MAX_GROUPS).reduce((n, g) => n + (g.to - g.from + 1), 0);
-  if (hidden > 0) parts.push(`+${hidden} more episodes`);
-  return parts.join(', ');
+  return groups;
+}
+
+/** The same run-collapsing inside a single season, without the `SxxEyy` prefixes:
+ * `41-45`, `1-2, 4-5`. Empty input renders as the empty string. */
+export function describeEpisodeNumbers(numbers: number[]): string {
+  return collapseRuns(numbers.map((episodeNumber) => ({ seasonNumber: 0, episodeNumber })))
+    .map((g) => (g.from === g.to ? `${g.from}` : `${g.from}-${g.to}`))
+    .join(', ');
 }

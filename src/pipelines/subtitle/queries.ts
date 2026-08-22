@@ -4,6 +4,7 @@
  * multi-language); instead it biases query advice toward the languages the operator wants
  * on disk and soft-prefers known fansub groups.
  */
+import { describeEpisodeNumbers } from './episodeRanges.js';
 
 /** One season the target still needs subtitles for, with the titles that season is
  * released under (Sonarr's scene-season alternates) — a multi-cour show is sold as a
@@ -11,8 +12,12 @@
  * actionable with season 3's own name beside it. */
 export interface MissingSeason {
   seasonNumber: number;
-  /** How many episodes of this season are still missing. */
-  episodes: number;
+  /** Which episodes of this season are still missing, ascending. */
+  episodeNumbers: number[];
+  /** Days since the most recently aired uncovered episode of this season; null when no
+   * episode of it carries an air date. A season whose newest gap aired days ago is one no
+   * index has had time to publish for, and the agent is told so. */
+  newestAiredDaysAgo: number | null;
   /** Titles this season is known by, beyond the series title. */
   titles: string[];
 }
@@ -87,12 +92,49 @@ export function buildSearchHints(input: {
   };
 }
 
-/** `Season 3 (24 episodes, also known as "…")` — the season's own titles ride along so the
- * agent can search for the season under the name the indexes actually use. */
+/** `3 days ago` as the clause that follows "newest aired". */
+function describeAge(days: number): string {
+  if (days <= 0) return 'newest aired today';
+  return `newest aired ${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+/** `Season 17 (episodes 41-45, newest aired 3 days ago, also known as "…")` — the gap's own
+ * episode numbers, how fresh the newest of them is, and the season's own titles, which ride
+ * along so the agent can search for the season under the name the indexes actually use. */
 function describeMissingSeason(s: MissingSeason): string {
-  const count = `${s.episodes} episode${s.episodes === 1 ? '' : 's'}`;
-  const titles = s.titles.length > 0 ? `, also known as ${s.titles.map((t) => `"${t}"`).join(', ')}` : '';
-  return `Season ${s.seasonNumber} (${count}${titles})`;
+  const parts = [
+    s.episodeNumbers.length > 0
+      ? `episode${s.episodeNumbers.length === 1 ? '' : 's'} ${describeEpisodeNumbers(s.episodeNumbers)}`
+      : '',
+    s.newestAiredDaysAgo !== null ? describeAge(s.newestAiredDaysAgo) : '',
+    s.titles.length > 0 ? `also known as ${s.titles.map((t) => `"${t}"`).join(', ')}` : '',
+  ].filter(Boolean);
+  return parts.length === 0 ? `Season ${s.seasonNumber}` : `Season ${s.seasonNumber} (${parts.join(', ')})`;
+}
+
+/** What `isFreshGap` needs of a target: when it aired, and whether it still needs anything. */
+export interface FreshnessTarget {
+  /** Epoch ms the episode aired, or null when the arr does not say (and for movies). */
+  airedAt: number | null;
+  covered: boolean;
+}
+
+/**
+ * True when every episode this run is still hunting for aired inside the last `freshDays` —
+ * the "nothing exists yet" case. Subtitles for an episode that aired this week usually have
+ * not been published at all, so a search that comes up empty is evidence about the calendar,
+ * not about the site, and the run spends a fraction of its budget rather than three full
+ * rounds per site.
+ *
+ * An unknown air date counts as not fresh: the expensive path is the safe default, and the
+ * only thing a missing date proves is that we cannot tell. A run with nothing uncovered is
+ * not a fresh gap either — it is not a gap at all.
+ */
+export function isFreshGap(targets: readonly FreshnessTarget[], now: number, freshDays = 7): boolean {
+  const uncovered = targets.filter((t) => !t.covered);
+  if (uncovered.length === 0) return false;
+  const cutoff = now - freshDays * 24 * 3_600_000;
+  return uncovered.every((t) => t.airedAt !== null && t.airedAt >= cutoff);
 }
 
 /** Renders the search-hints block for the site-search system/user prompt. */
