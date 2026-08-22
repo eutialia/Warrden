@@ -140,6 +140,19 @@ const LANG_TOKENS: Record<string, string> = {
 const LANG_SUBTOKEN_SPLIT = /[\s_&+/]+/;
 
 /**
+ * The lookup parts of one dot-separated segment: the segment itself, then whatever follows
+ * its final hyphen. Fansub groups stamp their own prefix onto the trailing tag
+ * (`.YY-SC.ass`, `.YY-TC.ass`), and the half after the hyphen is the part that names a
+ * language. The whole segment is tried first, so hyphenated `LANG_TOKENS` keys
+ * (`zh-Hans`, `zh-CN`) still resolve as themselves; and since `resolveGroup` lowercases
+ * every part before lookup, `.YY-sc` and `.YY-SC` are the same tag.
+ */
+function dotSegmentParts(segment: string): string[] {
+  const hyphen = segment.lastIndexOf('-');
+  return hyphen === -1 ? [segment] : [segment, segment.slice(hyphen + 1)];
+}
+
+/**
  * Splits the extension-less name into candidate groups: every dot-separated segment
  * (a singleton group) plus every `[...]` bracket group's own sub-tokens (see
  * `LANG_SUBTOKEN_SPLIT`), each group tagged with the string offset where its
@@ -155,7 +168,7 @@ function langCandidateGroupsFromEnd(name: string): string[][] {
   let cursor = 0;
   for (const part of name.split('.')) {
     cursor += part.length;
-    groups.push({ parts: [part], end: cursor });
+    groups.push({ parts: dotSegmentParts(part), end: cursor });
     cursor += 1; // the dot itself
   }
 
@@ -204,6 +217,57 @@ export function parseLangTag(filename: string): string | null {
     if (resolved !== null) return resolved;
   }
   return null;
+}
+
+/**
+ * Every language a single path segment claims, as a set. Two shapes, deliberately
+ * asymmetric:
+ *
+ * - The Chinese variant markers are read as substrings: `简体`, `简中`, `简繁外挂字幕` and
+ *   `繁體内封` all carry their marker glued to other words, and no fansub folder writes 简
+ *   or 繁 meaning anything else. That is also what makes `简繁`-style folders resolve to a
+ *   set of two — a folder holding both variants claims neither on its own.
+ * - Latin tags (`SC`, `CHS`, `GB`, `TC`, `CHT`, `BIG5`, …) are read only as a whole
+ *   segment or a bracketed token inside one, via `LANG_TOKENS`. As substrings they are far
+ *   too common to trust: a `Discworld` folder is not a simplified Chinese one.
+ */
+function langsNamedIn(segment: string): Set<string> {
+  const found = new Set<string>();
+  if (segment.includes('简')) found.add('zh-Hans');
+  if (segment.includes('繁')) found.add('zh-Hant');
+  for (const parts of [[segment], ...[...segment.matchAll(/\[([^\]]*)\]/g)].map((m) => (m[1] ?? '').split(LANG_SUBTOKEN_SPLIT))]) {
+    const resolved = resolveGroup(parts.filter((p) => p.length > 0));
+    if (resolved !== null) found.add(resolved);
+  }
+  return found;
+}
+
+/**
+ * Reads a language tag out of the directory names a subtitle file sits under, for packs
+ * that split one release into a folder per variant (`.../[简繁外挂字幕][01-24]/简体/[Group][04].ass`).
+ * `segments` runs outermost-first, so the scan runs backwards: the directory closest to the
+ * file is the most specific claim about it. A segment claiming two languages at once —
+ * `简繁`, `简繁外挂`, `简繁内封`, the folder that holds BOTH variants — adjudicates nothing,
+ * so the scan carries on outward rather than flipping a coin, exactly as it does past a
+ * segment that claims no language at all.
+ */
+export function parseLangHint(segments: string[]): string | null {
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const found = langsNamedIn(segments[i]!);
+    if (found.size === 1) return [...found][0]!;
+  }
+  return null;
+}
+
+/**
+ * `parseLangTag` with the enclosing directories as a fallback. The filename always wins: a
+ * `.YY-SC.ass` inside a `繁體/` folder is simplified Chinese, because the file is the more
+ * specific claim. Only a name that names no language at all takes the directory's word for
+ * it — which is the whole point, since the new language gate drops an untagged candidate,
+ * and in these packs the tag lives one level up.
+ */
+export function parseLangTagWithHint(filename: string, segments: string[]): string | null {
+  return parseLangTag(filename) ?? parseLangHint(segments);
 }
 
 /**

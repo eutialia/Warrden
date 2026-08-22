@@ -9,7 +9,7 @@ import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
-import { runSubtitleJob } from '../src/pipelines/subtitle/run.js';
+import { MAX_SEARCH_ROUNDS, runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
 import type { MediaStream } from '../src/media/tools.js';
 import type { SearchHints } from '../src/pipelines/subtitle/queries.js';
@@ -105,6 +105,51 @@ function siteStub(files: Record<string, string>) {
   return {
     searchSite: async () => ({ download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], outcome: 'downloaded' as const }),
   };
+}
+
+/**
+ * A `searchSite` seam that serves one pack per round, in order, and records the hints it
+ * was handed each time. A round past the end of `packs` throws, so a test that expects the
+ * pass to stop fails loudly instead of silently searching on.
+ */
+function roundStub(packs: Record<string, string>[]) {
+  const calls: SearchHints[] = [];
+  const zips = packs.map((files, i) => ({
+    filePath: makeZip(files, `pack-${i}.zip`),
+    url: `https://example.test/pack-${i}.zip`,
+  }));
+  const deps: Parameters<typeof runSubtitleJob>[2] = {
+    searchSite: async (_ctx, _job, _site, query) => {
+      const round = calls.length;
+      calls.push(query as SearchHints);
+      const download = zips[round];
+      if (!download) throw new Error(`unexpected search round ${round + 1}`);
+      return { download, transcript: [], outcome: 'downloaded' as const };
+    },
+  };
+  return { calls, deps };
+}
+
+/** The default fixture plus one E05 video per extra season, so one pack per season covers
+ * exactly one of them. Season 1 is the fixture's own video. */
+function multiSeasonFixture(lastSeason: number): SubtitleFixture {
+  const fx = subtitleFixture();
+  for (let season = 2; season <= lastSeason; season++) {
+    const name = `Show - S0${season}E05.mkv`;
+    const path = join(fx.libraryDir, name);
+    writeFileSync(path, 'video');
+    fx.client.episodes.push(
+      episodeResource({ id: season * 10, seriesId: fx.targetId, seasonNumber: season, episodeNumber: 5, episodeFileId: season * 10, hasFile: true }),
+    );
+    fx.client.episodeFiles.push({ id: season * 10, seriesId: fx.targetId, seasonNumber: season, relativePath: name, path });
+  }
+  return fx;
+}
+
+/** One season's worth of pack: the `.chs` tag gets it past the language gate, the SxxEyy
+ * name matches the season's video deterministically. */
+function seasonPack(season: number): Record<string, string> {
+  return { [`Show - S0${season}E05.chs.ass`]: SRT };
 }
 
 /** A deps stub that fails the test if the runner ever calls the real site search. */
@@ -521,6 +566,99 @@ describe('runSubtitleJob', () => {
     ]);
   });
 
+  it('searches the same site again when the first pack left a season uncovered', async () => {
+    const fx = multiSeasonFixture(2);
+    const { calls, deps } = roundStub([seasonPack(1), seasonPack(2)]);
+    const reflections: Array<{ verifiedSuccess: boolean }> = [];
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, { ...deps, reflectOnRun: reflectSpy(reflections) });
+
+    expect(calls).toHaveLength(2);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S02E05.zh-Hans.ass'))).toBe(true);
+    // Round 2 is told what round 1 already fetched, and asked only for what is still left.
+    expect(calls[1]!.alreadyFetched).toEqual([{ url: 'https://example.test/pack-0.zip', title: 'pack-0.zip' }]);
+    expect(calls[1]!.missingSeasons).toEqual([{ seasonNumber: 2, episodes: 1, titles: [] }]);
+    // Round 1 was asked for both, and knew of nothing fetched yet.
+    expect(calls[0]!.alreadyFetched).toEqual([]);
+    expect(calls[0]!.missingSeasons).toHaveLength(2);
+    // Every round is its own run, so every round reflects.
+    expect(reflections).toEqual([{ verifiedSuccess: true }, { verifiedSuccess: true }]);
+  });
+
+  it('a round that places nothing ends the site', async () => {
+    const fx = multiSeasonFixture(2);
+    // The same season-1 pack twice: round 2 downloads, matches nothing still missing, stops.
+    const { calls, deps } = roundStub([seasonPack(1), seasonPack(1)]);
+    // Round 2's file is still in a wanted language, so it reaches the LLM remainder pass —
+    // which maps it to no episode, since the one it names is already covered.
+    fx.ctx.llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: null }], reasoning: 'already covered' }]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls).toHaveLength(2);
+    expect(existsSync(join(fx.libraryDir, 'Show - S02E05.zh-Hans.ass'))).toBe(false);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+  });
+
+  it('a first pack that covers everything searches once', async () => {
+    const fx = subtitleFixture();
+    const { calls, deps } = roundStub([seasonPack(1)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls).toHaveLength(1);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(true);
+  });
+
+  it('stops at MAX_SEARCH_ROUNDS even while rounds keep placing files', async () => {
+    expect(MAX_SEARCH_ROUNDS).toBe(3);
+    const fx = multiSeasonFixture(4);
+    const { calls, deps } = roundStub([seasonPack(1), seasonPack(2), seasonPack(3), seasonPack(4)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls).toHaveLength(MAX_SEARCH_ROUNDS);
+    expect(existsSync(join(fx.libraryDir, 'Show - S03E05.zh-Hans.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S04E05.zh-Hans.ass'))).toBe(false);
+  });
+
+  it('a give-up on a later round does not undo the site success an earlier round earned', async () => {
+    const fx = multiSeasonFixture(2);
+    const site = fx.ctx.config.subtitle.sites[0]!;
+    const profiles = new SiteProfiles(fx.ctx.db);
+    const zipPath = makeZip(seasonPack(1), 'round-1.zip');
+    let round = 0;
+
+    const deps: Parameters<typeof runSubtitleJob>[2] = {
+      searchSite: async () => {
+        round += 1;
+        profiles.upsert({ baseUrl: site.baseUrl });
+        if (round === 1) {
+          // What searchSite records on a download.
+          profiles.update(site.baseUrl, { lastWorkingTier: 'curl', lastSuccessAt: Date.now(), failCount: 0, lastFailureAt: null });
+          return { download: { filePath: zipPath, url: 'https://example.test/round-1.zip' }, transcript: [], outcome: 'downloaded' as const };
+        }
+        // What searchSite records when every rung comes up empty.
+        profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profiles.get(site.baseUrl)!.fail_count + 1 });
+        return { download: null, transcript: [], outcome: 'gave-up' as const };
+      },
+    };
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(round).toBe(2);
+    const profile = profiles.get(site.baseUrl)!;
+    expect(profile.fail_count).toBe(0);
+    expect(profile.last_failure_at).toBeNull();
+    expect(profile.last_working_tier).toBe('curl');
+  });
+
   it('alass unavailable -> skips alass, ffsubsync fallback lands in-sync -> placed via ffsubsync', async () => {
     const fx = subtitleFixture();
     fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
@@ -714,7 +852,10 @@ describe('runSubtitleJob', () => {
       reflectOnRun: reflectSpy(calls),
     });
 
-    expect(calls).toEqual([{ verifiedSuccess: true }]);
+    // Two rounds, because round 1 placed something and the episode still lacks zh-Hant:
+    // round 2 re-serves the same zh-Hans pack, the language gate drops every file in it, and
+    // the site ends there. Each round reflects on its own run.
+    expect(calls).toEqual([{ verifiedSuccess: true }, { verifiedSuccess: false }]);
   });
 
   it('a pack with no subtitle files in it -> subtitle.pack-empty at warn, nothing placed', async () => {

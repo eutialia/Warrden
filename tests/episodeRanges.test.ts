@@ -24,6 +24,28 @@ describe('describeEpisodeRanges', () => {
     expect(describeEpisodeRanges(episodes)).toBe(expected);
   });
 
+  it.each([
+    // Eight groups is the cap, so eight render in full with nothing appended.
+    [8, 'S1E1, S1E3, S1E5, S1E7, S1E9, S1E11, S1E13, S1E15'],
+    // The ninth group and everything after it collapse into a count of the episodes lost.
+    [9, 'S1E1, S1E3, S1E5, S1E7, S1E9, S1E11, S1E13, S1E15, +1 more episodes'],
+    [12, 'S1E1, S1E3, S1E5, S1E7, S1E9, S1E11, S1E13, S1E15, +4 more episodes'],
+  ])('%i isolated episodes -> at most eight groups', (count, expected) => {
+    const episodes = Array.from({ length: count }, (_, i) => ({ seasonNumber: 1, episodeNumber: i * 2 + 1 }));
+    expect(describeEpisodeRanges(episodes)).toBe(expected);
+  });
+
+  it('counts every episode behind the cap, not every group', () => {
+    // Nine groups: eight singles, then a run of five that must count as five episodes.
+    const episodes = [
+      ...Array.from({ length: 8 }, (_, i) => ({ seasonNumber: 1, episodeNumber: i * 2 + 1 })),
+      ...Array.from({ length: 5 }, (_, i) => ({ seasonNumber: 2, episodeNumber: i + 1 })),
+    ];
+    expect(describeEpisodeRanges(episodes)).toBe(
+      'S1E1, S1E3, S1E5, S1E7, S1E9, S1E11, S1E13, S1E15, +5 more episodes',
+    );
+  });
+
   it('does not join across a season boundary even when the numbers are consecutive', () => {
     expect(
       describeEpisodeRanges([

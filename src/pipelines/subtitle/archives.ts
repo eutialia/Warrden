@@ -6,7 +6,7 @@ import AdmZip from 'adm-zip';
 import { extract as tarExtract } from 'tar';
 import type { ArchiveCacheEntry } from '../../db/archiveCache.js';
 import { walkFiles } from '../../fs/files.js';
-import { parseEpisodeRefWithHint, parseLangTag } from '../ingest/sidecars.js';
+import { parseEpisodeRefWithHint, parseLangTagWithHint } from '../ingest/sidecars.js';
 
 const execFileAsync = promisify(execFile);
 const SUBTITLE_EXTENSIONS: readonly string[] = ['.srt', '.ass', '.ssa'];
@@ -254,12 +254,15 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
 /**
  * Pre-annotates each extracted file for the cache: its language tag, and the episode it
  * refers to. `rootDir` is the extraction root, so the directories between it and the file
- * can supply a season the filename itself omits (see `parseEpisodeRefWithHint`).
+ * can supply what the filename itself omits — a season (`parseEpisodeRefWithHint`) and, in
+ * packs that split one release into a folder per variant, the language
+ * (`parseLangTagWithHint`). Both hints read the same segment list, since both facts live in
+ * the same folder names.
  */
 export function entriesForFiles(files: string[], rootDir: string): ArchiveCacheEntry[] {
   return files.map((path) => {
     const name = basename(path);
     const segments = dirname(relative(rootDir, path)).split(sep).filter((s) => s.length > 0 && s !== '.');
-    return { path, lang: parseLangTag(name), episodeRef: parseEpisodeRefWithHint(name, segments) };
+    return { path, lang: parseLangTagWithHint(name, segments), episodeRef: parseEpisodeRefWithHint(name, segments) };
   });
 }

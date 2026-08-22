@@ -39,6 +39,16 @@ describe('buildSearchHints', () => {
     expect(buildSearchHints({ title: 'Show', languages: ['en'] }).missingSeasons).toEqual([]);
   });
 
+  it('defaults alreadyFetched to an empty list and carries it through when given', () => {
+    expect(buildSearchHints({ title: 'Show', languages: ['en'] }).alreadyFetched).toEqual([]);
+    const h = buildSearchHints({
+      title: 'Show',
+      languages: ['en'],
+      alreadyFetched: [{ url: 'https://a.test/pack.zip', title: 'Season 1 pack' }],
+    });
+    expect(h.alreadyFetched).toEqual([{ url: 'https://a.test/pack.zip', title: 'Season 1 pack' }]);
+  });
+
   it('keeps missingSeasons sorted by season with their per-season titles', () => {
     const h = buildSearchHints({
       title: 'Sword Art Online',
@@ -88,6 +98,24 @@ describe('formatSearchHintsForPrompt', () => {
       'Still missing: Season 1 (25 episodes), Season 3 (24 episodes, also known as "Sword Art Online - Alicization"), Season 4 (23 episodes, also known as "Sword Art Online - Alicization - War of Underworld").',
     );
     expect(text).toContain('A pack covering only some of these seasons is still worth downloading');
+  });
+
+  it('names the packs this run already fetched so a later round does not refetch them', () => {
+    const text = formatSearchHintsForPrompt(
+      buildSearchHints({
+        title: 'X',
+        languages: ['zh-Hans'],
+        alreadyFetched: [{ url: 'https://a.test/s1.zip', title: 'Season 1 pack' }, { url: 'https://a.test/s2.zip' }],
+      }),
+    );
+    expect(text).toContain(
+      'Already downloaded this run (do not fetch these again): "Season 1 pack" https://a.test/s1.zip, https://a.test/s2.zip.',
+    );
+  });
+
+  it('says nothing about already-fetched packs when none were passed', () => {
+    const text = formatSearchHintsForPrompt(buildSearchHints({ title: 'X', languages: ['en'] }));
+    expect(text).not.toContain('Already downloaded');
   });
 
   it('says nothing about seasons when none were passed', () => {

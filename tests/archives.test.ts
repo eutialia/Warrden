@@ -191,6 +191,29 @@ describe('entriesForFiles', () => {
     ]);
   });
 
+  it.each([
+    // The real pack shape: one folder per language variant under a release folder that
+    // advertises both, and filenames that carry no tag of their own.
+    ['\u7b80\u4f53', '[YYDM-11FANS][Sword Art Online II][04][C40793FD].ass', 'zh-Hans'],
+    ['\u7e41\u9ad4', '[YYDM-11FANS][Sword Art Online II][04][C40793FD].ass', 'zh-Hant'],
+  ])('takes the language from the %s folder when the filename carries none', (dir, name, expected) => {
+    const path = `/d/\u5f02\u57df/BD/[YYDM-11FANS][\u7b80\u7e41\u5916\u6302\u5b57\u5e55][01-24]/${dir}/${name}`;
+    expect(entriesForFiles([path], '/d').map((e) => e.lang)).toEqual([expected]);
+  });
+
+  it('reads a bracketed folder tag too, and lets the filename overrule the folder', () => {
+    const inFolder = '/d/DHR\u00d7\u767d\u6708/BD/\u7e41\u9ad4/[DHR][SUB][TC]/[DHR] Show - 04.ass';
+    expect(entriesForFiles([inFolder], '/d').map((e) => e.lang)).toEqual(['zh-Hant']);
+    // Same folder, a filename that names its own language: the file wins.
+    const tagged = '/d/DHR\u00d7\u767d\u6708/BD/\u7e41\u9ad4/[DHR][SUB][TC]/[DHR] Show - 04.YY-SC.ass';
+    expect(entriesForFiles([tagged], '/d').map((e) => e.lang)).toEqual(['zh-Hans']);
+  });
+
+  it('a folder claiming both variants keeps the scan going outward', () => {
+    const path = '/d/\u7b80\u4f53/[YYDM][\u7b80\u7e41\u5916\u6302\u5b57\u5e55][01-24]/[YYDM] Show - 04.ass';
+    expect(entriesForFiles([path], '/d').map((e) => e.lang)).toEqual(['zh-Hans']);
+  });
+
   it('fills a missing season from the directories above the file', () => {
     const path = '/d/[\u4e2d\u6587\u5b57\u5e55\u5168\u7248\u672c][\u5200\u5251\u795e\u57df \u7b2c\u4e8c\u5b63 Sword Art Online II][BD+TV][170512].7z.d/[Group][01].chs.ass';
     expect(entriesForFiles([path], '/d')).toEqual([

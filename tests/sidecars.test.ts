@@ -9,6 +9,8 @@ import {
   matchSidecarDeterministic,
   matchEpisodeRef,
   parseEpisodeRefWithHint,
+  parseLangHint,
+  parseLangTagWithHint,
   parseSeasonHint,
   sidecarStem,
 } from '../src/pipelines/ingest/sidecars.js';
@@ -132,6 +134,17 @@ describe('parseLangTag', () => {
     // part fansub groups happened to write first
     ['[Group] Title - 05 [JP_SC].ass', 'zh-Hans'],
     ['[Group] Title - 05 [JPN_TC].ass', 'zh-Hant'],
+    // A fansub group stamps its own prefix onto the trailing tag ('.YY-SC.ass'), and the
+    // half after the hyphen is the part that names a language. Casing must not matter
+    // here any more than it does anywhere else: '.YY-sc.ass' is the same tag.
+    ['[YYDM-11FANS][Sword Art Online II][04][C40793FD].YY-SC.ass', 'zh-Hans'],
+    ['[YYDM-11FANS][Sword Art Online II][04][C40793FD].YY-sc.ass', 'zh-Hans'],
+    ['[YYDM-11FANS][Sword Art Online II][04][C40793FD].YY-TC.ass', 'zh-Hant'],
+    // ...but the whole token is tried first, so a hyphenated key still resolves as itself
+    // rather than as its own suffix.
+    ['Show - S01E05.zh-Hant.ass', 'zh-Hant'],
+    // A hyphen in a title is not a tag: the suffix has to be a known token.
+    ['Show - S01E05.ass', null],
   ])('parseLangTag(%s) -> %s', (name, expected) => {
     expect(parseLangTag(name)).toBe(expected);
   });
@@ -273,6 +286,62 @@ describe('matchEpisodeRef', () => {
     expect(matchEpisodeRef(ref!, episodes)).toMatchObject({ id: 2, seasonNumber: 2, episodeNumber: 1 });
     // Without the hint the same basename is genuinely ambiguous.
     expect(matchSidecarDeterministic('[X][01].chs.ass', episodes)).toBeNull();
+  });
+});
+
+describe('parseLangHint', () => {
+  it.each([
+    // The pack layouts this exists for: one language folder per variant, sitting under the
+    // release folder that names both.
+    [['异域', 'BD', '[YYDM-11FANS][简繁外挂字幕][01-24]', '简体'], 'zh-Hans'],
+    [['异域', 'BD', '[YYDM-11FANS][简繁外挂字幕][01-24]', '繁體'], 'zh-Hant'],
+    [['DHR×白月', 'BD', '繁體', '[DHR][SUB][TC]'], 'zh-Hant'],
+    // Whole-segment forms.
+    [['简体'], 'zh-Hans'],
+    [['简中'], 'zh-Hans'],
+    [['简'], 'zh-Hans'],
+    [['SC'], 'zh-Hans'],
+    [['chs'], 'zh-Hans'],
+    [['GB'], 'zh-Hans'],
+    [['繁體'], 'zh-Hant'],
+    [['繁体'], 'zh-Hant'],
+    [['繁中'], 'zh-Hant'],
+    [['繁'], 'zh-Hant'],
+    [['TC'], 'zh-Hant'],
+    [['cht'], 'zh-Hant'],
+    [['BIG5'], 'zh-Hant'],
+    // Bracketed token inside a segment that says other things too.
+    [['[Group][BDRip][CHT]'], 'zh-Hant'],
+    // A folder claiming both variants adjudicates nothing, so the scan keeps going outward
+    // rather than flipping a coin.
+    [['简体', '简繁'], 'zh-Hans'],
+    [['繁體', '[YYDM][简繁外挂字幕][01-24]'], 'zh-Hant'],
+    [['简体', '简繁内封'], 'zh-Hans'],
+    [['简繁'], null],
+    // Nearest segment to the file wins.
+    [['繁體', '简体'], 'zh-Hans'],
+    // A segment naming nothing is skipped, not an answer.
+    [['简体', 'BD'], 'zh-Hans'],
+    // 'sc'/'gb' are far too common as substrings to read them out of a longer segment.
+    [['Discworld'], null],
+    [['[Group][720p]'], null],
+    [[], null],
+  ])('%j -> %s', (segments, expected) => {
+    expect(parseLangHint(segments)).toBe(expected);
+  });
+});
+
+describe('parseLangTagWithHint', () => {
+  it('takes the language from the enclosing folder when the basename carries no tag', () => {
+    expect(parseLangTagWithHint('[YYDM-11FANS][SAO II][04][C40793FD].ass', ['BD', '简体'])).toBe('zh-Hans');
+  });
+
+  it('the basename wins over a folder that says otherwise', () => {
+    expect(parseLangTagWithHint('[YYDM-11FANS][SAO II][04][C40793FD].YY-SC.ass', ['BD', '繁體'])).toBe('zh-Hans');
+  });
+
+  it('no tag anywhere stays null', () => {
+    expect(parseLangTagWithHint('[YYDM-11FANS][SAO II][04][C40793FD].ass', ['BD', '[01-24]'])).toBeNull();
   });
 });
 

@@ -31,7 +31,7 @@ import {
 import { assessDrift } from './drift.js';
 import { describeEpisodeRanges } from './episodeRanges.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
-import { buildSearchHints, type MissingSeason } from './queries.js';
+import { buildSearchHints, type FetchedPack, type MissingSeason } from './queries.js';
 import { findMissingSubtitles, langCovers } from './reconcile.js';
 
 /** Injectable seams for `runSubtitleJob` — same injectable-factory pattern as `searchSite`'s
@@ -782,8 +782,15 @@ function placeSubtitle(
   return effectiveLang;
 }
 
-/** Site-search pass: for each configured site in order, search + download, extract, cache,
- * match, and drift-gate/place — stopping as soon as nothing is missing. */
+/** How many search rounds one site gets per job. A pack usually covers one season, so a
+ * four-season series needs the agent back on the same site more than once — but a site that
+ * keeps yielding is also a site that could soak up the whole job, and three rounds is enough
+ * to clear the common two-or-three-cour case without letting one target run away. */
+export const MAX_SEARCH_ROUNDS = 3;
+
+/** Site-search pass: for each configured site in order, up to `MAX_SEARCH_ROUNDS` rounds of
+ * search + download, extract, cache, match, and drift-gate/place (see `searchSiteRounds`) —
+ * stopping as soon as nothing is missing. */
 async function siteSearchPass(
   ctx: AppContext,
   job: JobRow,
@@ -793,8 +800,6 @@ async function siteSearchPass(
   cache: ArchiveCache,
   deps: RunSubtitleDeps,
 ): Promise<void> {
-  const search = deps.searchSite ?? searchSite;
-  const reflect = deps.reflectOnRun ?? reflectOnRun;
   const sites = ctx.config.subtitle.sites;
   if (sites.length === 0) return; // missing-resolution emissions happen back in runSubtitleJob
 
@@ -802,17 +807,6 @@ async function siteSearchPass(
 
   for (const site of sites) {
     if (missing.length === 0) break;
-
-    // Rebuilt per site rather than once: a pack from the previous site may have covered a
-    // season, and the next site should be told what is actually left rather than what was
-    // left when the pass started.
-    const hints = buildSearchHints({
-      title: meta.title,
-      languages: ctx.config.subtitle.languages,
-      preferredGroups: ctx.config.subtitle.preferredGroups,
-      alternates: meta.alternates,
-      missingSeasons: job.target_kind === 'movie' ? [] : summarizeMissingSeasons(missing, meta.seasonTitles),
-    });
 
     // A disabled site simply doesn't exist for this pass: no run, no reflection, no
     // cooldown touch, and no event of its own — the human already saw the evidence when
@@ -822,11 +816,58 @@ async function siteSearchPass(
     const profile = profiles.get(site.baseUrl);
     if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
 
+    await searchSiteRounds(ctx, job, site, meta, missing, state, cache, deps, profiles);
+  }
+}
+
+/**
+ * Every round one site gets this job. A round is a whole `searchSite` call — its own
+ * `subtitle_runs` row, its own agent loop, its own reflection — and the site gets another
+ * one as long as the last round actually placed a file and something is still missing, up to
+ * `MAX_SEARCH_ROUNDS`. That is what turns "one pack per site per job" into "keep pulling from
+ * a site that is working": a pack covering S1+S2 used to end the job with S3 and S4
+ * untouched.
+ *
+ * A round that ends without a download, or that downloads and places nothing, ends the site:
+ * both mean this site has stopped producing for this target, and the next round would replay
+ * the same search at full step budget for the same result.
+ */
+async function searchSiteRounds(
+  ctx: AppContext,
+  job: JobRow,
+  site: SubtitleSiteConfig,
+  meta: TargetMeta,
+  missing: EpisodeTarget[],
+  state: RunState,
+  cache: ArchiveCache,
+  deps: RunSubtitleDeps,
+  profiles: SiteProfiles,
+): Promise<void> {
+  const search = deps.searchSite ?? searchSite;
+  const reflect = deps.reflectOnRun ?? reflectOnRun;
+  const alreadyFetched: FetchedPack[] = [];
+
+  for (let round = 0; round < MAX_SEARCH_ROUNDS; round++) {
+    if (missing.length === 0) break;
+
+    // Rebuilt per round, not per site and certainly not once per pass: a pack from the
+    // previous round (or the previous site) may have covered a season, and this round should
+    // be told what is actually left — plus what it has already pulled from this site, so it
+    // spends its steps on something new.
+    const hints = buildSearchHints({
+      title: meta.title,
+      languages: ctx.config.subtitle.languages,
+      preferredGroups: ctx.config.subtitle.preferredGroups,
+      alternates: meta.alternates,
+      missingSeasons: job.target_kind === 'movie' ? [] : summarizeMissingSeasons(missing, meta.seasonTitles),
+      alreadyFetched,
+    });
+
     const result = await search(ctx, job, site, hints, state.rawDir);
     // A cooldown means the site never ran at all this job — nothing happened worth writing
     // to its notes file. Every other outcome (a download that placed nothing, an archive
     // that failed to extract, a give-up, a hard failure) is a completed run and reflects.
-    if (result.outcome === 'cooldown') continue;
+    if (result.outcome === 'cooldown') return;
 
     const today = new Date(Date.now()).toISOString().slice(0, 10);
     let verifiedSuccess = false;
@@ -855,6 +896,34 @@ async function siteSearchPass(
     if (reflection?.verdict === 'unusable') {
       raiseUnusable(ctx, job, site, reflection.reason, result.transcript);
     }
+
+    const earlierRoundDownloaded = alreadyFetched.length > 0;
+    if (result.download) {
+      alreadyFetched.push({ url: result.download.url, ...packTitleFromUrl(result.download.url) });
+    }
+    if (!verifiedSuccess) {
+      // The site is done for this target. If an earlier round DID download, that is the
+      // fact worth remembering: a round that came up empty has just been booked by
+      // `searchSite` as a site failure (fail_count up, last_failure_at set), which would put
+      // a site that worked twice today into cooldown for the next job. Restore what its own
+      // successful round left behind. last_working_tier and last_success_at survive a
+      // failure untouched, so only these two need putting back.
+      if (earlierRoundDownloaded) profiles.update(site.baseUrl, { failCount: 0, lastFailureAt: null });
+      return;
+    }
+  }
+}
+
+/** The pack's own name as the agent would read it back: the URL's last path segment,
+ * percent-decoded. Spread into a `FetchedPack`, so a URL whose tail names nothing (a
+ * directory, a bare query) contributes no `title` key at all rather than an empty one. */
+function packTitleFromUrl(url: string): { title?: string } {
+  const tail = (url.split(/[?#]/)[0] ?? '').split('/').pop() ?? '';
+  if (tail.length === 0) return {};
+  try {
+    return { title: decodeURIComponent(tail) };
+  } catch {
+    return { title: tail };
   }
 }
 

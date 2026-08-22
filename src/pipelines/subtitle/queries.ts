@@ -17,6 +17,14 @@ export interface MissingSeason {
   titles: string[];
 }
 
+/** One pack this job already pulled from this site. Carried into the next round's prompt so
+ * the agent spends its steps on something new instead of re-fetching what it just had. */
+export interface FetchedPack {
+  url: string;
+  /** The pack's own name, when the URL carries one worth showing. */
+  title?: string;
+}
+
 export interface SearchHints {
   /** Primary title (arr canonical). Always the first query the agent should try. */
   title: string;
@@ -30,6 +38,9 @@ export interface SearchHints {
   preferCjkQueries: boolean;
   /** Seasons still uncovered when this search starts, lowest first. Empty for a movie. */
   missingSeasons: MissingSeason[];
+  /** Packs already downloaded from this site earlier in the same job. Empty on the first
+   * round. */
+  alreadyFetched: FetchedPack[];
 }
 
 /** Primary-subtag check: zh, zh-Hans, zh-Hant, yue, … */
@@ -49,6 +60,7 @@ export function buildSearchHints(input: {
   preferredGroups?: string[];
   alternates?: string[];
   missingSeasons?: MissingSeason[];
+  alreadyFetched?: FetchedPack[];
 }): SearchHints {
   const title = input.title.trim();
   const seen = new Set<string>([title.toLowerCase()]);
@@ -70,6 +82,7 @@ export function buildSearchHints(input: {
     preferredGroups,
     preferCjkQueries: languages.some(languageLooksChinese),
     missingSeasons: [...(input.missingSeasons ?? [])].sort((a, b) => a.seasonNumber - b.seasonNumber),
+    alreadyFetched: [...(input.alreadyFetched ?? [])],
   };
 }
 
@@ -100,6 +113,10 @@ export function formatSearchHintsForPrompt(hints: SearchHints): string {
     parts.push(
       'A pack covering only some of these seasons is still worth downloading; after it, keep searching for the remaining seasons under their own titles.',
     );
+  }
+  if (hints.alreadyFetched.length > 0) {
+    const packs = hints.alreadyFetched.map((p) => (p.title ? `"${p.title}" ${p.url}` : p.url));
+    parts.push(`Already downloaded this run (do not fetch these again): ${packs.join(', ')}.`);
   }
   if (hints.preferCjkQueries) {
     parts.push(
