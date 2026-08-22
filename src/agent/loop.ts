@@ -37,7 +37,7 @@ export const AgentActionSchema = z.object({
  * what separates a "nothing exists yet" give-up after two steps from a run that spent its
  * whole budget. `exhausted` always spent `maxSteps`.
  */
-export type AgentOutcome = { steps: number } & (
+type AgentOutcome = { steps: number } & (
   | { kind: 'downloaded'; filePath: string; url: string; searchUrl: string | null }
   | { kind: 'exhausted' }
   /** `reason` is the model's own sentence, or `NO_REASON` when it gave none. */

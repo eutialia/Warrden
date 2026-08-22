@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import { searchSite } from '../../agent/run.js';
+import { searchSite, type SiteRunResult } from '../../agent/run.js';
 import { reflectOnRun } from '../../agent/siteReflection.js';
 import type { AppContext } from '../../context.js';
 import { siteKey, siteLabel } from '../../config/siteLabel.js';
@@ -1035,14 +1035,20 @@ async function siteSearchPass(
   const cached = cachedPacks(cache, job);
 
   const fresh = isFreshGap(gaps, Date.now(), FRESH_DAYS);
-  if (fresh) {
+  // Emitted on the first site actually attempted, not up front: a pass where every site is
+  // disabled or on cooldown scoped nothing down, and saying so is a line about a search that
+  // never happened.
+  let scopedAnnounced = false;
+  const announceScoped = (): void => {
+    if (!fresh || scopedAnnounced) return;
+    scopedAnnounced = true;
     ctx.events.append({
       kind: 'subtitle.search-scoped',
       jobId: job.id,
       message: `${meta.title}: every missing episode aired within ${FRESH_DAYS} days; one quick look per site`,
       data: targetEventData(job, { freshDays: FRESH_DAYS, episodes: uncovered(gaps).length }),
     });
-  }
+  };
 
   for (const site of sites) {
     if (uncovered(gaps).length === 0) break;
@@ -1055,6 +1061,7 @@ async function siteSearchPass(
     const profile = profiles.get(site.baseUrl);
     if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
 
+    announceScoped();
     await searchSiteRounds(ctx, job, site, meta, gaps, state, cache, deps, profiles, cached, fresh);
   }
 }
@@ -1169,7 +1176,9 @@ async function searchSiteRounds(
     // true — a contradiction (the model says the site can't be automated, on a run that
     // just proved it could), but the model's own verdict is the thing being reported to a
     // human, not second-guessed here.
-    const reflection = await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today });
+    const reflection = worthReflectingOn(fresh, result)
+      ? await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today })
+      : null;
     if (reflection?.verdict === 'unusable') {
       raiseUnusable(ctx, job, site, reflection.reason, result.transcript);
     }
@@ -1189,6 +1198,22 @@ async function searchSiteRounds(
     alreadyFetched.push({ url: result.download.url, ...packTitleFromUrl(result.download.url) });
   }
 }
+
+/**
+ * Whether a completed round has anything to teach the site's notes file. Everything does,
+ * except one shape: a fresh-gap round that looked, spent barely any steps, and came back
+ * empty. "Searched once, nothing there, it aired yesterday" is a fact about the calendar,
+ * and reflection is a paid round trip per site per job. A round that broke or went malformed
+ * still reflects however short it was — that one IS about the site.
+ */
+function worthReflectingOn(fresh: boolean, result: SiteRunResult): boolean {
+  if (!fresh || result.download !== null) return true;
+  if (result.outcome === 'error') return true;
+  return result.steps >= MIN_REFLECTABLE_STEPS;
+}
+
+/** Below this many steps a fruitless fresh-gap round is just "the site had nothing listed". */
+const MIN_REFLECTABLE_STEPS = 3;
 
 /** The pack's own name as the agent would read it back: the URL's last path segment,
  * percent-decoded. Spread into a `FetchedPack`, so a URL whose tail names nothing (a

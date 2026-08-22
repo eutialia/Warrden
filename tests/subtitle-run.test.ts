@@ -1444,6 +1444,63 @@ describe('runSubtitleJob — fresh gaps', () => {
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
   });
 
+  it('says nothing about scoping the pass down when no site is attempted at all', async () => {
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    new SiteProfiles(fx.ctx.db).upsert({ baseUrl: 'https://acg.rip' });
+    new SiteProfiles(fx.ctx.db).update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'bot wall' });
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
+  });
+
+  // "Searched once, found nothing, it aired yesterday" teaches the notes file nothing, and
+  // reflection is a paid round trip per site per job.
+  it('skips reflection for a fresh round that gave up in a couple of steps', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], steps: 2, outcome: 'gave-up' as const }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  it('still reflects on a fresh round that spent real steps', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], steps: 3, outcome: 'gave-up' as const }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: false }]);
+  });
+
+  // A round that broke IS worth a note, however short it was: that is a fact about the site.
+  it('still reflects on a fresh round that ended in an error', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], steps: 1, outcome: 'error' as const }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: false }]);
+  });
+
   it('passes the round number and its ceiling to every round', async () => {
     const fx = multiSeasonFixture(2);
     const { options, deps } = optionRoundStub([seasonPack(1), seasonPack(2)]);
