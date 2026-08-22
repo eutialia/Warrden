@@ -111,8 +111,9 @@ export const ConfigSchema = z
       }),
     subtitle: z
       .object({
-        // Target languages, most-wanted first (e.g. ['zh-Hans', 'zh-Hant']). An episode
-        // "has subs" when it carries EVERY one of these as an embedded or external track.
+        // Target languages, most-wanted first (e.g. ['zh-Hans', 'zh-Hant']). An episode is
+        // covered when it carries ANY one of these as an embedded or external track; a run
+        // still collects every one it can find.
         languages: z.array(z.string().min(1)).default(() => []),
         // Trailing edge of the ingest -> subtitle handoff, in minutes. Importing four
         // seasons of one series fires four ingest follow-ups (plus reconcile's own), and

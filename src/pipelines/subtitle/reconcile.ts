@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import type { MediaStream, MediaTools } from '../../media/tools.js';
-import { parseLangTag, sidecarStem } from '../ingest/sidecars.js';
+import { sidecarStem } from '../ingest/sidecars.js';
 
 export interface VideoEntry {
   // Kept exported: tests build VideoEntry[] fixtures against this shape.
@@ -9,10 +9,11 @@ export interface VideoEntry {
   episodeId?: number;
 }
 
-interface MissingSubtitle {
+export interface SubtitleGap {
   videoPath: string;
   episodeId?: number;
-  languages: string[]; // still-missing target languages
+  lacking: string[]; // configured tags this video does not carry, in config order
+  covered: boolean; // at least one configured tag is present
   embeddedRefs: { streamIndex: number; lang: string | null }[]; // embedded subs usable as drift reference
 }
 
@@ -46,16 +47,57 @@ export function rankReferenceStreams(streams: MediaStream[]): { streamIndex: num
     .map(({ s }) => ({ streamIndex: s.index, lang: s.language }));
 }
 
-/** Primary-subtag + full-tag match, case-insensitive: config 'zh-Hans' covers stream tags
- * 'zh-hans' and 'zh', but NOT 'zh-Hant'. ffprobe tags are ISO codes, so no fansub-token
- * normalization here — that's parseLangTag's job, and only on filenames. Exported so the
- * pipeline runner can apply the same coverage rule when deciding whether a just-placed
- * candidate actually filled a still-missing language. */
+/** Exact tag equality, case-insensitive: 'zh-Hans' is covered by 'zh-hans' and by nothing
+ * else — not by 'zh', not by 'zh-Hant', not by 'chi'. A generic Chinese tag says nothing
+ * about the script, and treating it as Simplified is how a Traditional track ends up filed
+ * as the language the operator asked for. Exported so the pipeline runner can apply the same
+ * rule when deciding whether a just-placed candidate filled a language the episode lacked. */
 export function langCovers(want: string, have: string | null): boolean {
   if (have === null) return false;
-  const w = want.toLowerCase();
-  const h = have.toLowerCase();
-  return h === w || h === w.split('-')[0] || w === h.split('-')[0];
+  return want.toLowerCase() === have.toLowerCase();
+}
+
+/** Segments that are a track attribute rather than a language. `hi` is absent on purpose:
+ * it is Hindi when it stands alone and hearing-impaired when it sits beside a language. */
+const FLAG_SEGMENTS = new Set(['default', 'forced', 'foreign', 'sdh', 'cc']);
+
+/** The only language tags Jellyfin recognizes beyond bare ISO codes, and the casing it
+ * writes them in. Bare `zh`/`chi`/`zho` stay generic Chinese. */
+const SCRIPT_TAGS = new Map([
+  ['zh-hans', 'zh-Hans'],
+  ['zh-hant', 'zh-Hant'],
+  ['zh-cn', 'zh-CN'],
+  ['zh-tw', 'zh-TW'],
+  ['zh-hk', 'zh-HK'],
+]);
+
+/**
+ * The language of an external subtitle file as Jellyfin reads it (ExternalPathParser): the
+ * dot-separated segments between the video stem and the extension, each judged on its own
+ * and in any order. A segment is a language when it is a two- or three-letter ISO code or
+ * one of the `zh-*` script tags; `default`/`forced`/`foreign`/`sdh`/`cc` are flags and
+ * anything else is a title. Returns the first language segment in canonical casing, or null.
+ *
+ * No ISO code table rides along: a three-letter segment is taken at face value, which at
+ * worst yields a tag that matches no configured language — exactly what an unrecognized
+ * segment would have done anyway. Fansub tokens (`chs`, `cht`) are deliberately NOT
+ * translated: this is the library side, and the library is Jellyfin's to read.
+ */
+export function parseSidecarLanguage(filename: string): string | null {
+  const segments = filename.split('.').slice(1, -1);
+  let sawHi = false;
+  for (const segment of segments) {
+    const s = segment.toLowerCase();
+    const script = SCRIPT_TAGS.get(s);
+    if (script !== undefined) return script;
+    if (s === 'hi') {
+      sawHi = true;
+      continue;
+    }
+    if (FLAG_SEGMENTS.has(s)) continue;
+    if (/^[a-z]{2}$/.test(s) || /^[a-z]{3}$/.test(s)) return s;
+  }
+  return sawHi ? 'hi' : null;
 }
 
 /** Same-stem sibling subtitle files for a video, e.g. 'Show - S01E05.zh-Hans.ass'.
@@ -73,11 +115,13 @@ function externalSubsFor(videoPath: string): string[] {
 
 /**
  * The subtitle pipeline's reconcile: for every video the arr knows about, decide which
- * target languages it still lacks — covered means an embedded ffprobe stream OR a same-stem
- * external sibling carries that language. Videos already fully covered are dropped from the
- * result entirely; the agent only ever hears about actual gaps. `embeddedRefs` rides along
- * so the drift gate can extract a reference track later without re-probing, ranked by
- * `rankReferenceStreams` because the gate only ever reads the first entry.
+ * configured language tags it still lacks (an embedded ffprobe stream or a same-stem
+ * external sibling carrying the tag) and whether any one of them is present at all.
+ * `covered` is what "this video has subtitles" means — one tag is enough — while `lacking`
+ * is what a run passing by can still collect. A video carrying every configured tag is
+ * dropped from the result entirely. `embeddedRefs` rides along so the drift gate can extract
+ * a reference track later without re-probing, ranked by `rankReferenceStreams` because the
+ * gate only ever reads the first entry.
  *
  * `absent` collects the videos that were not on disk at all. They are not gaps and not
  * failures here, but the caller needs them: a whole target coming back absent means the
@@ -87,10 +131,10 @@ export async function findMissingSubtitles(input: {
   videos: VideoEntry[];
   languages: string[];
   media: MediaTools;
-}): Promise<{ missing: MissingSubtitle[]; absent: string[] }> {
+}): Promise<{ videos: SubtitleGap[]; absent: string[] }> {
   const { videos, languages, media } = input;
-  if (languages.length === 0) return { missing: [], absent: [] };
-  const missing: MissingSubtitle[] = [];
+  if (languages.length === 0) return { videos: [], absent: [] };
+  const gaps: SubtitleGap[] = [];
   const absent: string[] = [];
 
   for (const video of videos) {
@@ -106,7 +150,7 @@ export async function findMissingSubtitles(input: {
     }
     const streams = await media.probeStreams(video.videoPath);
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
-    const externalLangs = externalSubsFor(video.videoPath).map((p) => parseLangTag(basename(p)));
+    const externalLangs = externalSubsFor(video.videoPath).map((p) => parseSidecarLanguage(basename(p)));
 
     const lacking = languages.filter((lang) => {
       const embeddedHit = embedded.some((s) => langCovers(lang, s.language));
@@ -115,13 +159,14 @@ export async function findMissingSubtitles(input: {
     });
 
     if (lacking.length > 0) {
-      missing.push({
+      gaps.push({
         videoPath: video.videoPath,
         episodeId: video.episodeId,
-        languages: lacking,
+        lacking,
+        covered: lacking.length < languages.length,
         embeddedRefs: rankReferenceStreams(embedded),
       });
     }
   }
-  return { missing, absent };
+  return { videos: gaps, absent };
 }
