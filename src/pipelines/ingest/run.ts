@@ -14,6 +14,7 @@ import { PlacedFiles, type PlacedFileRow } from '../../db/placedFiles.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy, walkFiles } from '../../fs/files.js';
 import { mapArrPath, type PathMapping } from '../../fs/paths.js';
+import { subtitleDebounceMs } from '../../jobs/debounce.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import { traceArrClient } from '../../arr/traced.js';
 import type { JobRow, TargetKind } from '../../jobs/queue.js';
@@ -22,6 +23,7 @@ import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { assertMounted } from '../mounts.js';
 import { placeBlocked } from '../placeGuard.js';
+import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../settle.js';
 import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from './queueState.js';
@@ -29,8 +31,6 @@ import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindF
 import { effectiveDownloadRoots } from '../../config/storage.js';
 import { resolveSourceDirsDetailed } from './sources.js';
 
-export const SETTLE_RETRY_MS = 2 * 60_000;
-export const SETTLE_DEADLINE_MS = 24 * 60 * 60_000;
 /** How long a job must have existed before a `'stuck'` assessment is allowed to rescue.
  * Sonarr routinely carries stale `statusMessages` (hence `trackedDownloadStatus: 'warning'`)
  * on an `importPending` record it is seconds away from importing itself, so a stuck verdict
@@ -226,12 +226,18 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
   // (queue.ts's singleton rule), so a manual trigger and this automatic trigger race
   // cleanly. `source: 'ingest'` lets the subtitle runner (and any attention/retry that
   // links back) tell automatic runs from a manual dashboard one.
+  //
+  // `notBefore` is the trailing edge of the debounce: coalescing onto a pending twin resets
+  // its `not_before` to this enqueue's own value, so importing season after season keeps
+  // pushing the one pending subtitle job further out instead of paying for a browser
+  // session per season.
   const followUp = ctx.queue.enqueue({
     pipeline: 'subtitle',
     targetKind: job.target_kind,
     targetId: job.target_id,
     arrInstance: job.arr_instance,
     payload: { source: 'ingest' },
+    notBefore: Date.now() + subtitleDebounceMs(ctx.config),
   });
   // The trigger entry belongs to the NEW subtitle job's trace, not this one: it's the
   // "why does this job exist" row the debug view reads.

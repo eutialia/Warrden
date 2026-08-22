@@ -140,6 +140,21 @@ export class JobQueue {
     return row !== undefined;
   }
 
+  /** When this exact target last had a job of `pipeline` finish successfully, as an epoch
+   * ms `updated_at`, or `null` when it never has. Unlike `hasJobFor`'s any-status, any-time
+   * match, this is time-scoped: a caller holding a timestamped record of its own (an arr
+   * history entry) can ask whether a completed run already covered it, without a long-done
+   * first run silencing every later record for that target forever. */
+  lastCompletedAt(pipeline: PipelineName, arrInstance: string, targetKind: TargetKind, targetId: number): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(updated_at) AS at FROM jobs
+         WHERE pipeline = ? AND arr_instance = ? AND target_kind = ? AND target_id = ? AND status = 'done'`,
+      )
+      .get(pipeline, arrInstance, targetKind, targetId) as { at: number | null };
+    return row.at;
+  }
+
   claim(now: number = Date.now()): JobRow | null {
     const row = this.db
       .prepare(
@@ -154,7 +169,13 @@ export class JobQueue {
     return row ? parseRow(row) : null;
   }
 
-  complete(id: number, result?: object): { requeued: boolean } {
+  /**
+   * Marks a running job `done`. When a duplicate enqueue flagged it `dirty` mid-run, the
+   * requeued twin lands at `opts.requeueNotBefore` (default 0, immediately claimable) —
+   * that is the trailing edge for a debounced pipeline: triggers that arrived while the run
+   * was in flight get one more run, but not before the debounce window has passed.
+   */
+  complete(id: number, result?: object, opts?: { requeueNotBefore?: number }): { requeued: boolean } {
     const now = Date.now();
     const tx = this.db.transaction((): { requeued: boolean } => {
       const job = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id) as JobRowRaw | undefined;
@@ -172,15 +193,15 @@ export class JobQueue {
       this.db
         .prepare(
           `INSERT INTO jobs (pipeline, target_kind, target_id, arr_instance, payload, not_before, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(job.pipeline, job.target_kind, job.target_id, job.arr_instance, job.payload, now, now);
+        .run(job.pipeline, job.target_kind, job.target_id, job.arr_instance, job.payload, opts?.requeueNotBefore ?? 0, now, now);
       return { requeued: true };
     });
     return tx();
   }
 
-  fail(id: number, err: string, opts?: { retryInMs?: number; maxAttempts?: number }): { retried: boolean } {
+  fail(id: number, err: string, opts?: { retryInMs?: number; maxAttempts?: number; requeueNotBefore?: number }): { retried: boolean } {
     const maxAttempts = opts?.maxAttempts ?? 3;
     const now = Date.now();
     const tx = this.db.transaction((): { retried: boolean } => {
@@ -220,9 +241,9 @@ export class JobQueue {
         this.db
           .prepare(
             `INSERT INTO jobs (pipeline, target_kind, target_id, arr_instance, payload, not_before, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(job.pipeline, job.target_kind, job.target_id, job.arr_instance, job.payload, now, now);
+          .run(job.pipeline, job.target_kind, job.target_id, job.arr_instance, job.payload, opts?.requeueNotBefore ?? 0, now, now);
       }
       return { retried: false };
     });

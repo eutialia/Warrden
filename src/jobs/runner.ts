@@ -1,6 +1,7 @@
 import type { AppContext } from '../context.js';
 import { targetEventData } from '../events/target.js';
 import { errorMessage } from '../util/errors.js';
+import { subtitleDebounceMs } from './debounce.js';
 import { isPermanentError, RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
 
@@ -55,7 +56,7 @@ export function startRunner(
 
       try {
         await handler(ctx, job);
-        ctx.queue.complete(job.id);
+        ctx.queue.complete(job.id, undefined, requeueOpts(ctx, job));
       } catch (err) {
         if (err instanceof RescheduleError) {
           ctx.queue.reschedule(job.id, err.delayMs);
@@ -84,11 +85,20 @@ export function startRunner(
   return () => clearInterval(interval);
 }
 
+/** The trailing edge for a dirty twin `complete()` is about to requeue. Only the subtitle
+ * pipeline debounces: a trigger that landed while a browser session was already running
+ * deserves a fresh run, but not immediately after the one it raced — the imports that fired
+ * it are usually still arriving. Every other pipeline requeues immediately, as before. */
+function requeueOpts(ctx: AppContext, job: JobRow): { requeueNotBefore: number } | undefined {
+  if (job.pipeline !== 'subtitle') return undefined;
+  return { requeueNotBefore: Date.now() + subtitleDebounceMs(ctx.config) };
+}
+
 function failJob(ctx: AppContext, job: JobRow, message: string, permanent: boolean): void {
   // `maxAttempts: 1` makes this very attempt the last one: a permanent error (a provider
   // 4xx, a prompt the SDK refuses) fails identically on every retry, so the two extra runs
   // would only cost two more full indexer sweeps before landing on the same attention row.
-  const { retried } = ctx.queue.fail(job.id, message, permanent ? { maxAttempts: 1 } : undefined);
+  const { retried } = ctx.queue.fail(job.id, message, { ...(permanent ? { maxAttempts: 1 } : {}), ...requeueOpts(ctx, job) });
   ctx.events.append({
     kind: 'job.failed',
     level: 'warn',

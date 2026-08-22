@@ -69,6 +69,34 @@ describe('JobQueue', () => {
     expect(q.get(first.id!)!.not_before).toBe(0);
     expect(q.claim(0)).not.toBeNull(); // immediately claimable now, backoff overridden
   });
+  it('coalescing onto a pending twin pushes not_before OUT when the new enqueue asks for a later one — the trailing edge a debounced pipeline runs on', () => {
+    const first = q.enqueue({ ...target, notBefore: 1_000 });
+    const second = q.enqueue({ ...target, notBefore: 9_000 });
+    expect(second.outcome).toBe('coalesced');
+    expect(second.id).toBe(first.id);
+    expect(q.get(first.id!)!.not_before).toBe(9_000);
+    expect(q.claim(5_000)).toBeNull(); // the earlier deadline no longer applies
+    expect(q.claim(9_000)).not.toBeNull();
+  });
+
+  it('the dirty requeue honours requeueNotBefore, so a trigger that raced a running job waits out the debounce too', () => {
+    q.enqueue(target);
+    const job = q.claim()!;
+    q.enqueue(target); // marked dirty mid-run
+    expect(q.complete(job.id, undefined, { requeueNotBefore: 8_000 }).requeued).toBe(true);
+
+    expect(q.claim(7_999)).toBeNull();
+    expect(q.claim(8_000)).not.toBeNull();
+  });
+
+  it('the dirty requeue defaults to immediately claimable when no requeueNotBefore is given', () => {
+    q.enqueue(target);
+    const job = q.claim()!;
+    q.enqueue(target);
+    expect(q.complete(job.id).requeued).toBe(true);
+    expect(q.claim(0)).not.toBeNull();
+  });
+
   it.each([
     { attempts: 1, retried: true },
     { attempts: 2, retried: true },
@@ -137,6 +165,38 @@ describe('JobQueue', () => {
       const job = q.claim()!;
       q.fail(job.id, 'boom', { retryInMs: 2_000 });
       expect(q.get(job.id)!.not_before).toBe(5_000 + 2_000);
+    });
+  });
+
+  describe('lastCompletedAt()', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('is null until a job for that exact target is done, then reports the newest done row\'s updated_at', () => {
+      expect(q.lastCompletedAt('acquire', target.arrInstance, target.targetKind, target.targetId)).toBeNull();
+
+      vi.setSystemTime(4_000);
+      q.enqueue(target);
+      const first = q.claim()!;
+      expect(q.lastCompletedAt('acquire', target.arrInstance, target.targetKind, target.targetId)).toBeNull(); // running is not done
+      q.complete(first.id);
+      expect(q.lastCompletedAt('acquire', target.arrInstance, target.targetKind, target.targetId)).toBe(4_000);
+
+      vi.setSystemTime(9_000);
+      q.enqueue(target);
+      q.complete(q.claim()!.id);
+      expect(q.lastCompletedAt('acquire', target.arrInstance, target.targetKind, target.targetId)).toBe(9_000);
+    });
+
+    it('is scoped to the exact (pipeline, instance, kind, id) — a done job for a neighbouring target says nothing', () => {
+      vi.setSystemTime(4_000);
+      q.enqueue(target);
+      q.complete(q.claim()!.id);
+
+      expect(q.lastCompletedAt('ingest', target.arrInstance, target.targetKind, target.targetId)).toBeNull();
+      expect(q.lastCompletedAt('acquire', 'sonarr-2', target.targetKind, target.targetId)).toBeNull();
+      expect(q.lastCompletedAt('acquire', target.arrInstance, 'movie', target.targetId)).toBeNull();
+      expect(q.lastCompletedAt('acquire', target.arrInstance, target.targetKind, 43)).toBeNull();
     });
   });
 

@@ -496,6 +496,33 @@ describe('reconcile', () => {
       expect(jobs[0]).toMatchObject({ target_kind: 'series', target_id: 1, payload: { source: 'reconcile' } });
     });
 
+    it.each([
+      { when: 'at or before', offsetMs: -60_000, pending: 0 },
+      { when: 'after', offsetMs: 60_000, pending: 1 },
+    ])(
+      'a fresh record dated $when the target\'s last completed ingest -> $pending pending ingest job(s)',
+      async ({ offsetMs, pending }) => {
+        const client = fakeArrClient({ series: [series(1)] });
+        const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
+        client.listRecentImports = async () => [historyRecord({ id: 1, seriesId: 1 })];
+        await reconcile(ctx); // bootstrap: cursor -> 1
+
+        // The webhook path's own ingest job for this target, already run to completion.
+        const swept = ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 1, arrInstance: 'sonarr' });
+        ctx.queue.claim();
+        ctx.queue.complete(swept.id!);
+        const sweptAt = ctx.queue.get(swept.id!)!.updated_at;
+
+        client.listRecentImports = async () => [
+          historyRecord({ id: 2, seriesId: 1, date: new Date(sweptAt + offsetMs).toISOString() }),
+        ];
+        await reconcile(ctx);
+
+        expect(ctx.queue.list().filter((j) => j.pipeline === 'ingest' && j.status === 'pending')).toHaveLength(pending);
+        expect(new SyncState(ctx.db).read('history:sonarr')).toBe(2); // the cursor advances either way
+      },
+    );
+
     it('a record with neither seriesId nor movieId is skipped', async () => {
       const client = fakeArrClient({ series: [series(1)] });
       const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });

@@ -114,6 +114,12 @@ export const ConfigSchema = z
         // Target languages, most-wanted first (e.g. ['zh-Hans', 'zh-Hant']). An episode
         // "has subs" when it carries EVERY one of these as an embedded or external track.
         languages: z.array(z.string().min(1)).default(() => []),
+        // Trailing edge of the ingest -> subtitle handoff, in minutes. Importing four
+        // seasons of one series fires four ingest follow-ups (plus reconcile's own), and
+        // each subtitle job is a whole browser session, so every follow-up pushes the
+        // pending job's wake-up out again and one run covers the lot. Manual triggers and
+        // attention retries ignore it. `0` disables the wait.
+        debounceMinutes: z.number().int().min(0).default(10),
         // Soft rank boost for fansub/release groups when browsing packs — never exclusive;
         // if none of these appear, the agent keeps searching other groups (design decision
         // log 2026-08-08). Same spirit as acquire pins, but not a hard filter.

@@ -24,6 +24,32 @@ describe('startRunner', () => {
     expect(ctx.queue.get(id!)!.status).toBe('done');
   });
 
+  it.each([
+    { pipeline: 'subtitle' as const, debounced: true },
+    { pipeline: 'acquire' as const, debounced: false },
+  ])(
+    '$pipeline: a twin that arrived mid-run is requeued debounced=$debounced — only the subtitle pipeline parks its requeue on the trailing edge',
+    async ({ pipeline, debounced }) => {
+      const ctx = makeCtx();
+      const debounceMs = ctx.config.subtitle.debounceMinutes * 60_000;
+      expect(debounceMs).toBeGreaterThan(0); // schema default; a 0 here would make this test vacuous
+      const first = ctx.queue.enqueue({ ...target, pipeline });
+      // A duplicate trigger landing while the run is in flight is what sets `dirty`.
+      const handler = vi.fn(async () => {
+        ctx.queue.enqueue({ ...target, pipeline });
+      });
+      const stop = startRunner(ctx, { [pipeline]: handler }, { intervalMs: 10 });
+
+      await vi.advanceTimersByTimeAsync(10);
+      stop();
+
+      expect(ctx.queue.get(first.id!)!.status).toBe('done');
+      const requeued = ctx.queue.list().find((j) => j.status === 'pending')!;
+      expect(requeued).toBeDefined();
+      expect(requeued.not_before).toBe(debounced ? Date.now() + debounceMs : 0);
+    },
+  );
+
   it('fails the job and appends only a warn event when the failure will still be retried', async () => {
     const ctx = makeCtx();
     ctx.queue.enqueue(target);

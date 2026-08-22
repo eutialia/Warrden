@@ -1,4 +1,4 @@
-import type { ArrApi, MovieResource, ReleaseProfileResource, SeriesResource, TagResource } from '../arr/types.js';
+import type { ArrApi, HistoryRecord, MovieResource, ReleaseProfileResource, SeriesResource, TagResource } from '../arr/types.js';
 import { instanceKind } from '../config/instances.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
@@ -192,6 +192,17 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
  * between passes the oldest overflow is missed; acceptable for a backstop whose primary
  * path is the webhook.
  */
+/** Whether an ingest job for this target already ran to completion at or after the history
+ * record's own date — i.e. this import was already swept, by the webhook path or by an
+ * earlier pass. An unparseable date answers `false`: enqueuing a duplicate ingest is cheap
+ * (its provenance short-circuit makes the run a no-op), skipping a real import is not. */
+function alreadySwept(ctx: AppContext, name: string, target: { kind: TargetKind; id: number }, record: HistoryRecord): boolean {
+  const recordedAt = Date.parse(record.date);
+  if (Number.isNaN(recordedAt)) return false;
+  const lastDone = ctx.queue.lastCompletedAt('ingest', name, target.kind, target.id);
+  return lastDone !== null && lastDone >= recordedAt;
+}
+
 async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: string, client: ArrApi): Promise<void> {
   const cursorKey = `history:${name}`;
   const records = await client.listRecentImports(HISTORY_PAGE_SIZE);
@@ -234,7 +245,13 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
   // legitimately gets a fresh ingest job for every new import, not just once ever.
   // hasJobFor's any-status match would find that target's very first (possibly long-done)
   // ingest job and treat every later import as "already handled," permanently silencing this
-  // backstop. The cursor above is the actual dedupe axis here, not job history.
+  // backstop.
+  //
+  // `lastCompletedAt` does not have that problem, because it is time-scoped: it only
+  // suppresses a record an ingest run that finished AFTER the record's own date already
+  // swept, so a later import for the same target still enqueues normally. That is what stops
+  // a webhook-driven ingest and this backstop from each firing their own subtitle follow-up
+  // for the same import. The cursor is still the primary dedupe axis; this is the second one.
   for (const r of fresh) {
     const target: { kind: TargetKind; id: number } | null =
       r.seriesId !== undefined ? { kind: 'series', id: r.seriesId } : r.movieId !== undefined ? { kind: 'movie', id: r.movieId } : null;
@@ -242,6 +259,7 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
     const key = `${target.kind}:${target.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (alreadySwept(ctx, name, target, r)) continue;
     const result = ctx.queue.enqueue({
       pipeline: 'ingest',
       targetKind: target.kind,

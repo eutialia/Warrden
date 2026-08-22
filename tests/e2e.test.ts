@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { handleWebhook, INGEST_DEBOUNCE_MS } from '../src/arr/webhooks.js';
+import { subtitleDebounceMs } from '../src/jobs/debounce.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { startRunner } from '../src/jobs/runner.js';
 import { runAcquireJob } from '../src/pipelines/acquire/run.js';
@@ -43,6 +44,9 @@ describe('end-to-end: webhook -> queue -> runner -> ingest', () => {
       // advance past that quiescence window, then the same margin the pre-debounce version
       // of this test used for the runner to actually pick the job up and finish it.
       await vi.advanceTimersByTimeAsync(INGEST_DEBOUNCE_MS + 20);
+      // The ingest job's own subtitle follow-up is parked a further debounce window out, so
+      // the runner can only pick it up once that has elapsed too.
+      await vi.advanceTimersByTimeAsync(subtitleDebounceMs(fx.ctx.config) + 20);
     } finally {
       stop();
     }

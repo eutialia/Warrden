@@ -11,9 +11,10 @@ import { knowledgePath } from '../src/agent/siteKnowledge.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { MAX_CANDIDATES_PER_EPISODE, MAX_SEARCH_ROUNDS, runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
+import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../src/pipelines/settle.js';
 import type { MediaStream } from '../src/media/tools.js';
 import type { SearchHints } from '../src/pipelines/subtitle/queries.js';
-import { enqueueAndClaim, episodeResource, FakeGenerator, findEvent, hasEvent, seriesResource, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
+import { enqueueAndClaim, episodeResource, FakeGenerator, findEvent, hasEvent, queueRecord, seriesResource, subtitleFixture, tmpDir, type SubtitleFixture } from './helpers.js';
 
 /** A video with one embedded ASS track (stream index 2) — the drift reference. The track's
  * language must NOT be a target language: reconcile treats an embedded zh-Hans track as
@@ -172,6 +173,42 @@ function reflectSpy(calls: Array<{ verifiedSuccess: boolean }>) {
 // involved. The `.chs` tag is what gets it past the language gate: an untagged file is in
 // no language anyone asked for, and the pipeline never places one (see the gate test).
 const PACK = { 'Show - S01E05.chs.ass': SRT };
+
+describe('runSubtitleJob — settle gate', () => {
+  it('the arr is still importing this target -> RescheduleError(SETTLE_RETRY_MS), no site search, no probing', async () => {
+    const fx = subtitleFixture();
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, status: 'completed', trackedDownloadState: 'importing' })];
+
+    const job = claimSubtitleJob(fx);
+    await expect(runSubtitleJob(fx.ctx, job, NO_SITES)).rejects.toMatchObject({
+      name: 'RescheduleError',
+      delayMs: SETTLE_RETRY_MS,
+    });
+    expect(fx.media.probeCalls).toHaveLength(0); // stopped before reconcile ever read a video
+  });
+
+  it('a busy record for a DIFFERENT target does not gate this one — the run proceeds', async () => {
+    const fx = subtitleFixture();
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId + 1, status: 'completed', trackedDownloadState: 'importing' })];
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub(PACK));
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
+  });
+
+  it('past the settle deadline -> one subtitle.settle-timeout attention event and a clean return, no site search', async () => {
+    const fx = subtitleFixture();
+    fx.client.queue = [queueRecord({ seriesId: fx.targetId, status: 'completed', trackedDownloadState: 'importing' })];
+    const job = claimSubtitleJob(fx);
+    fx.ctx.db.prepare('UPDATE jobs SET created_at = ? WHERE id = ?').run(Date.now() - SETTLE_DEADLINE_MS - 1_000, job.id);
+
+    await expect(runSubtitleJob(fx.ctx, fx.ctx.queue.get(job.id)!, NO_SITES)).resolves.toBeUndefined();
+
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.settle-timeout')).toBe(true);
+    expect(fx.media.probeCalls).toHaveLength(0);
+  });
+});
 
 describe('runSubtitleJob', () => {
   it('movie target: missing langs -> site pack places beside the movie file', async () => {

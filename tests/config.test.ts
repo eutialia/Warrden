@@ -305,9 +305,18 @@ describe('config store', () => {
   });
 
   // subtitle config
-  it('defaults subtitle config to empty languages/preferredGroups/sites', () => {
+  it('defaults subtitle config to empty languages/preferredGroups/sites and a 10-minute follow-up debounce', () => {
     const cfg = ConfigSchema.parse({});
-    expect(cfg.subtitle).toEqual({ languages: [], preferredGroups: [], sites: [] });
+    expect(cfg.subtitle).toEqual({ languages: [], debounceMinutes: 10, preferredGroups: [], sites: [] });
+  });
+
+  it.each([
+    { value: 0, ok: true }, // 0 disables the wait
+    { value: 45, ok: true },
+    { value: -1, ok: false },
+    { value: 1.5, ok: false },
+  ])('subtitle.debounceMinutes $value -> accepted=$ok', ({ value, ok }) => {
+    expect(ConfigSchema.safeParse({ subtitle: { debounceMinutes: value } }).success).toBe(ok);
   });
 
   it('parses subtitle languages, preferred groups, and sites', () => {

@@ -20,6 +20,8 @@ import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../
 import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetMeta, type TargetMeta } from '../targetTitle.js';
 import { assertMounted, MOUNT_RETRY_MS } from '../mounts.js';
+import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../settle.js';
+import { assessQueue } from '../ingest/queueState.js';
 import { buildSidecarName, matchEpisodeRef } from '../ingest/sidecars.js';
 import { placeBlocked, type PlaceBlock } from '../placeGuard.js';
 import {
@@ -104,7 +106,8 @@ interface RunState {
 export const MAX_CANDIDATES_PER_EPISODE = 4;
 
 /**
- * The subtitle pipeline runner for a series or movie target. Mounts-guard, reconciles
+ * The subtitle pipeline runner for a series or movie target. Mounts-guard, waits out an arr
+ * that is still importing this target (`settleGate`), reconciles
  * which videos still lack the target languages via `findMissingSubtitles`, checks the
  * per-target archive cache, searches each configured site for what's still missing, and
  * drift-gates + places every candidate with full `placed_files` provenance.
@@ -132,6 +135,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   assertMounted(ctx, job, 'subtitle');
+  if (await settleGate(ctx, job, client)) return;
 
   const media = requireMedia(ctx);
   await assertProbeAvailable(ctx, job, media);
@@ -228,6 +232,36 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }
+}
+
+/**
+ * The same wait ingest opens a run with, for the same reason one level down: a subtitle job
+ * enqueued off one season's import can be claimed while the arr is still moving the next
+ * season's files, and reconciling "what is missing" against a half-imported library sends the
+ * agent hunting for episodes that are seconds from existing.
+ *
+ * Returns `true` when the caller must stop without doing anything — the deadline has passed
+ * and a human now owns it. A `busy` verdict inside the deadline throws `RescheduleError`,
+ * which is not a retry: the runner never counts it against `attempts`, so
+ * `SETTLE_DEADLINE_MS` against `job.created_at` is the only thing bounding the wait.
+ */
+async function settleGate(ctx: AppContext, job: JobRow, client: ArrApi): Promise<boolean> {
+  const assessment = assessQueue(await client.listQueue(), { kind: job.target_kind, id: job.target_id });
+  if (assessment.state !== 'busy') return false;
+
+  if (Date.now() - job.created_at > SETTLE_DEADLINE_MS) {
+    ctx.events.append({
+      kind: 'subtitle.settle-timeout',
+      level: 'attention',
+      jobId: job.id,
+      message: `Gave up waiting for Sonarr/Radarr to finish importing before searching for subtitles (still busy after ${Math.round(SETTLE_DEADLINE_MS / 3_600_000)}h) — check the download queue there`,
+      data: targetEventData(job),
+    });
+    return true;
+  }
+
+  ctx.trace.event({ jobId: job.id, kind: 'pipeline.wait', summary: 'waiting for arr import to settle' });
+  throw new RescheduleError('arr still importing this target', SETTLE_RETRY_MS);
 }
 
 /** Series: every hasFile episode with an episode file. Movie: the single movie file, if any.

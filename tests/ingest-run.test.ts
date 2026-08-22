@@ -7,7 +7,8 @@ import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { RescheduleError } from '../src/jobs/errors.js';
-import { runIngestJob, RESCUE_DWELL_MS, SETTLE_RETRY_MS, SETTLE_DEADLINE_MS } from '../src/pipelines/ingest/run.js';
+import { runIngestJob, RESCUE_DWELL_MS } from '../src/pipelines/ingest/run.js';
+import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../src/pipelines/settle.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
 import { AcceptDataSchema } from '../src/server/app.js';
 import {
@@ -174,6 +175,39 @@ describe('runIngestJob — subtitle follow-on enqueue', () => {
       status: 'pending',
     });
     expect(subtitleJob!.payload).toEqual({ source: 'ingest' });
+  });
+
+  it('the follow-up is parked one debounce window out, so a burst of season imports collapses into one subtitle run', async () => {
+    const fx = ingestFixture();
+    const debounceMs = fx.ctx.config.subtitle.debounceMinutes * 60_000;
+    expect(debounceMs).toBeGreaterThan(0); // the schema default; a 0 here would make this test vacuous
+    const job = claimIngestJob(fx);
+
+    const before = Date.now();
+    await runIngestJob(fx.ctx, job);
+    const after = Date.now();
+
+    const followUp = fx.ctx.queue.list().find((j) => j.pipeline === 'subtitle')!;
+    expect(followUp.not_before).toBeGreaterThanOrEqual(before + debounceMs);
+    expect(followUp.not_before).toBeLessThanOrEqual(after + debounceMs);
+    expect(fx.ctx.queue.claim(followUp.not_before - 1)).toBeNull(); // not claimable until the window is out
+  });
+
+  it('a second import of the same target pushes the pending follow-up out again instead of adding a second job', async () => {
+    const fx = ingestFixture();
+    const debounceMs = fx.ctx.config.subtitle.debounceMinutes * 60_000;
+    const firstIngest = claimIngestJob(fx);
+    await runIngestJob(fx.ctx, firstIngest);
+    const first = fx.ctx.queue.list().find((j) => j.pipeline === 'subtitle')!;
+
+    fx.ctx.queue.complete(firstIngest.id); // free the singleton slot so the next import's job can be claimed
+    const before = Date.now();
+    await runIngestJob(fx.ctx, claimIngestJob(fx));
+
+    const subtitleJobs = fx.ctx.queue.list().filter((j) => j.pipeline === 'subtitle');
+    expect(subtitleJobs).toHaveLength(1);
+    expect(subtitleJobs[0]!.id).toBe(first.id);
+    expect(subtitleJobs[0]!.not_before).toBeGreaterThanOrEqual(before + debounceMs);
   });
 });
 

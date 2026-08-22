@@ -255,7 +255,7 @@ export interface Config {
   pathMappings: { from: string; to: string }[];
   storage: { series: string; anime: string; movies: string; downloads: string };
   picking: { prefer: string[]; avoid: string[]; seederFloor: number; minSizeMB: number; maxSizeMB: number };
-  subtitle: { languages: string[]; preferredGroups: string[]; sites: SubtitleSite[] };
+  subtitle: { languages: string[]; debounceMinutes?: number; preferredGroups: string[]; sites: SubtitleSite[] };
   browser: { stepBudget: number; siteCooldownSeconds: number };
   llm: {
     model?: LlmModel;
