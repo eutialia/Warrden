@@ -206,7 +206,7 @@ export function subtitleRunTone(status: string): Tone {
 /** How a placed subtitle's timing turned out, as one chip. */
 export function subtitleDriftLabel(drift: string, offsetMs: number | null): string {
   if (drift === 'resynced') {
-    if (offsetMs === null) return 'Resynced';
+    if (offsetMs === null || offsetMs === 0) return 'Resynced';
     const sign = offsetMs >= 0 ? '+' : '';
     return `Resynced ${sign}${offsetMs}ms`;
   }
