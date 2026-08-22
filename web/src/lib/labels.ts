@@ -203,6 +203,18 @@ export function subtitleRunTone(status: string): Tone {
   }
 }
 
+/** How a placed subtitle's timing turned out, as one chip. */
+export function subtitleDriftLabel(drift: string, offsetMs: number | null): string {
+  if (drift === 'resynced') {
+    if (offsetMs === null) return 'Resynced';
+    const sign = offsetMs >= 0 ? '+' : '';
+    return `Resynced ${sign}${offsetMs}ms`;
+  }
+  if (drift === 'in-sync') return 'In sync';
+  if (drift === 'unverified') return 'Unverified timing';
+  return drift;
+}
+
 export function storageStatusLabel(status: StorageCheckStatus): string {
   switch (status) {
     case 'ok':

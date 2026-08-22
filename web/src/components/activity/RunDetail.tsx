@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Bug, ChevronRight, FileCheck2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Bug, ChevronRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import {
   apiErrorMessage,
@@ -8,78 +8,18 @@ import {
   type EventRow,
   type Job,
   type JobDetailResponse,
-  type PlacedFile as PlacedFileRow,
-  type PlacedFileKind,
-  type SubtitleRunRow,
-  type TranscriptEntry,
 } from '@/api';
 import { RelativeTime } from '@/components/activity/RelativeTime';
+import { AttentionLink, Fact, PlacedFile } from '@/components/activity/runParts';
+import { SubtitleRunBody } from '@/components/activity/SubtitleRunBody';
 import { StatusNotice } from '@/components/StatusNotice';
-import { TierBadge } from '@/components/TierBadge';
 import { ToneBadge } from '@/components/ToneBadge';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { acquireOutcomeLabel, releaseShapeLabel, siteLabel, subtitleRunLabel, subtitleRunTone } from '@/lib/labels';
-import { TONE_SOFT, TONE_SOLID, TONE_TEXT } from '@/lib/tone';
-import { cn, formatRelativeTime, formatReleaseSize } from '@/lib/utils';
-
-const PLACED_FILE_KIND_LABEL: Record<PlacedFileKind, string> = {
-  audio: 'Audio',
-  subtitle: 'Subtitle',
-};
-
-/** One labelled fact. Same shape the job-detail page used, kept so the enrichment
- * this branch added survives the move into the drawer. */
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="space-y-0.5">
-      <dt className="text-[0.7rem] text-muted-foreground">{label}</dt>
-      <dd className="text-xs font-medium">{children}</dd>
-    </div>
-  );
-}
-
-/**
- * A site-search run as a vertical timeline. This is the most interesting thing the
- * dashboard has to show, the agent narrating its own navigation, so it gets a
- * rail, per-step timestamps, and room to breathe rather than a dense inline list.
- */
-function TranscriptTimeline({ entries }: { entries: TranscriptEntry[] }): ReactNode {
-  if (entries.length === 0) {
-    return <p className="text-sm text-muted-foreground">No steps recorded yet.</p>;
-  }
-  return (
-    <ol className="relative space-y-4 border-l pl-5">
-      {entries.map((entry, i) => {
-        // A step the agent refused because it aimed somewhere it must not go. Amber, per
-        // the tone system's "this wants a human". Otherwise it reads like any other step.
-        const attention = entry.level === 'attention';
-        return (
-          <li key={i} className="relative">
-            <span
-              className={cn(
-                'absolute top-1.5 -left-[1.6rem] size-2 rounded-full ring-4 ring-popover',
-                TONE_SOLID[attention ? 'warning' : i === entries.length - 1 ? 'brand' : 'neutral'],
-              )}
-            />
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={cn('text-sm font-medium', attention && TONE_TEXT.warning)}>{entry.action}</span>
-              <TierBadge tier={entry.tier} />
-              <span className="ml-auto text-xs text-muted-foreground">{formatRelativeTime(entry.ts)}</span>
-            </div>
-            {entry.detail && (
-              <p className={cn('mt-1 text-xs break-words', attention ? TONE_TEXT.warning : 'text-muted-foreground')}>
-                {entry.detail}
-              </p>
-            )}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
+import { acquireOutcomeLabel, releaseShapeLabel } from '@/lib/labels';
+import { TONE_SOFT } from '@/lib/tone';
+import { cn, formatReleaseSize } from '@/lib/utils';
 
 /** Why a run that produced no files did nothing. The subtitle pipeline says this out loud
  * in its own completion event; ingest emits none, so it falls back to the copy the
@@ -195,62 +135,6 @@ function ReleasePick({
   );
 }
 
-function PlacedFile({ file }: { file: PlacedFileRow }) {
-  const lang = typeof file.data.lang === 'string' ? file.data.lang : null;
-  const matchedBy = typeof file.data.matchedBy === 'string' ? file.data.matchedBy : null;
-  const site = typeof file.data.site === 'string' ? file.data.site : null;
-  const archive = typeof file.data.archive === 'string' ? file.data.archive : null;
-  const sourceFile = typeof file.data.sourceFile === 'string' ? file.data.sourceFile : null;
-  const drift = typeof file.data.drift === 'string' ? file.data.drift : null;
-  const offsetMs = typeof file.data.offsetMs === 'number' ? file.data.offsetMs : null;
-  const driftLabel = drift ? formatDriftLabel(drift, offsetMs) : null;
-
-  return (
-    <div className="space-y-1 text-xs">
-      <div className="flex flex-wrap items-center gap-2">
-        <FileCheck2 className="size-3.5 text-muted-foreground" />
-        <Badge variant="outline" className="text-muted-foreground">
-          {PLACED_FILE_KIND_LABEL[file.kind]}
-        </Badge>
-        {matchedBy && <ToneBadge tone="neutral">{matchedBy}</ToneBadge>}
-        {lang && <ToneBadge tone="neutral">{lang}</ToneBadge>}
-        {site && <ToneBadge tone="neutral">{site}</ToneBadge>}
-        {driftLabel && <ToneBadge tone="neutral">{driftLabel}</ToneBadge>}
-      </div>
-      <code className="block break-all">{file.placed_path}</code>
-      <code className="block break-all text-muted-foreground">from {file.source_path}</code>
-      {file.video_path && (
-        <code className="block break-all text-muted-foreground">beside {file.video_path}</code>
-      )}
-      {(archive || sourceFile) && (
-        <p className="text-muted-foreground">
-          {sourceFile && <span>Source file {sourceFile}</span>}
-          {sourceFile && archive && <span> · </span>}
-          {archive && <span className="font-mono break-all">{archive}</span>}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function SubtitleRun({ run }: { run: SubtitleRunRow }) {
-  const tone = subtitleRunTone(run.status);
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-medium">{siteLabel(run.site)}</span>
-        <ToneBadge tone={tone} dot pulse={tone === 'info'}>
-          {subtitleRunLabel(run.status)}
-        </ToneBadge>
-        <span className="text-muted-foreground">
-          {run.transcript.length} step{run.transcript.length === 1 ? '' : 's'}
-        </span>
-      </div>
-      <TranscriptTimeline entries={run.transcript} />
-    </div>
-  );
-}
-
 export function RunDetail({ jobId }: { jobId: number }) {
   const [data, setData] = useState<JobDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -324,21 +208,18 @@ export function RunDetail({ jobId }: { jobId: number }) {
         // The fact exists for multi-season jobs, where each row can differ.
         <ReleasePick key={rec.id} record={rec} showOutcome={acquireRecords.length > 1} />
       ))}
-      {placedFiles.map((f) => (
-        <PlacedFile key={f.id} file={f} />
-      ))}
-      {subtitleRuns.map((r) => (
-        <SubtitleRun key={r.id} run={r} />
-      ))}
-      {attention.map((a) => (
-        <Link
-          key={a.id}
-          to="/attention"
-          className={cn('block rounded-md border px-2 py-1 text-xs', TONE_SOFT.warning)}
-        >
-          {a.message}
-        </Link>
-      ))}
+      {job.pipeline === 'subtitle' ? (
+        <SubtitleRunBody placedFiles={placedFiles} attention={attention} events={events} runs={subtitleRuns} />
+      ) : (
+        <>
+          {placedFiles.map((f) => (
+            <PlacedFile key={f.id} file={f} />
+          ))}
+          {attention.map((a) => (
+            <AttentionLink key={a.id} item={a} />
+          ))}
+        </>
+      )}
       {quiet && <QuietRun job={job} events={events} />}
       {!quiet && job.pipeline === 'acquire' && acquireRecords.length === 0 && <MissingPickNote />}
       <dl className="grid grid-cols-3 gap-2.5">
@@ -380,17 +261,6 @@ function sortAcquireRecords(records: AcquireRecordDetail[]): AcquireRecordDetail
     if (aSeason !== null && bSeason !== null && aSeason !== bSeason) return aSeason - bSeason;
     return a.created_at - b.created_at;
   });
-}
-
-function formatDriftLabel(drift: string, offsetMs: number | null): string {
-  if (drift === 'resynced') {
-    if (offsetMs === null) return 'Resynced';
-    const sign = offsetMs >= 0 ? '+' : '';
-    return `Resynced ${sign}${offsetMs}ms`;
-  }
-  if (drift === 'in-sync') return 'In sync';
-  if (drift === 'unverified') return 'Unverified timing';
-  return drift;
 }
 
 interface KeptCandidateView {
