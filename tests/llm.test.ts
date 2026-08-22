@@ -213,15 +213,17 @@ function recordedCall(index = 0): {
   settings: { extraBody?: Record<string, unknown> };
   providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
   instructions: string | { content: string };
+  messages: { role: string; content: string }[];
 } {
   const [opts] = generateObjectMock.mock.calls[index] as [
     {
       model: { settings: { extraBody?: Record<string, unknown> } };
       providerOptions?: { openrouter?: { cacheControl?: { type: string } } };
       instructions: string | { content: string };
+      messages: { role: string; content: string }[];
     },
   ];
-  return { settings: opts.model.settings, providerOptions: opts.providerOptions, instructions: opts.instructions };
+  return { settings: opts.model.settings, providerOptions: opts.providerOptions, instructions: opts.instructions, messages: opts.messages };
 }
 
 describe('AiSdkGenerator provider-error classification', () => {
@@ -455,13 +457,28 @@ describe('AiSdkGenerator structured-output tiers', () => {
   it.each([
     ['json_object', jsonObject],
     ['none', noFormat],
-  ])('appends the JSON Schema to the system prompt on the %s tier', async (_label, capabilities) => {
+  ])('appends the JSON Schema after the caller system text on the %s tier', async (_label, capabilities) => {
     const call = await generateOn(capabilities);
     const system = String(call.instructions);
-    expect(system.startsWith('Reply with a single JSON object')).toBe(true);
-    expect(system.endsWith('Pick one option.')).toBe(true);
+    expect(system.startsWith('Pick one option.')).toBe(true);
     expect(system).toContain('single JSON object');
     expect(system).toContain(JSON.stringify(z.toJSONSchema(schema), null, 2));
+  });
+
+  it.each([
+    ['json_object', jsonObject],
+    ['none', noFormat],
+  ])('closes the user half with the JSON-only contract on the %s tier', async (_label, capabilities) => {
+    const call = await generateOn(capabilities);
+    const user = String(call.messages.at(-1)?.content);
+    expect(user.startsWith('p')).toBe(true);
+    expect(user.endsWith('Answer with the JSON object only. It starts with { and ends with }. No code fence, no commentary.')).toBe(true);
+  });
+
+  it('leaves the native tier prompt untouched', async () => {
+    const call = await generateOn(undefined);
+    expect(String(call.instructions)).toBe('Pick one option.');
+    expect(String(call.messages.at(-1)?.content)).toBe('p');
   });
 
   // The promptCache breakpoint only pays off while the system prefix is byte-identical across
@@ -500,8 +517,7 @@ describe('AiSdkGenerator configured structured-output override', () => {
     expect('response_format' in (call.settings.extraBody ?? {})).toBe(true);
     expect(call.settings.extraBody?.response_format).toBeUndefined();
     const system = String(call.instructions);
-    expect(system.startsWith('Reply with a single JSON object')).toBe(true);
-    expect(system.endsWith('Pick one option.')).toBe(true);
+    expect(system.startsWith('Pick one option.')).toBe(true);
     expect(system).toContain(JSON.stringify(z.toJSONSchema(schema), null, 2));
   });
 
@@ -881,6 +897,39 @@ describe('repairObjectText', () => {
   it('returns null when there is no brace pair to find', () => {
     expect(repairObjectText('I cannot answer that.')).toBeNull();
     expect(repairObjectText('{ but never closed')).toBeNull();
+  });
+
+  // Job 75: the fence landed INSIDE a string value, so nothing about it was anchored and an
+  // anchored strip left the object exactly as broken as it arrived.
+  it.each([
+    [
+      'a fence spliced inside a string value',
+      '{"action": "open", "url": "https://acg.rip/t/12```html\n345", "note": "n"}',
+      '{"action": "open", "url": "https://acg.rip/t/12345", "note": "n"}',
+    ],
+    [
+      'an unclosed opening fence',
+      '```json\n{"ok": true}',
+      '{"ok": true}',
+    ],
+    [
+      'a fence after the object',
+      '{"ok": true}\n```',
+      '{"ok": true}',
+    ],
+    [
+      'prose either side of a fenced object',
+      'Sure:\n```json\n{"ok": true}\n```\nLet me know.',
+      '{"ok": true}',
+    ],
+  ])('recovers the object from %s', (_label, text, expected) => {
+    expect(repairObjectText(text)).toBe(expected);
+  });
+
+  // Job 74: the model narrated the transcript back instead of answering. There is no object
+  // in it, and inventing one would be worse than letting the parse error stand.
+  it('returns null for a transcript-prose reply', () => {
+    expect(repairObjectText('open https://acg.rip/t/123 -> OK\nopen https://acg.rip/t/124 -> OK')).toBeNull();
   });
 });
 
