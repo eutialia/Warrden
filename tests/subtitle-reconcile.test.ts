@@ -131,6 +131,20 @@ describe('findMissingSubtitles', () => {
     expect(gaps).toEqual([]);
   });
 
+  it('keeps a language-looking token in the video name as part of the stem', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'warrden-sub-'));
+    const video = join(dir, 'Show - S01E05.en.mkv');
+    writeFileSync(video, 'video');
+    writeFileSync(join(dir, 'Show - S01E05.en.zh-Hans.srt'), 'x');
+    writeFileSync(join(dir, 'Show - S01E05.zh-Hant.srt'), 'x');
+    const { videos: gaps } = await findMissingSubtitles({
+      videos: [{ videoPath: video, episodeId: 1 }],
+      languages: ['zh-Hans', 'zh-Hant'],
+      media: fakeMedia({ [video]: [] }),
+    });
+    expect(gaps).toEqual([expect.objectContaining({ covered: true, lacking: ['zh-Hant'] })]);
+  });
+
   it('a sidecar in none of the configured languages leaves the video uncovered', async () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.zh.srt'), 'x');

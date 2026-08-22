@@ -1,7 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import type { MediaStream, MediaTools } from '../../media/tools.js';
-import { sidecarStem } from '../ingest/sidecars.js';
 
 export interface VideoEntry {
   // Kept exported: tests build VideoEntry[] fixtures against this shape.
@@ -156,7 +155,7 @@ export async function findMissingSubtitles(input: {
     }
     const streams = await media.probeStreams(video.videoPath);
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
-    const stem = sidecarStem(basename(video.videoPath));
+    const stem = basename(video.videoPath, extname(video.videoPath));
     const externalLangs = externalSubsFor(video.videoPath, stem).map((p) => parseSidecarLanguage(basename(p), stem));
 
     const lacking = languages.filter((lang) => {
