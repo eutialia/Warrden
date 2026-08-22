@@ -380,7 +380,7 @@ export default function Sites() {
       {config && (
         <>
           <StatBand>
-            <StatTile label="Accepted languages" value={languages.length} hint="Before a video counts as covered" />
+            <StatTile label="Accepted languages" value={languages.length} hint="Any one covers a video" />
             <StatTile label="Preferred groups" value={groups.length} hint="Ranking boost only" />
             <StatTile label="Sites" value={config.subtitle.sites.length} hint="Tried in order, top first" />
             <StatTile
