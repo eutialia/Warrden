@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { join } from 'node:path';
-import type { StructuredGenerator } from '../llm/generator.js';
+import { isObjectParseFailure, type StructuredGenerator } from '../llm/generator.js';
 import { refusedDestination, type RefusedDestination } from './destinationGuard.js';
 import type { FetchResult, FetchTier } from './tiers.js';
 import { siteKey } from '../config/siteLabel.js';
@@ -45,6 +45,10 @@ export type AgentOutcome = { steps: number } & (
   /** REFUSAL_LIMIT guarded destinations in one run — the runner stops the site rather
    * than paying for the same refusals again on every remaining tier. */
   | { kind: 'refused-repeatedly'; refusals: number }
+  /** MALFORMED_LIMIT consecutive replies that were not the JSON object, after the
+   * generator's own repair and retry. The model is not answering the schema on this
+   * prompt; another rung would put the same prompt to the same model. */
+  | { kind: 'malformed-repeatedly'; failures: number }
 );
 
 /** What a give-up says when the model left `reason` empty. */
@@ -64,6 +68,18 @@ const NO_REASON = 'no reason given';
  * existed.
  */
 const REFUSAL_LIMIT = 3;
+
+/**
+ * How many replies in a row that are not the JSON object end a run. One is ordinary — the
+ * correction goes into the next prompt and models usually take it — but a model that has
+ * answered prose three times running is not going to answer the schema on the fourth, and
+ * every attempt is a paid call. A successful step clears the count: a single slip
+ * mid-transcript says nothing about the run.
+ */
+const MALFORMED_LIMIT = 3;
+
+/** The correction fed back to the model after a reply that would not parse. */
+const MALFORMED_NOTE = 'previous reply was not valid JSON — reply with the JSON object only, no code fence';
 
 /** Cap on a refused URL echoed into the next prompt. It can be attacker-chosen text of any
  * length (a hostile site's `Location` header), and every other thing a page puts in the
@@ -221,6 +237,8 @@ export async function runAgentLoop(input: {
   const history: HistoryStep[] = [];
   let lastSearchUrl: string | null = null;
   let refusals = 0;
+  /** Consecutive unparseable replies; any step that produced an action resets it. */
+  let malformed = 0;
   /**
    * Records a guarded destination as this step's observation AND as a transcript entry,
    * then reports whether the run has spent its refusal allowance. The transcript entry is
@@ -246,14 +264,29 @@ export async function runAgentLoop(input: {
       `Step ${step + 1} of ${maxSteps}. What is the next action?`,
     ].join('\n\n');
 
-    const action = await llm.generate({
-      callsite: CALLSITE,
-      schema: AgentActionSchema,
-      system,
-      prompt,
-      promptCache: true,
-      trace: input.trace,
-    });
+    let action: z.infer<typeof AgentActionSchema>;
+    try {
+      action = await llm.generate({
+        callsite: CALLSITE,
+        schema: AgentActionSchema,
+        system,
+        prompt,
+        promptCache: true,
+        trace: input.trace,
+      });
+    } catch (err) {
+      // A reply that is not the object is a bad STEP, not a dead site: the tier answered,
+      // the page loaded, the model just wrote the wrong thing. Telling it so and spending
+      // one of its steps is far cheaper than failing the site into a cooldown and replaying
+      // the whole ladder. Anything else — a dead route, a missing key — still throws.
+      if (!isObjectParseFailure(err)) throw err;
+      malformed += 1;
+      history.push({ prefix: MALFORMED_NOTE });
+      onTranscript({ ts: Date.now(), tier: tier.tier, action: 'malformed', detail: MALFORMED_NOTE });
+      if (malformed >= MALFORMED_LIMIT) return { kind: 'malformed-repeatedly', failures: malformed, steps: step + 1 };
+      continue;
+    }
+    malformed = 0;
     onTranscript({ ts: Date.now(), tier: tier.tier, action: action.action, detail: `${action.note} (${action.url})` });
 
     if (action.action === 'give_up') {

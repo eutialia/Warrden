@@ -62,7 +62,10 @@ export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): Tier
 export interface SiteRunResult {
   download: { filePath: string; url: string } | null;
   transcript: TranscriptEntry[];
-  outcome: 'downloaded' | 'gave-up' | 'exhausted' | 'cooldown' | 'error';
+  /** LLM steps the last attempt actually took — 0 when nothing ran (cooldown, a wall on
+   * every rung). What separates "searched once, nothing there" from a spent budget. */
+  steps: number;
+  outcome: 'downloaded' | 'gave-up' | 'exhausted' | 'blocked' | 'cooldown' | 'error';
 }
 
 export interface SearchSiteOptions {
@@ -185,7 +188,7 @@ export async function searchSite(
       message: `Skipping ${siteLabel(site.baseUrl)} — in failure cooldown (${Math.round(cooldownMs / 60_000)}m backoff)`,
       data: targetEventData(job, { site: siteLabel(site.baseUrl) }),
     });
-    return { download: null, transcript: [], outcome: 'cooldown' };
+    return { download: null, transcript: [], steps: 0, outcome: 'cooldown' };
   }
 
   const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, opts.seedsDir ?? defaultSeedsDir());
@@ -205,6 +208,9 @@ export async function searchSite(
   // Every transcript entry this run produces, in order — handed back to the caller so
   // reflection (Task 6) sees the same steps that landed in subtitle_runs.
   const transcript: TranscriptEntry[] = [];
+  // Steps the last completed attempt spent, carried onto every result shape — including the
+  // failing ones, whose caller still has to tell a two-step give-up from a spent budget.
+  let stepsSpent = 0;
 
   /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
    * steps or by the runner's escalation handling. */
@@ -255,7 +261,7 @@ export async function searchSite(
   const failSite = (
     kind: 'subtitle.site-failed' | 'subtitle.site-exhausted',
     message: string,
-    outcome: 'error' | 'exhausted' | 'gave-up',
+    outcome: 'error' | 'exhausted' | 'gave-up' | 'blocked',
   ): SiteRunResult => {
     runs.finish(runId, 'failed');
     siteStep.end('error');
@@ -267,7 +273,7 @@ export async function searchSite(
       message,
       data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
     });
-    return { download: null, transcript, outcome };
+    return { download: null, transcript, steps: stepsSpent, outcome };
   };
 
   try {
@@ -275,9 +281,12 @@ export async function searchSite(
     // refusing) — carried into the final "every rung came up empty" outcome so a caller can
     // tell a deliberate give-up from a ladder that genuinely ran dry.
     let lastAttemptOutcome: 'exhausted' | 'gave-up' = 'exhausted';
-    // The rung the last attempt ran on — what the round event reports against. Starts at the
-    // rung the ladder opens on so a factory throw before the first tier exists still names one.
+    // The rung the ladder is currently on — what the round event reports against. Set before
+    // `make()` so a factory throw names the rung it threw for, not the one that worked.
     let lastTier: AccessTier = TIER_ORDER[startIdx]!;
+    // Whether any rung got as far as returning an outcome. False after the loop means every
+    // rung hit a wall, which is a different story from a ladder that ran and found nothing.
+    let attempted = false;
     // Carried out of the loop so the round event can name the step count and the model's own
     // give-up sentence after the ladder has ended.
     let lastSteps = 0;
@@ -287,11 +296,11 @@ export async function searchSite(
     const lastIdx = opts.escalate === false ? startIdx : TIER_ORDER.length - 1;
     for (let i = startIdx; i <= lastIdx; i++) {
       const tierName = TIER_ORDER[i]!;
+      lastTier = tierName;
       // make() lives inside the try so a factory throw cannot escape searchSite's
       // never-throws contract — it is handled like any other tier failure.
       try {
         const tier = tiers.make(tierName);
-        lastTier = tierName;
         activeTiers.push(tier);
         const outcome = await runAgentLoop({
           llm: ctx.llm,
@@ -307,7 +316,9 @@ export async function searchSite(
           trace: siteStep.seq !== null ? { jobId: job.id, parentSeq: siteStep.seq } : undefined,
         });
 
+        attempted = true;
         lastSteps = outcome.steps;
+        stepsSpent = outcome.steps;
         if (outcome.kind === 'downloaded') {
           runs.finish(runId, 'done');
           siteStep.end('ok');
@@ -327,7 +338,7 @@ export async function searchSite(
             searchUrlPatterns: learned,
           });
           reportRound(tierName, 'downloaded', `downloaded ${outcome.url}`, { steps: outcome.steps });
-          return { download: { filePath: outcome.filePath, url: outcome.url }, transcript, outcome: 'downloaded' };
+          return { download: { filePath: outcome.filePath, url: outcome.url }, transcript, steps: outcome.steps, outcome: 'downloaded' };
         }
         if (outcome.kind === 'refused-repeatedly') {
           // The knowledge file (or the model reading it) keeps aiming at addresses the
@@ -338,6 +349,17 @@ export async function searchSite(
           return failSite(
             'subtitle.site-failed',
             `Site ${siteLabel(site.baseUrl)} failed: ${outcome.refusals} steps targeted a refused address`,
+            'error',
+          );
+        }
+        if (outcome.kind === 'malformed-repeatedly') {
+          // The model is not answering the schema on this prompt. Another rung would put
+          // the same prompt to the same model, so the site stops here — same shape as a run
+          // that kept aiming at refused addresses.
+          reportRound(tierName, 'malformed-repeatedly', `malformed replies ${outcome.failures} times`, { steps: outcome.steps });
+          return failSite(
+            'subtitle.site-failed',
+            `Site ${siteLabel(site.baseUrl)} failed: ${outcome.failures} replies were not valid JSON`,
             'error',
           );
         }
@@ -355,6 +377,26 @@ export async function searchSite(
         // TierBlockedError: note the wall in the run's transcript and try the next rung.
         onTranscriptEvent({ ts: Date.now(), tier: tierName, action: 'escalate', detail: errorMessage(err) });
       }
+    }
+
+    // Every rung hit a wall before the loop could run: nothing was searched, so there is no
+    // step count and no give-up sentence to report. Without escalation that is not the
+    // site's fault at all — the run simply was not allowed to answer the wall — so it takes
+    // no failure and no cooldown, and the next job (or the next round with escalation on)
+    // finds the site exactly as it left it.
+    if (!attempted) {
+      if (opts.escalate === false) {
+        reportRound(lastTier, 'blocked', `blocked at ${lastTier}`, { steps: 0 });
+        runs.finish(runId, 'failed');
+        siteStep.end('error');
+        return { download: null, transcript, steps: 0, outcome: 'blocked' };
+      }
+      reportRound(lastTier, 'blocked', 'blocked at every tier', { steps: 0 });
+      return failSite(
+        'subtitle.site-exhausted',
+        `Site ${siteLabel(site.baseUrl)} was blocked at every tier (${lastIdx - startIdx + 1})`,
+        'blocked',
+      );
     }
 
     // Every rung came up empty.

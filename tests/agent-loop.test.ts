@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AgentActionSchema, runAgentLoop, TierBlockedError } from '../src/agent/loop.js';
 import type { FetchOpts, FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { TranscriptEntry } from '../src/db/subtitleRuns.js';
-import { defaultProfileRow, FakeGenerator, tmpDir } from './helpers.js';
+import { defaultProfileRow, FakeGenerator, parseFailure, tmpDir } from './helpers.js';
 
 const PROFILE = defaultProfileRow('https://acg.rip');
 
@@ -43,6 +43,7 @@ function fakeTier(results: FetchResult[]): FetchTier & { calls: { url: string; o
 }
 
 const SITE = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
+
 
 const OK_HTML = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
 
@@ -532,6 +533,68 @@ describe('runAgentLoop', () => {
     // Truncated prefixes of the older observations are still present.
     expect(prompt).toContain(longA.slice(0, 1000));
     expect(prompt).toContain(longB.slice(0, 1000));
+  });
+
+  it('treats a malformed reply as a bad step and carries on once the model recovers', async () => {
+    const llm = new FakeGenerator([
+      parseFailure(),
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      parseFailure(),
+      parseFailure(),
+      act({ action: 'give_up', url: '', note: 'done', reason: 'nothing listed' }),
+    ]);
+    const transcript: TranscriptEntry[] = [];
+    const out = await runAgentLoop({
+      llm,
+      tier: fakeTier([OK_HTML]),
+      site: SITE,
+      profile: PROFILE,
+      knowledge: '',
+      query: 'F',
+      destDir: tmpDir(),
+      maxSteps: 10,
+      onTranscript: (e) => transcript.push(e),
+    });
+    expect(out).toEqual({ kind: 'gave-up', steps: 5, reason: 'nothing listed' });
+    expect(transcript.filter((e) => e.action === 'malformed')).toHaveLength(3);
+    // The correction rides in the next prompt, or the model has no idea what went wrong.
+    const lastPrompt = llm.calls.at(-1)!.prompt;
+    expect(lastPrompt).toContain('previous reply was not valid JSON');
+  });
+
+  it('stops the site after three consecutive malformed replies', async () => {
+    const llm = new FakeGenerator([parseFailure(), parseFailure(), parseFailure(), act({ action: 'search', url: 'https://acg.rip/?t=x', note: 's' })]);
+    const out = await runAgentLoop({
+      llm,
+      tier: fakeTier([OK_HTML]),
+      site: SITE,
+      profile: PROFILE,
+      knowledge: '',
+      query: 'F',
+      destDir: tmpDir(),
+      maxSteps: 10,
+      onTranscript: () => {},
+    });
+    expect(out).toEqual({ kind: 'malformed-repeatedly', failures: 3, steps: 3 });
+    // The fourth queued action was never asked for.
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it('rethrows an error that is not a parse failure', async () => {
+    const llm = new FakeGenerator([new Error('provider is down')]);
+    await expect(
+      runAgentLoop({
+        llm,
+        tier: fakeTier([]),
+        site: SITE,
+        profile: PROFILE,
+        knowledge: '',
+        query: 'F',
+        destDir: tmpDir(),
+        maxSteps: 10,
+        onTranscript: () => {},
+      }),
+    ).rejects.toThrow('provider is down');
   });
 
   it('strict-mode schema requires every action field (no optional)', () => {

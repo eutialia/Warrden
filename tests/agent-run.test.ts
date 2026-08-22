@@ -22,6 +22,7 @@ import {
   subtitleJobInput,
   withFakeTime,
   tmpDir,
+  parseFailure,
 } from './helpers.js';
 
 const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
@@ -29,6 +30,7 @@ const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate
  * can pick up a seed file that ships with the app just because it shares a base URL. */
 const NO_SEEDS = tmpDir();
 const OK_HTML: FetchResult = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
+
 
 /** Sentinel-complete agent action for FakeGenerator's strict schema. */
 function act(
@@ -174,7 +176,7 @@ describe('searchSite', () => {
 
     await withFakeTime(async () => {
       const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-      expect(out).toEqual({ download: null, transcript: [], outcome: 'cooldown' });
+      expect(out).toEqual({ download: null, transcript: [], steps: 0, outcome: 'cooldown' });
     });
     expect(tiers.made).toHaveLength(0);
     expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeDefined();
@@ -517,7 +519,10 @@ describe('searchSite — per-round reporting', () => {
     expect(roundEvent(ctx)).toBeUndefined();
   });
 
-  it('escalate: false runs only the remembered tier and reports one round', async () => {
+  // A wall on the only rung an escalate:false run is allowed says nothing about the site
+  // being broken — the run simply was not permitted to answer it. Booking a failure here
+  // would put a working site into cooldown for the next job over a rung it never tried.
+  it('escalate: false blocked on its only rung reports the wall and does not fail the site', async () => {
     const { ctx, job } = setup();
     const profiles = new SiteProfiles(ctx.db);
     profiles.upsert({ baseUrl: 'https://acg.rip' });
@@ -528,9 +533,59 @@ describe('searchSite — per-round reporting', () => {
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS, escalate: false });
 
     expect(tiers.made).toEqual(['chromium']);
-    expect(out.outcome).toBe('exhausted');
-    expect(roundEvent(ctx)!.data).toMatchObject({ tier: 'chromium' });
-    expect(findEvent(ctx.events.list(), 'subtitle.site-exhausted')!.message).toContain('across 1 tier(s)');
+    expect(out.outcome).toBe('blocked');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at chromium');
+    expect(hasEvent(ctx.events.list(), 'subtitle.site-exhausted')).toBe(false);
+    const profile = profiles.get('https://acg.rip')!;
+    expect(profile.fail_count).toBe(0);
+    expect(profile.last_failure_at).toBeNull();
+  });
+
+  it('a ladder blocked at every rung says so instead of naming a step budget it never spent', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+    ]);
+    const wall = { ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true };
+    const tiers = stubTiers([wall, wall]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    expect(tiers.made).toEqual(['curl', 'chromium']);
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at every tier');
+    expect(out.outcome).toBe('blocked');
+    expect(new SiteProfiles(ctx.db).get('https://acg.rip')!.fail_count).toBe(1);
+  });
+
+  it('reports the rung a tier factory threw on, not the one before it', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' })]);
+    const wall = { ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true };
+    const inner = stubTiers([wall]);
+    const tiers = {
+      make: (t: AccessTier) => {
+        if (t === 'chromium') throw new Error('no browser installed');
+        return inner.make(t);
+      },
+    };
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): error: no browser installed');
+  });
+
+  it('malformed replies fail the site the way refusals do', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([parseFailure(), parseFailure(), parseFailure()]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): malformed replies 3 times');
+    expect(out.outcome).toBe('error');
+    expect(findEvent(ctx.events.list(), 'subtitle.site-failed')!.message).toContain('3 replies were not valid JSON');
+    // One rung only: another rung would put the same prompt to the same model.
+    expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);
   });
 
   it('escalation is on by default', async () => {

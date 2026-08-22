@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type Database from 'better-sqlite3';
+import { NoObjectGeneratedError } from 'ai';
 import { vi } from 'vitest';
 import type { MediaStream, MediaTools } from '../src/media/tools.js';
 import type {
@@ -28,7 +29,7 @@ import { openDb } from '../src/db/db.js';
 import type { SiteProfileRow } from '../src/db/siteProfiles.js';
 import { EventLog, type EventRow } from '../src/events/log.js';
 import { JobQueue, type EnqueueInput, type JobRow, type PipelineName, type TargetKind } from '../src/jobs/queue.js';
-import type { GenerateOpts, StructuredGenerator } from '../src/llm/generator.js';
+import { LlmError, type GenerateOpts, type StructuredGenerator } from '../src/llm/generator.js';
 import { SearchCache } from '../src/pipelines/acquire/searchCache.js';
 import { createApp } from '../src/server/app.js';
 import { SqlTracer } from '../src/trace/tracer.js';
@@ -1018,4 +1019,26 @@ export function cleanupTmpDirs(): void {
   for (const dir of createdDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * The error `AiSdkGenerator` wraps a reply that could not be parsed into the schema in —
+ * what the agent loop must recognise as a bad step rather than a dead site.
+ */
+export function parseFailure(): Error {
+  return new LlmError('Generation failed for callsite "site-search": could not parse', 'site-search', {
+    cause: new NoObjectGeneratedError({
+      message: 'No object generated',
+      text: 'open https://acg.rip/t/1 -> OK',
+      response: { id: 'r1', timestamp: new Date(0), modelId: 'stealth/ox-alpha' },
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        inputTokenDetails: { noCacheTokens: undefined, cacheReadTokens: undefined, cacheWriteTokens: undefined },
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+      },
+      finishReason: 'stop',
+    }),
+  });
 }

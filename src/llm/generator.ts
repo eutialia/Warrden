@@ -57,14 +57,35 @@ export class LlmError extends Error {
  * otherwise burn the budget before the error one hop further in is ever looked at.
  */
 function isPermanentProviderError(err: unknown): boolean {
+  return someErrorInChain(
+    err,
+    (e) =>
+      InvalidPromptError.isInstance(e) ||
+      NoObjectGeneratedError.isInstance(e) ||
+      (APICallError.isInstance(e) && isPermanentStatus(e.statusCode)),
+  );
+}
+
+/**
+ * Whether the failure is the model answering something that is not the object — the one
+ * failure a caller can answer by asking again in the same run. Everything else (a 402, a
+ * dead route, an FS fault) is about the call rather than the reply, and a retry inside the
+ * caller's own loop would only burn its budget.
+ */
+export function isObjectParseFailure(err: unknown): boolean {
+  return someErrorInChain(err, (e) => NoObjectGeneratedError.isInstance(e));
+}
+
+/** Bounded walk over `cause` links and `AggregateError` members (see
+ * `isPermanentProviderError` for why both, and why the bound counts error nodes only). */
+function someErrorInChain(err: unknown, pred: (e: object) => boolean): boolean {
   const pending: unknown[] = [err];
   let seen = 0;
   while (seen < 5 && pending.length > 0) {
     const e = pending.shift();
     if (typeof e !== 'object' || e === null) continue;
     seen++;
-    if (InvalidPromptError.isInstance(e) || NoObjectGeneratedError.isInstance(e)) return true;
-    if (APICallError.isInstance(e) && isPermanentStatus(e.statusCode)) return true;
+    if (pred(e)) return true;
     if (e instanceof AggregateError) pending.push(...e.errors);
     pending.push((e as Error).cause);
   }
