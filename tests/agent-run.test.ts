@@ -22,8 +22,8 @@ import {
   subtitleJobInput,
   withFakeTime,
   tmpDir,
-  parseFailure,
 } from './helpers.js';
+import { parseFailure } from './llmFixtures.js';
 
 const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 /** Every `searchSite` call here passes this as `seedsDir`: an empty directory, so no test

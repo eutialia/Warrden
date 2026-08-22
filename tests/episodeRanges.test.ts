@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeEpisodeRanges } from '../src/pipelines/subtitle/episodeRanges.js';
+import { describeEpisodeNumbers, describeEpisodeRanges } from '../src/pipelines/subtitle/episodeRanges.js';
 
 describe('describeEpisodeRanges', () => {
   it.each([
@@ -53,5 +53,23 @@ describe('describeEpisodeRanges', () => {
         { seasonNumber: 2, episodeNumber: 13 },
       ]),
     ).toBe('S1E12, S2E13');
+  });
+});
+
+describe('describeEpisodeNumbers', () => {
+  it.each([
+    [[], ''],
+    [[41, 42, 43, 44, 45], '41-45'],
+    [[1, 2, 4, 5], '1-2, 4-5'],
+    [[5, 1, 2, 2], '1-2, 5'],
+  ])('renders %j as "%s"', (numbers, expected) => {
+    expect(describeEpisodeNumbers(numbers)).toBe(expected);
+  });
+
+  // Same cap as describeEpisodeRanges, and for the same reason: a season with 40 scattered
+  // gaps is a paragraph nobody reads, and this one goes into a prompt paid for per token.
+  it('collapses the tail past the group cap, counting episodes', () => {
+    const scattered = Array.from({ length: 9 }, (_, i) => i * 2 + 1);
+    expect(describeEpisodeNumbers(scattered)).toBe('1, 3, 5, 7, 9, 11, 13, 15, +1 more episodes');
   });
 });

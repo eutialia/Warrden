@@ -7,7 +7,7 @@ import { siteKey } from '../config/siteLabel.js';
 import { safeUrlTailName } from '../fs/paths.js';
 import type { SiteProfileRow } from '../db/siteProfiles.js';
 import type { TranscriptEntry } from '../db/subtitleRuns.js';
-import { formatSearchHintsForPrompt, type SearchHints } from '../pipelines/subtitle/queries.js';
+import { formatSearchHintsForPrompt, FRESH_DAYS, type SearchHints } from '../pipelines/subtitle/queries.js';
 
 const CALLSITE = 'site-search';
 /** Cap on the most recent step's observation stored in history (and shown full in the prompt). */
@@ -228,7 +228,7 @@ export async function runAgentLoop(input: {
     'Older observations in the transcript are elided; record key facts (candidate slugs/URLs) in your note so you can reuse them later.',
     'Only download links that look like complete season packs, batch archives, or full-movie packs — not single-episode files, unless nothing else exists.',
     'Preferred groups and languages are soft preferences: never give_up solely because the perfect group is missing.',
-    'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
+    `When every missing episode aired within the last ${FRESH_DAYS} days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.`,
     'Respond with JSON matching the schema — no prose outside the JSON.',
   ]
     .filter(Boolean)

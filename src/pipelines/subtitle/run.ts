@@ -33,7 +33,7 @@ import {
 import { assessDrift } from './drift.js';
 import { describeEpisodeRanges } from './episodeRanges.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
-import { buildSearchHints, isFreshGap, type FetchedPack, type MissingSeason } from './queries.js';
+import { buildSearchHints, FRESH_DAYS, isFreshGap, type FetchedPack, type MissingSeason } from './queries.js';
 import { findMissingSubtitles, langCovers } from './reconcile.js';
 
 /** Injectable seams for `runSubtitleJob` — same injectable-factory pattern as `searchSite`'s
@@ -1007,11 +1007,6 @@ function placeSubtitle(
  * keeps yielding is also a site that could soak up the whole job, and three rounds is enough
  * to clear the common two-or-three-cour case without letting one target run away. */
 export const MAX_SEARCH_ROUNDS = 3;
-
-/** How long since it aired an episode counts as fresh. Inside this window an index has
- * usually published nothing at all, so an empty search says something about the calendar
- * rather than about the site. */
-export const FRESH_DAYS = 7;
 
 /** Site-search pass: for each configured site in order, up to `MAX_SEARCH_ROUNDS` rounds of
  * search + download, extract, cache, match, and drift-gate/place (see `searchSiteRounds`) —

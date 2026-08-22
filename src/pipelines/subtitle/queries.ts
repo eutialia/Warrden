@@ -92,7 +92,7 @@ export function buildSearchHints(input: {
   };
 }
 
-/** `3 days ago` as the clause that follows "newest aired". */
+/** `newest aired 3 days ago` — the whole phrase, ready to sit beside the episode numbers. */
 function describeAge(days: number): string {
   if (days <= 0) return 'newest aired today';
   return `newest aired ${days} day${days === 1 ? '' : 's'} ago`;
@@ -120,6 +120,14 @@ export interface FreshnessTarget {
 }
 
 /**
+ * How long since it aired an episode counts as fresh. Inside this window an index has
+ * usually published nothing at all, so an empty search says something about the calendar
+ * rather than about the site. The one source for the gate, the prompt rule that tells the
+ * agent about it, and the event that says the pass was scoped down.
+ */
+export const FRESH_DAYS = 7;
+
+/**
  * True when every episode this run is still hunting for aired inside the last `freshDays` —
  * the "nothing exists yet" case. Subtitles for an episode that aired this week usually have
  * not been published at all, so a search that comes up empty is evidence about the calendar,
@@ -130,7 +138,7 @@ export interface FreshnessTarget {
  * only thing a missing date proves is that we cannot tell. A run with nothing uncovered is
  * not a fresh gap either — it is not a gap at all.
  */
-export function isFreshGap(targets: readonly FreshnessTarget[], now: number, freshDays = 7): boolean {
+export function isFreshGap(targets: readonly FreshnessTarget[], now: number, freshDays = FRESH_DAYS): boolean {
   const uncovered = targets.filter((t) => !t.covered);
   if (uncovered.length === 0) return false;
   const cutoff = now - freshDays * 24 * 3_600_000;

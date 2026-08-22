@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { AgentActionSchema, runAgentLoop, TierBlockedError } from '../src/agent/loop.js';
 import type { FetchOpts, FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { TranscriptEntry } from '../src/db/subtitleRuns.js';
-import { defaultProfileRow, FakeGenerator, parseFailure, tmpDir } from './helpers.js';
+import { defaultProfileRow, FakeGenerator, tmpDir } from './helpers.js';
+import { parseFailure } from './llmFixtures.js';
 
 const PROFILE = defaultProfileRow('https://acg.rip');
 

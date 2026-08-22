@@ -18,9 +18,20 @@ const MAX_GROUPS = 8;
  * still missing, not how many runs it broke into. Empty input renders as the empty string.
  */
 export function describeEpisodeRanges(episodes: EpisodeRef[]): string {
-  const groups = collapseRuns(episodes);
-  const shown = groups.slice(0, MAX_GROUPS);
-  const parts = shown.map((g) => (g.from === g.to ? `S${g.season}E${g.from}` : `S${g.season}E${g.from}-E${g.to}`));
+  return renderGroups(collapseRuns(episodes), (g) => (g.from === g.to ? `S${g.season}E${g.from}` : `S${g.season}E${g.from}-E${g.to}`));
+}
+
+/** One run of consecutive episodes inside one season. */
+interface Run {
+  season: number;
+  from: number;
+  to: number;
+}
+
+/** The `MAX_GROUPS` cap both renderings share — the tail collapses into an episode count,
+ * not a group count, because how much is still missing is the number anyone reads for. */
+function renderGroups(groups: Run[], render: (g: Run) => string): string {
+  const parts = groups.slice(0, MAX_GROUPS).map(render);
   const hidden = groups.slice(MAX_GROUPS).reduce((n, g) => n + (g.to - g.from + 1), 0);
   if (hidden > 0) parts.push(`+${hidden} more episodes`);
   return parts.join(', ');
@@ -28,9 +39,9 @@ export function describeEpisodeRanges(episodes: EpisodeRef[]): string {
 
 /** Consecutive episodes of one season collapsed into runs, sorted and deduped. A season
  * boundary always breaks a run. */
-function collapseRuns(episodes: EpisodeRef[]): { season: number; from: number; to: number }[] {
+function collapseRuns(episodes: EpisodeRef[]): Run[] {
   const sorted = [...episodes].sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
-  const groups: { season: number; from: number; to: number }[] = [];
+  const groups: Run[] = [];
   for (const e of sorted) {
     const last = groups[groups.length - 1];
     if (last && last.season === e.seasonNumber && e.episodeNumber - last.to <= 1) {
@@ -42,10 +53,9 @@ function collapseRuns(episodes: EpisodeRef[]): { season: number; from: number; t
   return groups;
 }
 
-/** The same run-collapsing inside a single season, without the `SxxEyy` prefixes:
- * `41-45`, `1-2, 4-5`. Empty input renders as the empty string. */
+/** The same run-collapsing and the same `MAX_GROUPS` cap inside a single season, without the
+ * `SxxEyy` prefixes: `41-45`, `1-2, 4-5`. Empty input renders as the empty string. */
 export function describeEpisodeNumbers(numbers: number[]): string {
-  return collapseRuns(numbers.map((episodeNumber) => ({ seasonNumber: 0, episodeNumber })))
-    .map((g) => (g.from === g.to ? `${g.from}` : `${g.from}-${g.to}`))
-    .join(', ');
+  const groups = collapseRuns(numbers.map((episodeNumber) => ({ seasonNumber: 0, episodeNumber })));
+  return renderGroups(groups, (g) => (g.from === g.to ? `${g.from}` : `${g.from}-${g.to}`));
 }
