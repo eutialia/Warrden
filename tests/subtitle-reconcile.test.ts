@@ -116,6 +116,21 @@ describe('findMissingSubtitles', () => {
     expect(gaps).toEqual([{ videoPath: video, episodeId: 1, lacking: ['zh-Hant'], covered: true, embeddedRefs: [] }]);
   });
 
+  it('reads the lang tag of a sidecar whose video stem has dots of its own', async () => {
+    // 'The.Big.Sick.2017.zh-Hans.srt' only says zh-Hans if the segments are taken after the
+    // stem; taken after the first dot, 'Big' reads as a three-letter code and wins.
+    const dir = mkdtempSync(join(tmpdir(), 'warrden-sub-'));
+    const video = join(dir, 'The.Big.Sick.2017.mkv');
+    writeFileSync(video, 'video');
+    writeFileSync(join(dir, 'The.Big.Sick.2017.zh-Hans.srt'), 'x');
+    const { videos: gaps } = await findMissingSubtitles({
+      videos: [{ videoPath: video, episodeId: 1 }],
+      languages: ['zh-Hans'],
+      media: fakeMedia({ [video]: [] }),
+    });
+    expect(gaps).toEqual([]);
+  });
+
   it('a sidecar in none of the configured languages leaves the video uncovered', async () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.zh.srt'), 'x');
@@ -281,21 +296,29 @@ describe('rankReferenceStreams', () => {
 describe('parseSidecarLanguage', () => {
   // Jellyfin's own rule (ExternalPathParser): dot-separated segments after the video stem,
   // each judged on its own, in any order.
-  const cases: [string, string | null][] = [
-    ['Show.zh-Hans.srt', 'zh-Hans'],
-    ['Show.ZH-HANT.ass', 'zh-Hant'],
-    ['Show.zh.srt', 'zh'],
-    ['Show.chs.srt', 'chs'],
-    ['Show.en.hi.srt', 'en'],
-    ['Show.hi.srt', 'hi'],
-    ['Show.forced.zh-Hant.srt', 'zh-Hant'],
-    ['Show.Director Commentary.en.srt', 'en'],
-    ['Show.srt', null],
-    ['Show.default.srt', null],
+  const cases: [string, string, string | null][] = [
+    ['Show.zh-Hans.srt', 'Show', 'zh-Hans'],
+    ['Show.ZH-HANT.ass', 'Show', 'zh-Hant'],
+    ['Show.zh.srt', 'Show', 'zh'],
+    ['Show.chs.srt', 'Show', 'chs'],
+    ['Show.en.hi.srt', 'Show', 'en'],
+    ['Show.hi.srt', 'Show', 'hi'],
+    ['Show.forced.zh-Hant.srt', 'Show', 'zh-Hant'],
+    ['Show.Director Commentary.en.srt', 'Show', 'en'],
+    ['Show.srt', 'Show', null],
+    ['Show.default.srt', 'Show', null],
+    ['Show.ZH-CN.srt', 'Show', 'zh-CN'],
+    ['Show.zh-tw.srt', 'Show', 'zh-TW'],
+    ['Show.zh-HK.srt', 'Show', 'zh-HK'],
+    // A stem with dots of its own: only the segments AFTER it are language candidates,
+    // or 'Big' in the first one reads as a three-letter ISO code.
+    ['The.Big.Sick.2017.zh-Hans.srt', 'The.Big.Sick.2017', 'zh-Hans'],
+    ['Show.Name.S01E05.WEB.DL.zh-Hans.srt', 'Show.Name.S01E05.WEB.DL', 'zh-Hans'],
+    ['Show.Name.S01E05.WEB.DL.srt', 'Show.Name.S01E05.WEB.DL', null],
   ];
 
-  it.each(cases)('%s -> %s', (filename, expected) => {
-    expect(parseSidecarLanguage(filename)).toBe(expected);
+  it.each(cases)('%s (stem %s) -> %s', (filename, stem, expected) => {
+    expect(parseSidecarLanguage(filename, stem)).toBe(expected);
   });
 });
 

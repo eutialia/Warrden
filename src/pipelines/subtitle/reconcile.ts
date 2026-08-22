@@ -78,13 +78,20 @@ const SCRIPT_TAGS = new Map([
  * one of the `zh-*` script tags; `default`/`forced`/`foreign`/`sdh`/`cc` are flags and
  * anything else is a title. Returns the first language segment in canonical casing, or null.
  *
+ * `stem` is the video's own stem and has to be passed in: scene names carry dots
+ * (`The.Big.Sick.2017.zh-Hans.srt`), and splitting on the first dot instead reads `Big` as a
+ * three-letter ISO code. A file that does not sit under the stem has no segments at all.
+ *
  * No ISO code table rides along: a three-letter segment is taken at face value, which at
  * worst yields a tag that matches no configured language — exactly what an unrecognized
  * segment would have done anyway. Fansub tokens (`chs`, `cht`) are deliberately NOT
  * translated: this is the library side, and the library is Jellyfin's to read.
  */
-export function parseSidecarLanguage(filename: string): string | null {
-  const segments = filename.split('.').slice(1, -1);
+export function parseSidecarLanguage(filename: string, stem: string): string | null {
+  const noExt = filename.replace(/\.[^.]+$/, '');
+  const prefix = `${stem}.`;
+  if (!noExt.startsWith(prefix)) return null;
+  const segments = noExt.slice(prefix.length).split('.');
   let sawHi = false;
   for (const segment of segments) {
     const s = segment.toLowerCase();
@@ -104,10 +111,9 @@ export function parseSidecarLanguage(filename: string): string | null {
  * Matching uses exact stem equality (via `sidecarStem`, which strips the extension then
  * one trailing lang token), never a prefix match — a `Show - S01E05 Special.zh-Hans.ass`
  * must not count as covering `Show - S01E05.mkv`. */
-function externalSubsFor(videoPath: string): string[] {
+function externalSubsFor(videoPath: string, stem: string): string[] {
   const dir = dirname(videoPath);
   if (!existsSync(dir)) return [];
-  const stem = sidecarStem(basename(videoPath));
   return readdirSync(dir)
     .filter((f) => SUB_EXTS.has(extname(f).toLowerCase()) && sidecarStem(f) === stem)
     .map((f) => join(dir, f));
@@ -150,7 +156,8 @@ export async function findMissingSubtitles(input: {
     }
     const streams = await media.probeStreams(video.videoPath);
     const embedded = streams.filter((s) => s.codecType === 'subtitle');
-    const externalLangs = externalSubsFor(video.videoPath).map((p) => parseSidecarLanguage(basename(p)));
+    const stem = sidecarStem(basename(video.videoPath));
+    const externalLangs = externalSubsFor(video.videoPath, stem).map((p) => parseSidecarLanguage(basename(p), stem));
 
     const lacking = languages.filter((lang) => {
       const embeddedHit = embedded.some((s) => langCovers(lang, s.language));
