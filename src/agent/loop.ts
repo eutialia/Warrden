@@ -30,14 +30,25 @@ export const AgentActionSchema = z.object({
   body: z.string().describe('request body for POST; empty string when none'),
   contentType: z.string().describe('Content-Type for request body; empty string when none'),
   referer: z.string().describe('Referer header for request/download; empty string when none'),
+  reason: z.string().describe('for give_up: one sentence on why; empty string otherwise'),
 });
-type AgentOutcome =
+/**
+ * Every outcome carries `steps`: how many LLM steps this attempt actually took, which is
+ * what separates a "nothing exists yet" give-up after two steps from a run that spent its
+ * whole budget. `exhausted` always spent `maxSteps`.
+ */
+export type AgentOutcome = { steps: number } & (
   | { kind: 'downloaded'; filePath: string; url: string; searchUrl: string | null }
   | { kind: 'exhausted' }
-  | { kind: 'gave-up' }
+  /** `reason` is the model's own sentence, or `NO_REASON` when it gave none. */
+  | { kind: 'gave-up'; reason: string }
   /** REFUSAL_LIMIT guarded destinations in one run — the runner stops the site rather
    * than paying for the same refusals again on every remaining tier. */
-  | { kind: 'refused-repeatedly'; refusals: number };
+  | { kind: 'refused-repeatedly'; refusals: number }
+);
+
+/** What a give-up says when the model left `reason` empty. */
+const NO_REASON = 'no reason given';
 
 /**
  * How many refused destinations end a run. A refusal costs an LLM call and returns no
@@ -201,6 +212,7 @@ export async function runAgentLoop(input: {
     'Older observations in the transcript are elided; record key facts (candidate slugs/URLs) in your note so you can reuse them later.',
     'Only download links that look like complete season packs, batch archives, or full-movie packs — not single-episode files, unless nothing else exists.',
     'Preferred groups and languages are soft preferences: never give_up solely because the perfect group is missing.',
+    'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
     'Respond with JSON matching the schema — no prose outside the JSON.',
   ]
     .filter(Boolean)
@@ -244,7 +256,9 @@ export async function runAgentLoop(input: {
     });
     onTranscript({ ts: Date.now(), tier: tier.tier, action: action.action, detail: `${action.note} (${action.url})` });
 
-    if (action.action === 'give_up') return { kind: 'gave-up' };
+    if (action.action === 'give_up') {
+      return { kind: 'gave-up', steps: step + 1, reason: action.reason.trim() || NO_REASON };
+    }
 
     const referer = action.referer !== '' ? action.referer : undefined;
 
@@ -260,7 +274,7 @@ export async function runAgentLoop(input: {
       // A malformed URL is a model slip; a private/loopback address or an off-web scheme is
       // the SSRF/local-read shape and has to reach a human even when the run recovers next step.
       if (refuse(line, isSecuritySignal(refusal) ? 'attention' : undefined)) {
-        return { kind: 'refused-repeatedly', refusals };
+        return { kind: 'refused-repeatedly', refusals, steps: step + 1 };
       }
       continue;
     }
@@ -288,14 +302,14 @@ export async function runAgentLoop(input: {
         ...(referer !== undefined ? { referer } : {}),
       });
       const hop = refuseHop(res);
-      if (hop === 'stop') return { kind: 'refused-repeatedly', refusals };
+      if (hop === 'stop') return { kind: 'refused-repeatedly', refusals, steps: step + 1 };
       if (hop === 'continue') continue;
       if (res.blocked) throw new TierBlockedError(`download blocked at ${action.url}`);
       if (!res.ok || res.filePath === undefined) {
         history.push({ prefix: `download ${action.url} -> FAILED` });
         continue;
       }
-      return { kind: 'downloaded', filePath: res.filePath, url: action.url, searchUrl: lastSearchUrl };
+      return { kind: 'downloaded', steps: step + 1, filePath: res.filePath, url: action.url, searchUrl: lastSearchUrl };
     }
 
     if (action.action === 'request') {
@@ -311,7 +325,7 @@ export async function runAgentLoop(input: {
           siteHost = site.baseUrl;
         }
         const line = `request refused: ${capUrl(action.url)} is not on ${siteHost}`;
-        if (refuse(line)) return { kind: 'refused-repeatedly', refusals };
+        if (refuse(line)) return { kind: 'refused-repeatedly', refusals, steps: step + 1 };
         continue;
       }
 
@@ -324,7 +338,7 @@ export async function runAgentLoop(input: {
         ...(referer !== undefined ? { referer } : {}),
       });
       const hop = refuseHop(res);
-      if (hop === 'stop') return { kind: 'refused-repeatedly', refusals };
+      if (hop === 'stop') return { kind: 'refused-repeatedly', refusals, steps: step + 1 };
       if (hop === 'continue') continue;
       if (res.blocked) throw new TierBlockedError(`request blocked at ${action.url}`);
       if (res.ok) {
@@ -340,7 +354,7 @@ export async function runAgentLoop(input: {
 
     const res = await tier.fetch(action.url);
     const hop = refuseHop(res);
-    if (hop === 'stop') return { kind: 'refused-repeatedly', refusals };
+    if (hop === 'stop') return { kind: 'refused-repeatedly', refusals, steps: step + 1 };
     if (hop === 'continue') continue;
     if (res.blocked) throw new TierBlockedError(`${action.action} blocked at ${action.url}`);
     if (res.ok && action.action === 'search') lastSearchUrl = action.url;
@@ -353,5 +367,5 @@ export async function runAgentLoop(input: {
       history.push({ prefix: `${action.action} ${action.url} -> ${httpFailure(res)}` });
     }
   }
-  return { kind: 'exhausted' };
+  return { kind: 'exhausted', steps: maxSteps };
 }
