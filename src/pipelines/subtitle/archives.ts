@@ -118,12 +118,15 @@ async function extractWithExternalTool(archivePath: string, destDir: string): Pr
       throw new UnsupportedArchiveError(archivePath, `${bin} failed for ${basename(archivePath)}: ${msg}`);
     }
   };
-  if (await binAvailable('7z')) {
-    await run('7z', ['x', archivePath, `-o${destDir}`, '-y', '-bd']);
+  // rarlab's unrar goes first for .rar: p7zip rejects the newer RAR methods fansub packs
+  // ship with ("Unsupported Method"), so 7z is only the fallback when unrar is absent.
+  const haveUnrar = lower.endsWith('.rar') && (await binAvailable('unrar'));
+  if (haveUnrar) {
+    await run('unrar', ['x', '-o+', archivePath, destDir + '/']);
     return;
   }
-  if (lower.endsWith('.rar') && (await binAvailable('unrar'))) {
-    await run('unrar', ['x', '-o+', archivePath, destDir + '/']);
+  if (await binAvailable('7z')) {
+    await run('7z', ['x', archivePath, `-o${destDir}`, '-y', '-bd']);
     return;
   }
   throw new UnsupportedArchiveError(
