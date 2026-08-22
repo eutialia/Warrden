@@ -1229,6 +1229,25 @@ describe('app', () => {
       expect(detail.subtitleRuns[0]).toMatchObject({ site: 'acg.rip', status: 'done' });
       expect(detail.subtitleRuns[0].transcript).toEqual([{ ts: 1, tier: 'curl', action: 'search', detail: 'page' }]);
     });
+
+    // The run body's whole narration lives in these two kinds, and a long run's transcript
+    // spam had already filled the default window before the first of them was written.
+    it('carries the search narration past the transcript spam that outnumbers it', async () => {
+      const ctx = makeCtx();
+      const jobId = ctx.queue.enqueue({ pipeline: 'subtitle', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
+      ctx.events.append({ kind: 'subtitle.search-scoped', jobId, message: 'one quick look per site' });
+      for (let i = 0; i < 150; i++) ctx.events.append({ kind: 'subtitle.transcript', jobId, message: `step ${i}` });
+      ctx.events.append({ kind: 'subtitle.search-round', jobId, message: '[acg.rip] round 1/1 (curl): gave up: nothing yet' });
+      const app = createApp(ctx);
+
+      const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
+
+      const kinds = detail.events.map((e: { kind: string }) => e.kind);
+      expect(kinds.filter((k: string) => k === 'subtitle.search-round')).toHaveLength(1);
+      expect(kinds.filter((k: string) => k === 'subtitle.search-scoped')).toHaveLength(1);
+      const ids = detail.events.map((e: { id: number }) => e.id);
+      expect(ids).toEqual([...ids].sort((a, b) => a - b));
+    });
   });
 
   describe('trace routes', () => {
