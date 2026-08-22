@@ -657,6 +657,41 @@ describe('runSubtitleJob', () => {
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
   });
 
+  it('a covered episode never quarantines the candidates that failed to fill its second language', async () => {
+    // Nothing is wrong with this episode: it has subtitles. A cached pack that cannot be
+    // verified against it is a non-event, not a warning and not a file to set aside.
+    const fx = subtitleFixture();
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    const extractDir = tmpDir();
+    const files: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const filePath = join(extractDir, `${i}-[G${i}] Show - S01E05.cht.ass`);
+      writeFileSync(filePath, SRT_UNRELATED);
+      files.push(filePath);
+    }
+    new ArchiveCache(fx.ctx.db).upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: 'series',
+      targetId: fx.targetId,
+      sourceUrl: 'https://example.test/pack.zip',
+      path: extractDir,
+      files: entriesForFiles(files, extractDir),
+    });
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.quarantined')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.candidates-capped')).toBe(false);
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
+    expect(files.every((f) => existsSync(f))).toBe(true);
+  });
+
   it('every episode covered and the cache empty -> subtitle.complete, no site search', async () => {
     const fx = subtitleFixture();
     fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];

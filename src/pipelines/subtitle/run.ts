@@ -727,10 +727,15 @@ async function driftAndPlace(
 
   const plan = await decideCandidate(entry, t, state);
   if (plan.kind === 'quarantine') {
-    quarantine(ctx, job, state, t, entry.path);
-    // The trip fires here rather than at the first skipped candidate, so it is exactly one
-    // event per episode whether the pack held five more candidates or none.
-    if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
+    // A covered episode is already watchable; a candidate that fails to add a second
+    // language to it is nothing to warn about and nothing to set aside. Only an episode
+    // with no subtitles at all reaches the rollup, so only that one earns these events.
+    if (!t.covered) {
+      quarantine(ctx, job, state, t, entry.path);
+      // The trip fires here rather than at the first skipped candidate, so it is exactly one
+      // event per episode whether the pack held five more candidates or none.
+      if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
+    }
     return undefined;
   }
 
