@@ -380,7 +380,7 @@ export default function Sites() {
       {config && (
         <>
           <StatBand>
-            <StatTile label="Languages wanted" value={languages.length} hint="Before a video counts as covered" />
+            <StatTile label="Accepted languages" value={languages.length} hint="Before a video counts as covered" />
             <StatTile label="Preferred groups" value={groups.length} hint="Ranking boost only" />
             <StatTile label="Sites" value={config.subtitle.sites.length} hint="Tried in order, top first" />
             <StatTile
@@ -396,14 +396,18 @@ export default function Sites() {
             <CardHeader>
               <CardTitle>What counts as covered</CardTitle>
               <CardDescription>
-                A video needs a track in every language listed here before Warrden considers it done. Preferred groups
-                only boost ranking — a search never skips a pack because its group is missing.
+                A video needs a track in at least one language listed here before Warrden considers it done.
+                Preferred groups only boost ranking — a search never skips a pack because its group is missing.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label>Languages</Label>
                 <LanguageInput values={languages} onChange={(next) => commitList('languages', next)} />
+                <p className="text-xs text-muted-foreground">
+                  First is preferred. One of these is enough for an episode to count as subtitled; a run still grabs
+                  every one it can find.
+                </p>
               </div>
               <div className="space-y-2">
                 <Label>Preferred fansub groups</Label>
