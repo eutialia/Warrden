@@ -3,6 +3,7 @@ import { AgentActionSchema, runAgentLoop, TierBlockedError } from '../src/agent/
 import type { FetchOpts, FetchResult, FetchTier } from '../src/agent/tiers.js';
 import type { TranscriptEntry } from '../src/db/subtitleRuns.js';
 import { defaultProfileRow, FakeGenerator, tmpDir } from './helpers.js';
+import { parseFailure } from './llmFixtures.js';
 
 const PROFILE = defaultProfileRow('https://acg.rip');
 
@@ -12,6 +13,7 @@ function act(
     action: 'search' | 'open' | 'download' | 'request' | 'give_up';
     url: string;
     note: string;
+    reason?: string;
     method?: 'GET' | 'POST';
     body?: string;
     contentType?: string;
@@ -23,6 +25,7 @@ function act(
     body: '',
     contentType: '',
     referer: '',
+    reason: '',
     ...partial,
   };
 }
@@ -42,6 +45,7 @@ function fakeTier(results: FetchResult[]): FetchTier & { calls: { url: string; o
 
 const SITE = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 
+
 const OK_HTML = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
 
 describe('runAgentLoop', () => {
@@ -53,7 +57,7 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'Frieren', destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'downloaded', filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip', searchUrl: 'https://acg.rip/?term=frieren' });
+    expect(out).toEqual({ kind: 'downloaded', steps: 3, filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip', searchUrl: 'https://acg.rip/?term=frieren' });
     expect(tier.calls.map((c) => c.url)).toEqual(['https://acg.rip/?term=frieren', 'https://acg.rip/t/123', 'https://acg.rip/dl/123.zip']);
   });
 
@@ -64,13 +68,22 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 2, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'exhausted' });
+    expect(out).toEqual({ kind: 'exhausted', steps: 2 });
   });
 
-  it('returns gave-up when the LLM does', async () => {
+  it('returns gave-up with the model own reason and the steps it took', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'nothing here', reason: 'the site lists nothing for this season yet' }),
+    ]);
+    const out = await runAgentLoop({ llm, tier: fakeTier([OK_HTML]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out).toEqual({ kind: 'gave-up', steps: 2, reason: 'the site lists nothing for this season yet' });
+  });
+
+  it('falls back to a stated-nothing reason when give_up carries no sentence', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nothing here' })]);
     const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'gave-up' });
+    expect(out).toEqual({ kind: 'gave-up', steps: 1, reason: 'no reason given' });
   });
 
   it('throws TierBlockedError when the tier reports a bot wall', async () => {
@@ -281,7 +294,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator([act({ action, url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', filePath: '/dl/x', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'gave-up' });
+    expect(out).toMatchObject({ kind: 'gave-up', steps: 2 });
     expect(tier.calls).toHaveLength(0);
     expect(llm.calls[1]!.prompt).toContain(`${action} refused: ${url} targets a private/loopback address`);
   });
@@ -343,7 +356,7 @@ describe('runAgentLoop', () => {
       const tier = fakeTier([{ ok: false, blocked: false, refusedUrl }]);
       const entries: TranscriptEntry[] = [];
       const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
-      expect(out).toEqual({ kind: 'gave-up' });
+      expect(out).toMatchObject({ kind: 'gave-up', steps: 2 });
       const refusal = entries.find((e) => e.action === 'refused');
       expect(refusal?.level).toBe('attention');
       expect(refusal?.detail).toBe(
@@ -365,7 +378,7 @@ describe('runAgentLoop', () => {
     );
     const entries: TranscriptEntry[] = [];
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 4, onTranscript: (e) => entries.push(e) });
-    expect(out).toEqual({ kind: 'exhausted' });
+    expect(out).toEqual({ kind: 'exhausted', steps: 4 });
     const refusals = entries.filter((e) => e.action === 'refused');
     expect(refusals).toHaveLength(4);
     expect(refusals[0]!.level).toBeUndefined();
@@ -395,7 +408,7 @@ describe('runAgentLoop', () => {
     );
     const tier = fakeTier(new Array(5).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl: 'http://[::1]/x' })));
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3 });
+    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3, steps: 3 });
   });
 
   it('passes referer on download to the tier', async () => {
@@ -455,7 +468,7 @@ describe('runAgentLoop', () => {
     );
     const tier = fakeTier([]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3 });
+    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3, steps: 3 });
     expect(llm.calls).toHaveLength(3);
   });
 
@@ -469,9 +482,17 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator(new Array(6).fill(null).map(() => action));
     const entries: TranscriptEntry[] = [];
     const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 6, onTranscript: (e) => entries.push(e) });
-    expect(out).toEqual({ kind: 'exhausted' });
+    expect(out).toEqual({ kind: 'exhausted', steps: 6 });
     // Every step still refused, and every refusal still reached the transcript.
     expect(entries.filter((e) => e.action === 'refused')).toHaveLength(6);
+  });
+
+  it('tells the agent a fresh episode with nothing listed is a give_up, not a longer hunt', async () => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+    expect(llm.calls[0]!.system).toContain(
+      'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
+    );
   });
 
   it('joins action bullets as separate lines and states download/cookie/elision rules', async () => {
@@ -515,10 +536,72 @@ describe('runAgentLoop', () => {
     expect(prompt).toContain(longB.slice(0, 1000));
   });
 
+  it('treats a malformed reply as a bad step and carries on once the model recovers', async () => {
+    const llm = new FakeGenerator([
+      parseFailure(),
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      parseFailure(),
+      parseFailure(),
+      act({ action: 'give_up', url: '', note: 'done', reason: 'nothing listed' }),
+    ]);
+    const transcript: TranscriptEntry[] = [];
+    const out = await runAgentLoop({
+      llm,
+      tier: fakeTier([OK_HTML]),
+      site: SITE,
+      profile: PROFILE,
+      knowledge: '',
+      query: 'F',
+      destDir: tmpDir(),
+      maxSteps: 10,
+      onTranscript: (e) => transcript.push(e),
+    });
+    expect(out).toEqual({ kind: 'gave-up', steps: 5, reason: 'nothing listed' });
+    expect(transcript.filter((e) => e.action === 'malformed')).toHaveLength(3);
+    // The correction rides in the next prompt, or the model has no idea what went wrong.
+    const lastPrompt = llm.calls.at(-1)!.prompt;
+    expect(lastPrompt).toContain('previous reply was not valid JSON');
+  });
+
+  it('stops the site after three consecutive malformed replies', async () => {
+    const llm = new FakeGenerator([parseFailure(), parseFailure(), parseFailure(), act({ action: 'search', url: 'https://acg.rip/?t=x', note: 's' })]);
+    const out = await runAgentLoop({
+      llm,
+      tier: fakeTier([OK_HTML]),
+      site: SITE,
+      profile: PROFILE,
+      knowledge: '',
+      query: 'F',
+      destDir: tmpDir(),
+      maxSteps: 10,
+      onTranscript: () => {},
+    });
+    expect(out).toEqual({ kind: 'malformed-repeatedly', failures: 3, steps: 3 });
+    // The fourth queued action was never asked for.
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it('rethrows an error that is not a parse failure', async () => {
+    const llm = new FakeGenerator([new Error('provider is down')]);
+    await expect(
+      runAgentLoop({
+        llm,
+        tier: fakeTier([]),
+        site: SITE,
+        profile: PROFILE,
+        knowledge: '',
+        query: 'F',
+        destDir: tmpDir(),
+        maxSteps: 10,
+        onTranscript: () => {},
+      }),
+    ).rejects.toThrow('provider is down');
+  });
+
   it('strict-mode schema requires every action field (no optional)', () => {
     // Zod 4: optional fields wrap as ZodOptional; required sentinels must parse without defaults.
     const shape = AgentActionSchema.shape;
-    for (const key of ['action', 'url', 'note', 'method', 'body', 'contentType', 'referer'] as const) {
+    for (const key of ['action', 'url', 'note', 'method', 'body', 'contentType', 'referer', 'reason'] as const) {
       expect(shape[key].isOptional()).toBe(false);
       expect(shape[key].def.type).not.toBe('optional');
     }
@@ -533,6 +616,7 @@ describe('runAgentLoop', () => {
         body: '',
         contentType: '',
         referer: '',
+        reason: '',
       }),
     ).toMatchObject({ action: 'give_up', method: 'GET', body: '' });
   });

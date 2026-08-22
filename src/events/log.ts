@@ -150,6 +150,21 @@ export class EventLog {
     return rows.map(parseRow);
   }
 
+  /**
+   * One job's events of specific kinds, oldest first and unbounded by `listByJob`'s window.
+   * The window is a defence against a runaway job filling a response; a handful of named
+   * kinds cannot be that, and the run body needs exactly the lines a long run's transcript
+   * spam had already pushed out of the oldest 100.
+   */
+  listByJobKinds(jobId: number, kinds: readonly string[]): EventRow[] {
+    if (kinds.length === 0) return [];
+    const placeholders = kinds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(`SELECT * FROM events WHERE job_id = ? AND kind IN (${placeholders}) ORDER BY id ASC`)
+      .all(jobId, ...kinds) as EventRowRaw[];
+    return rows.map(parseRow);
+  }
+
   subscribe(fn: (e: EventRow) => void): () => void {
     this.subscribers.add(fn);
     return () => {

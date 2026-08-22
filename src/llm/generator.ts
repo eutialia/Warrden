@@ -57,14 +57,35 @@ export class LlmError extends Error {
  * otherwise burn the budget before the error one hop further in is ever looked at.
  */
 function isPermanentProviderError(err: unknown): boolean {
+  return someErrorInChain(
+    err,
+    (e) =>
+      InvalidPromptError.isInstance(e) ||
+      NoObjectGeneratedError.isInstance(e) ||
+      (APICallError.isInstance(e) && isPermanentStatus(e.statusCode)),
+  );
+}
+
+/**
+ * Whether the failure is the model answering something that is not the object — the one
+ * failure a caller can answer by asking again in the same run. Everything else (a 402, a
+ * dead route, an FS fault) is about the call rather than the reply, and a retry inside the
+ * caller's own loop would only burn its budget.
+ */
+export function isObjectParseFailure(err: unknown): boolean {
+  return someErrorInChain(err, (e) => NoObjectGeneratedError.isInstance(e));
+}
+
+/** Bounded walk over `cause` links and `AggregateError` members (see
+ * `isPermanentProviderError` for why both, and why the bound counts error nodes only). */
+function someErrorInChain(err: unknown, pred: (e: object) => boolean): boolean {
   const pending: unknown[] = [err];
   let seen = 0;
   while (seen < 5 && pending.length > 0) {
     const e = pending.shift();
     if (typeof e !== 'object' || e === null) continue;
     seen++;
-    if (InvalidPromptError.isInstance(e) || NoObjectGeneratedError.isInstance(e)) return true;
-    if (APICallError.isInstance(e) && isPermanentStatus(e.statusCode)) return true;
+    if (pred(e)) return true;
     if (e instanceof AggregateError) pending.push(...e.errors);
     pending.push((e as Error).cause);
   }
@@ -242,25 +263,36 @@ function schemaAppendix(schema: z.ZodType<unknown>): string {
 }
 
 /**
+ * The last line of the user half where no provider enforces the schema. The schema dump says
+ * what the object must contain; this says that the answer is the object and nothing else,
+ * which is the part ox-alpha kept losing between a long system prompt and its reply. No worked
+ * example goes with it — the schema already shows the shape, and a second one only costs
+ * tokens on every step of a 20-step loop.
+ */
+const JSON_ONLY_CONTRACT =
+  'Answer with the JSON object only. It starts with { and ends with }. No code fence, no commentary.';
+
+/**
  * Pulls a bare JSON object out of what a model actually sent when the prompt was the only
- * thing holding it to the schema. Two shapes, both observed from ox-alpha: the object inside
- * a ```json fence, and a sentence of preamble before it. Returns null when there is nothing
- * to fix or nothing recoverable — the SDK reads null as "no repair" and lets the original
- * parse error stand, which is the honest answer for a refusal or a page of prose.
+ * thing holding it to the schema: every fence marker goes, wherever it sits, and what is left
+ * is cut from its first `{` to its last `}`.
+ *
+ * Nothing here is anchored, because the live failures were not. Job 75 came back with a
+ * ```html fence spliced into the middle of a url string — twice, identically — which an
+ * anchored strip left exactly as broken as it arrived. Returns null when no object survives,
+ * which the SDK reads as "no repair": for job 74's page of transcript prose, letting the
+ * original parse error stand is the honest answer.
  *
  * Pure and exported so the shapes can be tested without a model in the loop.
  */
 export function repairObjectText(text: string): string | null {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```[a-zA-Z]*[ \t]*\r?\n?([\s\S]*?)\r?\n?```$/);
-  let out = (fenced?.[1] ?? trimmed).trim();
-
-  if (!out.startsWith('{')) {
-    const start = out.indexOf('{');
-    const end = out.lastIndexOf('}');
-    if (start === -1 || end <= start) return null;
-    out = out.slice(start, end + 1);
-  }
+  // One pattern covers both ends: the language tag is optional, so a bare closing ``` matches
+  // it too, and the newline after an opening fence goes with the marker.
+  const stripped = text.replace(/```[a-zA-Z]*[ \t]*\r?\n?/g, '');
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  const out = stripped.slice(start, end + 1);
   return out === text ? null : out;
 }
 
@@ -283,22 +315,22 @@ async function repairText({ text }: { text: string }): Promise<string | null> {
  *
  * Below the `native` tier the provider enforces nothing, so the schema is restated in the
  * system half: the `schema` option still governs parsing here, it just no longer reaches the
- * endpoint as a constraint. It goes first, not last: with the schema trailing a long
- * instruction block, ox-alpha answered the agent loop in prose five times out of six;
- * leading with it, the same prompts came back as valid objects every time.
+ * endpoint as a constraint. It trails the caller's own system text, and the user half closes
+ * with `JSON_ONLY_CONTRACT` — the two things a model reads last are then both about shape.
  *
  * Those same tiers get `repairText`: a model held to the schema by nothing but the prompt
  * still fences its answer or leads with a sentence often enough that the alternative is a
  * `NoObjectGeneratedError` and a second full-price call to ask again.
  */
 export function buildGenerateOptions<T>(opts: GenerateOpts<T>, cache: PromptCachePlan, tier: StructuredOutputTier) {
-  const system = tier === 'native' ? opts.system : `${schemaAppendix(opts.schema)}\n\n${opts.system}`;
+  const system = tier === 'native' ? opts.system : `${opts.system}\n\n${schemaAppendix(opts.schema)}`;
+  const prompt = tier === 'native' ? opts.prompt : `${opts.prompt}\n\n${JSON_ONLY_CONTRACT}`;
   return {
     schema: opts.schema,
     instructions: cache.systemProviderOptions
       ? { role: 'system' as const, content: system, providerOptions: cache.systemProviderOptions }
       : system,
-    messages: [{ role: 'user' as const, content: opts.prompt }],
+    messages: [{ role: 'user' as const, content: prompt }],
     ...(cache.callProviderOptions ? { providerOptions: cache.callProviderOptions } : {}),
     // Only where nothing but the prompt asks for JSON. A native-tier endpoint that returns a
     // fence has a real problem worth surfacing, and the hook would hide it.

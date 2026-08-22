@@ -34,6 +34,7 @@ import { PlacedFiles } from '../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '../db/siteProfiles.js';
 import { SubtitleRuns } from '../db/subtitleRuns.js';
 import { TraceEntries } from '../db/traceEntries.js';
+import type { EventLog, EventRow } from '../events/log.js';
 import { targetEventData } from '../events/target.js';
 import type { JobRow, TargetKind } from '../jobs/queue.js';
 import { ModelCatalog } from '../llm/catalog.js';
@@ -58,6 +59,21 @@ const DEFAULT_WEB_DIST_DIR = join(dirname(fileURLToPath(import.meta.url)), '..',
 
 // `?limit=` (empty) and `?limit=abc` (non-numeric) both fall back to `fallback` rather
 // than reaching better-sqlite3, which rejects NaN/negative bind params outright.
+/**
+ * The kinds the job detail must carry however much else the run logged: the search's own
+ * narration, which the run body renders above the transcripts. `listByJob` is capped, and a
+ * run of any length fills that cap with `subtitle.transcript` steps before the first round
+ * ever ends — so these are fetched again, unbounded, and merged back in by id.
+ */
+const NARRATION_KINDS = ['subtitle.search-scoped', 'subtitle.search-round'];
+
+function jobEvents(events: EventLog | undefined, jobId: number): EventRow[] {
+  if (events === undefined) return [];
+  const byId = new Map<number, EventRow>();
+  for (const row of [...events.listByJob(jobId), ...events.listByJobKinds(jobId, NARRATION_KINDS)]) byId.set(row.id, row);
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+
 function parseLimit(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
   const n = Number(raw);
@@ -404,7 +420,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // has no other record of why it did nothing.
         // This handler is mounted on queue+db, not the events block, so `events` is not in
         // scope here; `ctx.events` is optional on Partial<AppContext>.
-        events: ctx.events?.listByJob(job.id) ?? [],
+        events: jobEvents(ctx.events, job.id),
         // This job's own subtitle site-search runs, transcript included. The activity
         // drawer's RunDetail renders them inline as a chronological step list.
         subtitleRuns: new SubtitleRuns(db).listByJob(job.id),

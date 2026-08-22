@@ -8,6 +8,7 @@ import { PlacedFiles } from '../src/db/placedFiles.js';
 import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
+import type { SearchSiteOptions } from '../src/agent/run.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { MAX_CANDIDATES_PER_EPISODE, MAX_SEARCH_ROUNDS, runSubtitleJob } from '../src/pipelines/subtitle/run.js';
 import { MOUNT_RETRY_MS } from '../src/pipelines/mounts.js';
@@ -104,7 +105,7 @@ function claimSubtitleJob(fx: SubtitleFixture, opts?: { source?: string }) {
 function siteStub(files: Record<string, string>) {
   const zipPath = makeZip(files);
   return {
-    searchSite: async () => ({ download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], outcome: 'downloaded' as const }),
+    searchSite: async () => ({ download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], steps: 1, outcome: 'downloaded' as const }),
   };
 }
 
@@ -127,7 +128,7 @@ function roundStub(packs: Record<string, string>[], urlOf: (round: number) => st
       calls.push(query as SearchHints);
       const download = zips[round];
       if (!download) throw new Error(`unexpected search round ${round + 1}`);
-      return { download, transcript: [], outcome: 'downloaded' as const };
+      return { download, transcript: [], steps: 1, outcome: 'downloaded' as const };
     },
   };
   return { calls, deps };
@@ -326,7 +327,7 @@ describe('runSubtitleJob', () => {
     return {
       searchSite: async () => {
         n += 1;
-        return { download: { filePath: makeZip({ 'Bonus.ass': SRT }, `acg.rip-${Date.now()}-${n}-pack.zip`), url }, transcript: [], outcome: 'downloaded' as const };
+        return { download: { filePath: makeZip({ 'Bonus.ass': SRT }, `acg.rip-${Date.now()}-${n}-pack.zip`), url }, transcript: [], steps: 1, outcome: 'downloaded' as const };
       },
     };
   }
@@ -561,7 +562,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async () => {
         writeFileSync(targetPath, 'foreign-content');
-        return { download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], outcome: 'downloaded' as const };
+        return { download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], steps: 1, outcome: 'downloaded' as const };
       },
     });
 
@@ -723,11 +724,13 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, _site, query) => {
         hints = query as SearchHints;
-        return { download: null, transcript: [], outcome: 'gave-up' as const };
+        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
       },
     });
 
-    expect(hints!.missingSeasons).toEqual([{ seasonNumber: 2, episodes: 1, titles: [] }]);
+    expect(hints!.missingSeasons).toEqual([
+      { seasonNumber: 2, episodeNumbers: [5], newestAiredDaysAgo: null, titles: [] },
+    ]);
   });
 
   it('skips a candidate whose destination is already claimed before doing any media work', async () => {
@@ -777,13 +780,13 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, _site, query) => {
         hints = query as SearchHints;
-        return { download: null, transcript: [], outcome: 'gave-up' as const };
+        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
       },
     });
 
     expect(hints!.missingSeasons).toEqual([
-      { seasonNumber: 1, episodes: 1, titles: [] },
-      { seasonNumber: 2, episodes: 1, titles: ['Frieren S2'] },
+      { seasonNumber: 1, episodeNumbers: [5], newestAiredDaysAgo: null, titles: [] },
+      { seasonNumber: 2, episodeNumbers: [1], newestAiredDaysAgo: null, titles: ['Frieren S2'] },
     ]);
   });
 
@@ -800,7 +803,9 @@ describe('runSubtitleJob', () => {
     expect(existsSync(join(fx.libraryDir, 'Show - S02E05.zh-Hans.ass'))).toBe(true);
     // Round 2 is told what round 1 already fetched, and asked only for what is still left.
     expect(calls[1]!.alreadyFetched).toEqual([{ url: 'https://example.test/pack-0.zip', title: 'pack-0.zip' }]);
-    expect(calls[1]!.missingSeasons).toEqual([{ seasonNumber: 2, episodes: 1, titles: [] }]);
+    expect(calls[1]!.missingSeasons).toEqual([
+      { seasonNumber: 2, episodeNumbers: [5], newestAiredDaysAgo: null, titles: [] },
+    ]);
     // Round 1 was asked for both, and knew of nothing fetched yet.
     expect(calls[0]!.alreadyFetched).toEqual([]);
     expect(calls[0]!.missingSeasons).toHaveLength(2);
@@ -860,7 +865,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, _site, query) => {
         hints = query as SearchHints;
-        return { download: null, transcript: [], outcome: 'gave-up' as const };
+        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
       },
     });
 
@@ -937,11 +942,11 @@ describe('runSubtitleJob', () => {
         if (round === 1) {
           // What searchSite records on a download.
           profiles.update(site.baseUrl, { lastWorkingTier: 'curl', lastSuccessAt: Date.now(), failCount: 0, lastFailureAt: null });
-          return { download: { filePath: zipPath, url: 'https://example.test/round-1.zip' }, transcript: [], outcome: 'downloaded' as const };
+          return { download: { filePath: zipPath, url: 'https://example.test/round-1.zip' }, transcript: [], steps: 1, outcome: 'downloaded' as const };
         }
         // What searchSite records when every rung comes up empty.
         profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profiles.get(site.baseUrl)!.fail_count + 1 });
-        return { download: null, transcript: [], outcome: 'gave-up' as const };
+        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
       },
     };
 
@@ -1094,7 +1099,7 @@ describe('runSubtitleJob', () => {
     const fx = subtitleFixture();
     const job = claimSubtitleJob(fx);
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: null, transcript: [], outcome: 'cooldown' as const }),
+      searchSite: async () => ({ download: null, transcript: [], steps: 1, outcome: 'cooldown' as const }),
       reflectOnRun: async () => {
         called = true;
         return null;
@@ -1125,7 +1130,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, site) => {
         searched.push(site.baseUrl);
-        return { download: null, transcript: [], outcome: 'gave-up' as const };
+        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
       },
     });
 
@@ -1170,7 +1175,7 @@ describe('runSubtitleJob', () => {
     const job = claimSubtitleJob(fx);
 
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: { filePath: bogus, url: 'https://example.test/pack.rar' }, transcript: [], outcome: 'downloaded' as const }),
+      searchSite: async () => ({ download: { filePath: bogus, url: 'https://example.test/pack.rar' }, transcript: [], steps: 1, outcome: 'downloaded' as const }),
     });
 
     const empty = findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.pack-empty');
@@ -1193,6 +1198,7 @@ describe('runSubtitleJob', () => {
         searchSite: async () => ({
           download: { filePath: zipPath, url: 'https://example.test/corrupt.zip' },
           transcript: [],
+          steps: 1,
           outcome: 'downloaded' as const,
         }),
         reflectOnRun: reflectSpy(calls),
@@ -1207,7 +1213,7 @@ describe('runSubtitleJob', () => {
     const job = claimSubtitleJob(fx);
     const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
     const deps = {
-      searchSite: async () => ({ download: null, transcript, outcome: 'exhausted' as const }),
+      searchSite: async () => ({ download: null, transcript, steps: 1, outcome: 'exhausted' as const }),
       reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
     };
     await runSubtitleJob(fx.ctx, job, deps);
@@ -1229,7 +1235,7 @@ describe('runSubtitleJob', () => {
     const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
     const longReason = `Cloudflare wall survives every tier. ${'x'.repeat(400)}`;
     const deps = {
-      searchSite: async () => ({ download: null, transcript, outcome: 'exhausted' as const }),
+      searchSite: async () => ({ download: null, transcript, steps: 1, outcome: 'exhausted' as const }),
       reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: longReason }),
     };
     await runSubtitleJob(fx.ctx, job, deps);
@@ -1260,7 +1266,7 @@ describe('runSubtitleJob', () => {
     });
     const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
     const deps = {
-      searchSite: async () => ({ download: null, transcript, outcome: 'exhausted' as const }),
+      searchSite: async () => ({ download: null, transcript, steps: 1, outcome: 'exhausted' as const }),
       reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
     };
 
@@ -1280,7 +1286,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async () => {
         ran = true;
-        return { download: null, transcript: [], outcome: 'gave-up' as const };
+        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
       },
     });
     expect(ran).toBe(false);
@@ -1359,5 +1365,149 @@ describe('runSubtitleJob LLM remainder', () => {
     expect(prompt).toContain('#1 Show - extras.chs.ass');
     expect(prompt).not.toContain('#2');
     expect(existsSync(join(fx.libraryDir, 'Show - S03E05.zh-Hans.ass'))).toBe(true);
+  });
+});
+
+const DAY = 24 * 3_600_000;
+
+/** Every episode the fixture's arr knows aired `days` ago. */
+function airedDaysAgo(fx: SubtitleFixture, days: number): void {
+  for (const episode of fx.client.episodes) episode.airDateUtc = new Date(Date.now() - days * DAY).toISOString();
+}
+
+/** A `searchSite` seam that records the options each round was called with alongside its
+ * hints, and hands back one pack per round like `roundStub`. */
+function optionRoundStub(packs: Record<string, string>[]) {
+  const { calls, deps } = roundStub(packs);
+  const options: (SearchSiteOptions | undefined)[] = [];
+  const inner = deps.searchSite!;
+  const wrapped: Parameters<typeof runSubtitleJob>[2] = {
+    searchSite: async (ctx, job, site, query, destDir, opts) => {
+      options.push(opts);
+      return inner(ctx, job, site, query, destDir, opts);
+    },
+  };
+  return { calls, options, deps: wrapped };
+}
+
+describe('runSubtitleJob — fresh gaps', () => {
+  it('threads the arr air date into the search hints', async () => {
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 3);
+    const { calls, deps } = roundStub([seasonPack(1)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls[0]!.missingSeasons).toEqual([
+      { seasonNumber: 1, episodeNumbers: [5], newestAiredDaysAgo: 3, titles: [] },
+    ]);
+  });
+
+  it('every missing episode aired this week -> one round per site, no tier escalation, one search-scoped event', async () => {
+    const fx = multiSeasonFixture(2);
+    airedDaysAgo(fx, 1);
+    const { calls, options, deps } = optionRoundStub([seasonPack(1), seasonPack(2)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls).toHaveLength(1);
+    expect(options[0]).toMatchObject({ escalate: false, maxRounds: 1 });
+    const scoped = findEvent(fx.ctx.events.list(), 'subtitle.search-scoped');
+    expect(scoped?.message).toContain('every missing episode aired within 7 days; one quick look per site');
+    expect(fx.ctx.events.list().filter((e) => e.kind === 'subtitle.search-scoped')).toHaveLength(1);
+  });
+
+  it('a backlog episode among fresh ones keeps every round and the escalating ladder', async () => {
+    const fx = multiSeasonFixture(2);
+    airedDaysAgo(fx, 1);
+    fx.client.episodes[0]!.airDateUtc = new Date(Date.now() - 400 * DAY).toISOString();
+    const { calls, options, deps } = optionRoundStub([seasonPack(1), seasonPack(2)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls).toHaveLength(2);
+    expect(options[0]).toMatchObject({ escalate: true, maxRounds: MAX_SEARCH_ROUNDS });
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
+  });
+
+  it('no air dates at all is not a fresh gap', async () => {
+    const fx = multiSeasonFixture(2);
+    const { calls, deps } = optionRoundStub([seasonPack(1), seasonPack(2)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(calls).toHaveLength(2);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
+  });
+
+  it('says nothing about scoping the pass down when no site is attempted at all', async () => {
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    new SiteProfiles(fx.ctx.db).upsert({ baseUrl: 'https://acg.rip' });
+    new SiteProfiles(fx.ctx.db).update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'bot wall' });
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
+  });
+
+  // "Searched once, found nothing, it aired yesterday" teaches the notes file nothing, and
+  // reflection is a paid round trip per site per job.
+  it('skips reflection for a fresh round that gave up in a couple of steps', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], steps: 2, outcome: 'gave-up' as const }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([]);
+  });
+
+  it('still reflects on a fresh round that spent real steps', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], steps: 3, outcome: 'gave-up' as const }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: false }]);
+  });
+
+  // A round that broke IS worth a note, however short it was: that is a fact about the site.
+  it('still reflects on a fresh round that ended in an error', async () => {
+    const calls: Array<{ verifiedSuccess: boolean }> = [];
+    const fx = subtitleFixture();
+    airedDaysAgo(fx, 1);
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async () => ({ download: null, transcript: [], steps: 1, outcome: 'error' as const }),
+      reflectOnRun: reflectSpy(calls),
+    });
+
+    expect(calls).toEqual([{ verifiedSuccess: false }]);
+  });
+
+  it('passes the round number and its ceiling to every round', async () => {
+    const fx = multiSeasonFixture(2);
+    const { options, deps } = optionRoundStub([seasonPack(1), seasonPack(2)]);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, deps);
+
+    expect(options.map((o) => o?.round)).toEqual([1, 2]);
   });
 });

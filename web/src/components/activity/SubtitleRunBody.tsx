@@ -56,6 +56,7 @@ export function SubtitleRunBody({
           </div>
         </div>
       )}
+      <SearchNotes events={events} />
       {runs.map((run) => (
         <SiteRun key={run.id} run={run} />
       ))}
@@ -158,6 +159,35 @@ function EpisodeRow({ group }: { group: EpisodeGroup }) {
         <PlacedFile key={file.id} file={file} />
       ))}
     </Disclosure>
+  );
+}
+
+/** Event kinds that narrate the search itself rather than its result: why the pass was
+ * scoped down, and what ended each round. */
+const SEARCH_NOTE_KINDS = ['subtitle.search-scoped', 'subtitle.search-round'];
+
+/**
+ * The search's own running commentary, above the per-site transcripts: one line per round
+ * saying which tier it ran on and what ended it, plus the note when a gap of freshly aired
+ * episodes scoped the whole pass down. A run that found nothing is otherwise a silent list
+ * of collapsed transcripts, and the reason each round stopped is the one thing an operator
+ * wants from it.
+ */
+function SearchNotes({ events }: { events: EventRow[] }) {
+  const notes = events.filter((e) => SEARCH_NOTE_KINDS.includes(e.kind));
+  if (notes.length === 0) return null;
+
+  return (
+    <div className="space-y-1">
+      <p className="text-[0.7rem] text-muted-foreground">Search</p>
+      <ul className="space-y-0.5">
+        {notes.map((note) => (
+          <li key={note.id} className="text-xs text-muted-foreground">
+            {note.message}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

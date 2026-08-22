@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import { searchSite } from '../../agent/run.js';
+import { searchSite, type SiteRunResult } from '../../agent/run.js';
 import { reflectOnRun } from '../../agent/siteReflection.js';
 import type { AppContext } from '../../context.js';
 import { siteKey, siteLabel } from '../../config/siteLabel.js';
@@ -33,7 +33,7 @@ import {
 import { assessDrift } from './drift.js';
 import { describeEpisodeRanges } from './episodeRanges.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
-import { buildSearchHints, type FetchedPack, type MissingSeason } from './queries.js';
+import { buildSearchHints, FRESH_DAYS, isFreshGap, type FetchedPack, type MissingSeason } from './queries.js';
 import { findMissingSubtitles, langCovers } from './reconcile.js';
 
 /** Injectable seams for `runSubtitleJob` — same injectable-factory pattern as `searchSite`'s
@@ -44,12 +44,16 @@ interface RunSubtitleDeps {
   reflectOnRun?: typeof reflectOnRun;
 }
 
-/** One episode as the arr reports it: ids plus its on-disk (mapped) video path. */
+/** One episode as the arr reports it: ids, its on-disk (mapped) video path, and when it
+ * aired. */
 interface VideoTarget {
   episodeId: number;
   seasonNumber: number;
   episodeNumber: number;
   videoPath: string;
+  /** Epoch ms from Sonarr's `airDateUtc`; null when the arr does not say, and always null
+   * for a movie (Radarr's movie resource carries no release date we read). */
+  airedAt: number | null;
 }
 
 /** A VideoTarget the pipeline is trying to cover: which configured language tags it still
@@ -321,6 +325,7 @@ async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): P
         seasonNumber: 0,
         episodeNumber: 0,
         videoPath: mapArrPath(ctx.config.pathMappings, file.path),
+        airedAt: null,
       },
     ];
   }
@@ -336,8 +341,17 @@ async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): P
         seasonNumber: e.seasonNumber,
         episodeNumber: e.episodeNumber,
         videoPath: mapArrPath(ctx.config.pathMappings, file.path),
+        airedAt: parseAirDate(e.airDateUtc),
       };
     });
+}
+
+/** Sonarr's `airDateUtc` as epoch ms. An absent or unparseable date is null, never a NaN
+ * that would silently read as "aired at the epoch". */
+function parseAirDate(airDateUtc: string | undefined): number | null {
+  if (airDateUtc === undefined) return null;
+  const ms = Date.parse(airDateUtc);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 /** The configured languages as a human reads the any-of rule: `zh-Hans or zh-Hant`. */
@@ -392,12 +406,30 @@ function raiseUnresolved(
 /** The seasons still uncovered when the site search starts, each with the titles that season
  * alone is released under. A multi-cour show is indexed under a different name per season, so
  * "keep looking for season 3" is only actionable with season 3's own title beside it. */
-function summarizeMissingSeasons(missing: EpisodeTarget[], seasonTitles: Map<number, string[]>): MissingSeason[] {
-  const counts = new Map<number, number>();
-  for (const t of missing) counts.set(t.seasonNumber, (counts.get(t.seasonNumber) ?? 0) + 1);
-  return [...counts.entries()]
+function summarizeMissingSeasons(
+  missing: EpisodeTarget[],
+  seasonTitles: Map<number, string[]>,
+  now = Date.now(),
+): MissingSeason[] {
+  const bySeason = new Map<number, EpisodeTarget[]>();
+  for (const t of missing) bySeason.set(t.seasonNumber, [...(bySeason.get(t.seasonNumber) ?? []), t]);
+  return [...bySeason.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([seasonNumber, episodes]) => ({ seasonNumber, episodes, titles: seasonTitles.get(seasonNumber) ?? [] }));
+    .map(([seasonNumber, episodes]) => ({
+      seasonNumber,
+      episodeNumbers: episodes.map((t) => t.episodeNumber).sort((a, b) => a - b),
+      newestAiredDaysAgo: newestAiredDaysAgo(episodes, now),
+      titles: seasonTitles.get(seasonNumber) ?? [],
+    }));
+}
+
+/** Days since the most recent air date among these episodes, floored; null when none of
+ * them carries one. An episode that has not aired yet floors to 0 — "today" — rather than
+ * reading as a negative age. */
+function newestAiredDaysAgo(episodes: EpisodeTarget[], now: number): number | null {
+  const dates = episodes.map((t) => t.airedAt).filter((d): d is number => d !== null);
+  if (dates.length === 0) return null;
+  return Math.max(0, Math.floor((now - Math.max(...dates)) / (24 * 3_600_000)));
 }
 
 function requireMedia(ctx: AppContext): MediaTools {
@@ -978,7 +1010,12 @@ export const MAX_SEARCH_ROUNDS = 3;
 
 /** Site-search pass: for each configured site in order, up to `MAX_SEARCH_ROUNDS` rounds of
  * search + download, extract, cache, match, and drift-gate/place (see `searchSiteRounds`) —
- * stopping as soon as nothing is missing. */
+ * stopping as soon as nothing is missing.
+ *
+ * A gap made entirely of episodes that aired this week gets one quick look per site instead:
+ * one round, on the site's remembered tier, no escalation. Job 74 spent 36 chromium steps
+ * across three rounds proving that five episodes aired that week had no subtitles anywhere,
+ * which the next scheduled run will find out again for a fraction of the price. */
 async function siteSearchPass(
   ctx: AppContext,
   job: JobRow,
@@ -997,6 +1034,22 @@ async function siteSearchPass(
   // re-run's first round happily re-picked the pack the cache pass had just replayed.
   const cached = cachedPacks(cache, job);
 
+  const fresh = isFreshGap(gaps, Date.now(), FRESH_DAYS);
+  // Emitted on the first site actually attempted, not up front: a pass where every site is
+  // disabled or on cooldown scoped nothing down, and saying so is a line about a search that
+  // never happened.
+  let scopedAnnounced = false;
+  const announceScoped = (): void => {
+    if (!fresh || scopedAnnounced) return;
+    scopedAnnounced = true;
+    ctx.events.append({
+      kind: 'subtitle.search-scoped',
+      jobId: job.id,
+      message: `${meta.title}: every missing episode aired within ${FRESH_DAYS} days; one quick look per site`,
+      data: targetEventData(job, { freshDays: FRESH_DAYS, episodes: uncovered(gaps).length }),
+    });
+  };
+
   for (const site of sites) {
     if (uncovered(gaps).length === 0) break;
 
@@ -1008,7 +1061,8 @@ async function siteSearchPass(
     const profile = profiles.get(site.baseUrl);
     if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
 
-    await searchSiteRounds(ctx, job, site, meta, gaps, state, cache, deps, profiles, cached);
+    announceScoped();
+    await searchSiteRounds(ctx, job, site, meta, gaps, state, cache, deps, profiles, cached, fresh);
   }
 }
 
@@ -1048,13 +1102,15 @@ async function searchSiteRounds(
   deps: RunSubtitleDeps,
   profiles: SiteProfiles,
   cached: FetchedPack[],
+  fresh: boolean,
 ): Promise<void> {
   const search = deps.searchSite ?? searchSite;
   const reflect = deps.reflectOnRun ?? reflectOnRun;
   const alreadyFetched: FetchedPack[] = [...cached];
   let downloadedHere = false;
+  const maxRounds = fresh ? 1 : MAX_SEARCH_ROUNDS;
 
-  for (let round = 0; round < MAX_SEARCH_ROUNDS; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     const stillMissing = uncovered(gaps);
     if (stillMissing.length === 0) break;
 
@@ -1071,7 +1127,11 @@ async function searchSiteRounds(
       alreadyFetched,
     });
 
-    const result = await search(ctx, job, site, hints, state.rawDir);
+    const result = await search(ctx, job, site, hints, state.rawDir, {
+      round: round + 1,
+      maxRounds,
+      escalate: !fresh,
+    });
     // A cooldown means the site never ran at all this job — nothing happened worth writing
     // to its notes file. Every other outcome (a download that placed nothing, an archive
     // that failed to extract, a give-up, a hard failure) is a completed run and reflects.
@@ -1116,7 +1176,9 @@ async function searchSiteRounds(
     // true — a contradiction (the model says the site can't be automated, on a run that
     // just proved it could), but the model's own verdict is the thing being reported to a
     // human, not second-guessed here.
-    const reflection = await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today });
+    const reflection = worthReflectingOn(fresh, result)
+      ? await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today })
+      : null;
     if (reflection?.verdict === 'unusable') {
       raiseUnusable(ctx, job, site, reflection.reason, result.transcript);
     }
@@ -1136,6 +1198,22 @@ async function searchSiteRounds(
     alreadyFetched.push({ url: result.download.url, ...packTitleFromUrl(result.download.url) });
   }
 }
+
+/**
+ * Whether a completed round has anything to teach the site's notes file. Everything does,
+ * except one shape: a fresh-gap round that looked, spent barely any steps, and came back
+ * empty. "Searched once, nothing there, it aired yesterday" is a fact about the calendar,
+ * and reflection is a paid round trip per site per job. A round that broke or went malformed
+ * still reflects however short it was — that one IS about the site.
+ */
+function worthReflectingOn(fresh: boolean, result: SiteRunResult): boolean {
+  if (!fresh || result.download !== null) return true;
+  if (result.outcome === 'error') return true;
+  return result.steps >= MIN_REFLECTABLE_STEPS;
+}
+
+/** Below this many steps a fruitless fresh-gap round is just "the site had nothing listed". */
+const MIN_REFLECTABLE_STEPS = 3;
 
 /** The pack's own name as the agent would read it back: the URL's last path segment,
  * percent-decoded. Spread into a `FetchedPack`, so a URL whose tail names nothing (a

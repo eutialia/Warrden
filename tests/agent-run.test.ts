@@ -23,12 +23,14 @@ import {
   withFakeTime,
   tmpDir,
 } from './helpers.js';
+import { parseFailure } from './llmFixtures.js';
 
 const SITE: SubtitleSiteConfig = { baseUrl: 'https://acg.rip', searchUrlTemplate: 'https://acg.rip/?term={query}' };
 /** Every `searchSite` call here passes this as `seedsDir`: an empty directory, so no test
  * can pick up a seed file that ships with the app just because it shares a base URL. */
 const NO_SEEDS = tmpDir();
 const OK_HTML: FetchResult = { ok: true, status: 200, body: '<html>results</html>', blocked: false };
+
 
 /** Sentinel-complete agent action for FakeGenerator's strict schema. */
 function act(
@@ -40,6 +42,7 @@ function act(
     body?: string;
     contentType?: string;
     referer?: string;
+    reason?: string;
   },
 ) {
   return {
@@ -47,6 +50,7 @@ function act(
     body: '',
     contentType: '',
     referer: '',
+    reason: '',
     ...partial,
   };
 }
@@ -172,7 +176,7 @@ describe('searchSite', () => {
 
     await withFakeTime(async () => {
       const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-      expect(out).toEqual({ download: null, transcript: [], outcome: 'cooldown' });
+      expect(out).toEqual({ download: null, transcript: [], steps: 0, outcome: 'cooldown' });
     });
     expect(tiers.made).toHaveLength(0);
     expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeDefined();
@@ -436,5 +440,164 @@ describe('searchSite', () => {
     vi.spyOn(process, 'cwd').mockReturnValue(tmpdir());
     expect(defaultSeedsDir()).toBe(expected);
     expect(defaultSeedsDir().startsWith(process.cwd())).toBe(false);
+  });
+});
+
+describe('searchSite — per-round reporting', () => {
+  /** The `subtitle.search-round` line a run emitted, or undefined when it emitted none. */
+  function roundEvent(ctx: ReturnType<typeof setup>['ctx']) {
+    return findEvent(ctx.events.list(), 'subtitle.search-round');
+  }
+
+  it('a download reports the round, its tier and the pack', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
+    const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS, round: 2, maxRounds: 3 });
+
+    const event = roundEvent(ctx)!;
+    expect(event.message).toBe('[acg.rip] round 2/3 (curl): downloaded https://acg.rip/dl/123.zip');
+    expect(event.level).toBe('info');
+    expect(event.data).toMatchObject({ site: 'acg.rip', round: 2, tier: 'curl', steps: 1, outcome: 'downloaded' });
+  });
+
+  it('a give-up reports the model own reason', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      act({ action: 'give_up', url: '', note: 'nothing', reason: 'nothing is listed for this season yet' }),
+    ]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS, escalate: false });
+
+    const event = roundEvent(ctx)!;
+    expect(event.message).toBe('[acg.rip] round 1/1 (curl): gave up: nothing is listed for this season yet');
+    expect(event.data).toMatchObject({ outcome: 'gave-up', reason: 'nothing is listed for this season yet', steps: 1 });
+  });
+
+  it('a spent step budget reports the steps it took', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'search', url: 'https://acg.rip/?term=y', note: 's' }),
+    ]);
+    ctx.config.browser.stepBudget = 2;
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML, OK_HTML]), seedsDir: NO_SEEDS, escalate: false });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): step budget exhausted after 2 steps');
+  });
+
+  it('refused destinations report how many ended the run', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator(
+      new Array(3).fill(null).map(() => act({ action: 'open', url: 'http://169.254.169.254/latest/meta-data', note: 'probe' })),
+    );
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): refused 3 times');
+  });
+
+  it('a hard failure reports the error', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([new Error('bad llm output')]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML]), seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): error: bad llm output');
+  });
+
+  it('a site in cooldown reports no round at all', async () => {
+    const { ctx, job } = setup();
+    const profiles = new SiteProfiles(ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { lastFailureAt: Date.now(), failCount: 2 });
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)).toBeUndefined();
+  });
+
+  // A wall on the only rung an escalate:false run is allowed says nothing about the site
+  // being broken — the run simply was not permitted to answer it. Booking a failure here
+  // would put a working site into cooldown for the next job over a rung it never tried.
+  it('escalate: false blocked on its only rung reports the wall and does not fail the site', async () => {
+    const { ctx, job } = setup();
+    const profiles = new SiteProfiles(ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { lastWorkingTier: 'chromium', lastSuccessAt: Date.now() });
+    ctx.llm = new FakeGenerator([act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' })]);
+    const tiers = stubTiers([{ ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true }]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS, escalate: false });
+
+    expect(tiers.made).toEqual(['chromium']);
+    expect(out.outcome).toBe('blocked');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at chromium');
+    expect(hasEvent(ctx.events.list(), 'subtitle.site-exhausted')).toBe(false);
+    const profile = profiles.get('https://acg.rip')!;
+    expect(profile.fail_count).toBe(0);
+    expect(profile.last_failure_at).toBeNull();
+  });
+
+  it('a ladder blocked at every rung says so instead of naming a step budget it never spent', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+    ]);
+    const wall = { ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true };
+    const tiers = stubTiers([wall, wall]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    expect(tiers.made).toEqual(['curl', 'chromium']);
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at every tier');
+    expect(out.outcome).toBe('blocked');
+    expect(new SiteProfiles(ctx.db).get('https://acg.rip')!.fail_count).toBe(1);
+  });
+
+  it('reports the rung a tier factory threw on, not the one before it', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' })]);
+    const wall = { ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true };
+    const inner = stubTiers([wall]);
+    const tiers = {
+      make: (t: AccessTier) => {
+        if (t === 'chromium') throw new Error('no browser installed');
+        return inner.make(t);
+      },
+    };
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): error: no browser installed');
+  });
+
+  it('malformed replies fail the site the way refusals do', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([parseFailure(), parseFailure(), parseFailure()]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): malformed replies 3 times');
+    expect(out.outcome).toBe('error');
+    expect(findEvent(ctx.events.list(), 'subtitle.site-failed')!.message).toContain('3 replies were not valid JSON');
+    // One rung only: another rung would put the same prompt to the same model.
+    expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);
+  });
+
+  it('escalation is on by default', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'nope', reason: 'wall' }),
+    ]);
+    const tiers = stubTiers([{ ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true }]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    expect(tiers.made.length).toBeGreaterThan(1);
   });
 });

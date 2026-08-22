@@ -2,8 +2,21 @@ import { describe, expect, it } from 'vitest';
 import {
   buildSearchHints,
   formatSearchHintsForPrompt,
+  isFreshGap,
   languageLooksChinese,
+  type MissingSeason,
 } from '../src/pipelines/subtitle/queries.js';
+
+const DAY = 24 * 3_600_000;
+
+/** A `MissingSeason` with the fields a case does not care about filled in. */
+function season(
+  seasonNumber: number,
+  episodeNumbers: number[],
+  extra: Partial<MissingSeason> = {},
+): MissingSeason {
+  return { seasonNumber, episodeNumbers, newestAiredDaysAgo: null, titles: [], ...extra };
+}
 
 describe('languageLooksChinese', () => {
   it.each([
@@ -54,14 +67,11 @@ describe('buildSearchHints', () => {
       title: 'Sword Art Online',
       languages: ['zh-Hans'],
       missingSeasons: [
-        { seasonNumber: 3, episodes: 24, titles: ['Sword Art Online - Alicization'] },
-        { seasonNumber: 1, episodes: 25, titles: [] },
+        season(3, [1, 2, 3], { titles: ['Sword Art Online - Alicization'] }),
+        season(1, [1, 2]),
       ],
     });
-    expect(h.missingSeasons).toEqual([
-      { seasonNumber: 1, episodes: 25, titles: [] },
-      { seasonNumber: 3, episodes: 24, titles: ['Sword Art Online - Alicization'] },
-    ]);
+    expect(h.missingSeasons.map((s) => s.seasonNumber)).toEqual([1, 3]);
   });
 });
 
@@ -95,14 +105,14 @@ describe('formatSearchHintsForPrompt', () => {
         title: 'Sword Art Online',
         languages: ['zh-Hans'],
         missingSeasons: [
-          { seasonNumber: 1, episodes: 25, titles: [] },
-          { seasonNumber: 3, episodes: 24, titles: ['Sword Art Online - Alicization'] },
-          { seasonNumber: 4, episodes: 23, titles: ['Sword Art Online - Alicization - War of Underworld'] },
+          season(1, [1, 2, 3]),
+          season(3, [12], { titles: ['Sword Art Online - Alicization'] }),
+          season(4, [1, 2, 4, 5], { titles: ['Sword Art Online - Alicization - War of Underworld'] }),
         ],
       }),
     );
     expect(text).toContain(
-      'Still missing: Season 1 (25 episodes), Season 3 (24 episodes, also known as "Sword Art Online - Alicization"), Season 4 (23 episodes, also known as "Sword Art Online - Alicization - War of Underworld").',
+      'Still missing: Season 1 (episodes 1-3), Season 3 (episode 12, also known as "Sword Art Online - Alicization"), Season 4 (episodes 1-2, 4-5, also known as "Sword Art Online - Alicization - War of Underworld").',
     );
     expect(text).toContain('A pack covering only some of these seasons is still worth downloading');
   });
@@ -135,9 +145,58 @@ describe('formatSearchHintsForPrompt', () => {
       buildSearchHints({
         title: 'X',
         languages: ['en'],
-        missingSeasons: [{ seasonNumber: 2, episodes: 1, titles: ['第二季', 'Second Season'] }],
+        missingSeasons: [season(2, [7], { titles: ['第二季', 'Second Season'] })],
       }),
     );
-    expect(text).toContain('Season 2 (1 episode, also known as "第二季", "Second Season")');
+    expect(text).toContain('Season 2 (episode 7, also known as "第二季", "Second Season")');
+  });
+});
+
+describe('formatSearchHintsForPrompt — recency', () => {
+  it.each([
+    [0, 'newest aired today'],
+    [1, 'newest aired 1 day ago'],
+    [3, 'newest aired 3 days ago'],
+  ])('renders newestAiredDaysAgo %i as "%s"', (days, phrase) => {
+    const text = formatSearchHintsForPrompt(
+      buildSearchHints({
+        title: 'Bleach',
+        languages: ['zh-Hans'],
+        missingSeasons: [season(17, [41, 42, 43, 44, 45], { newestAiredDaysAgo: days, titles: ['Thousand-Year Blood War'] })],
+      }),
+    );
+    expect(text).toContain(`Still missing: Season 17 (episodes 41-45, ${phrase}, also known as "Thousand-Year Blood War").`);
+  });
+
+  it('omits the age when it is unknown', () => {
+    const text = formatSearchHintsForPrompt(
+      buildSearchHints({ title: 'X', languages: ['en'], missingSeasons: [season(1, [1, 2])] }),
+    );
+    expect(text).toContain('Still missing: Season 1 (episodes 1-2).');
+    expect(text).not.toContain('aired');
+  });
+});
+
+describe('isFreshGap', () => {
+  const now = 1_800_000_000_000;
+  const fresh = { airedAt: now - 2 * DAY, covered: false };
+  const old = { airedAt: now - 30 * DAY, covered: false };
+  const unknown = { airedAt: null, covered: false };
+
+  it.each([
+    ['every uncovered episode aired this week', [fresh, { airedAt: now - 6 * DAY, covered: false }], true],
+    ['one uncovered episode is older than the window', [fresh, old], false],
+    ['an uncovered episode has no air date', [fresh, unknown], false],
+    ['the only old episode is already covered', [fresh, { ...old, covered: true }], true],
+    ['nothing is uncovered', [{ ...fresh, covered: true }], false],
+    ['an episode airs in the future', [{ airedAt: now + DAY, covered: false }], true],
+  ])('%s -> %s', (_name, targets, expected) => {
+    expect(isFreshGap(targets, now)).toBe(expected);
+  });
+
+  it('takes the window in days', () => {
+    const targets = [{ airedAt: now - 10 * DAY, covered: false }];
+    expect(isFreshGap(targets, now)).toBe(false);
+    expect(isFreshGap(targets, now, 14)).toBe(true);
   });
 });
