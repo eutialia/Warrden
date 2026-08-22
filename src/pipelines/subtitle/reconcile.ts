@@ -107,15 +107,15 @@ export function parseSidecarLanguage(filename: string, stem: string): string | n
   return sawHi ? 'hi' : null;
 }
 
-/** Same-stem sibling subtitle files for a video, e.g. 'Show - S01E05.zh-Hans.ass'.
- * Matching uses exact stem equality (via `sidecarStem`, which strips the extension then
- * one trailing lang token), never a prefix match — a `Show - S01E05 Special.zh-Hans.ass`
- * must not count as covering `Show - S01E05.mkv`. */
+/** Sibling subtitle files sitting under a video's stem, e.g. 'Show - S01E05.zh-Hans.hi.ass'.
+ * Anything after `${stem}.` is left to `parseSidecarLanguage`, which anchors on the same stem:
+ * a file may carry any number of flag and title segments around its language tag. The dot is
+ * what keeps `Show - S01E05 Special.zh-Hans.ass` from covering `Show - S01E05.mkv`. */
 function externalSubsFor(videoPath: string, stem: string): string[] {
   const dir = dirname(videoPath);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((f) => SUB_EXTS.has(extname(f).toLowerCase()) && sidecarStem(f) === stem)
+    .filter((f) => SUB_EXTS.has(extname(f).toLowerCase()) && f.startsWith(`${stem}.`))
     .map((f) => join(dir, f));
 }
 

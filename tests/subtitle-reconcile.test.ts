@@ -144,6 +144,28 @@ describe('findMissingSubtitles', () => {
     ]);
   });
 
+  it('counts a sidecar carrying a hearing-impaired flag after the language', async () => {
+    const { dir, video } = videoDir();
+    writeFileSync(join(dir, 'Show - S01E05.zh-Hans.hi.srt'), 'x');
+    const { videos: gaps } = await findMissingSubtitles({
+      videos: [{ videoPath: video, episodeId: 1 }],
+      languages: ['zh-Hans', 'zh-Hant'],
+      media: fakeMedia({ [video]: [] }),
+    });
+    expect(gaps).toEqual([{ videoPath: video, episodeId: 1, lacking: ['zh-Hant'], covered: true, embeddedRefs: [] }]);
+  });
+
+  it('counts a sidecar whose flag segment comes before the language', async () => {
+    const { dir, video } = videoDir();
+    writeFileSync(join(dir, 'Show - S01E05.forced.zh-Hant.srt'), 'x');
+    const { videos: gaps } = await findMissingSubtitles({
+      videos: [{ videoPath: video, episodeId: 1 }],
+      languages: ['zh-Hans', 'zh-Hant'],
+      media: fakeMedia({ [video]: [] }),
+    });
+    expect(gaps).toEqual([{ videoPath: video, episodeId: 1, lacking: ['zh-Hans'], covered: true, embeddedRefs: [] }]);
+  });
+
   it('drops a video that carries every configured language', async () => {
     const { dir, video } = videoDir();
     writeFileSync(join(dir, 'Show - S01E05.zh-Hans.srt'), 'x');
