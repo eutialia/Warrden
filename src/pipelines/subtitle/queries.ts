@@ -99,7 +99,9 @@ function describeMissingSeason(s: MissingSeason): string {
 export function formatSearchHintsForPrompt(hints: SearchHints): string {
   const parts: string[] = [];
   if (hints.languages.length > 0) {
-    parts.push(`Target subtitle languages (prefer packs that claim these): ${hints.languages.join(', ')}.`);
+    parts.push(
+      `Target subtitle languages, in order of preference (any one is enough; collect every one you can): ${hints.languages.join(', ')}.`,
+    );
   }
   if (hints.preferredGroups.length > 0) {
     parts.push(

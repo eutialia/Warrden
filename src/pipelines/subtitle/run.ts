@@ -44,14 +44,22 @@ interface RunSubtitleDeps {
   reflectOnRun?: typeof reflectOnRun;
 }
 
-/** One episode the pipeline is trying to cover: its on-disk video plus what's still missing
- * (languages) and the embedded subtitle streams (used as a drift reference when present). */
-interface EpisodeTarget {
+/** One episode as the arr reports it: ids plus its on-disk (mapped) video path. */
+interface VideoTarget {
   episodeId: number;
   seasonNumber: number;
   episodeNumber: number;
-  videoPath: string; // local (mapped) path on disk
-  missingLanguages: string[];
+  videoPath: string;
+}
+
+/** A VideoTarget the pipeline is trying to cover: which configured language tags it still
+ * lacks, whether any one of them is already present, and the embedded subtitle streams (used
+ * as a drift reference when present). `covered` is the line between the two jobs a run does:
+ * uncovered episodes are what it goes searching for, `lacking` is what it collects from
+ * whatever it finds. */
+interface EpisodeTarget extends VideoTarget {
+  lacking: string[];
+  covered: boolean;
   embeddedRefs: { streamIndex: number; lang: string | null }[];
 }
 
@@ -74,11 +82,11 @@ type Candidate = ArchiveCacheEntry & { lang: string };
 interface RunState {
   media: MediaTools;
   placedFiles: PlacedFiles;
-  /** Every episode of the target that has a video on disk, missing or not. `missing` shrinks
-   * as the run places files and never held the episodes an earlier run already covered, so it
-   * cannot answer "does this filename name an episode of this show at all?" — which is the
-   * question that decides whether a file is worth an LLM call (see `routeEntry`). */
-  allEpisodes: EpisodeTarget[];
+  /** Every episode of the target that has a video on disk, lacking anything or not. `gaps`
+   * shrinks as the run places files and never held the episodes an earlier run already filled,
+   * so it cannot answer "does this filename name an episode of this show at all?" — which is
+   * the question that decides whether a file is worth an LLM call (see `routeEntry`). */
+  allEpisodes: VideoTarget[];
   /** videoPath -> extracted reference subtitle path, cached for the whole run so a video with
    * an embedded track is only ever extracted once no matter how many candidates it's tried
    * against (or how many resync rounds each triggers). */
@@ -172,7 +180,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       return;
     }
 
-    const { missing: missingList, absent } = await findMissingSubtitles({
+    const { videos: gapList, absent } = await findMissingSubtitles({
       videos: targets.map((t) => ({ videoPath: t.videoPath, episodeId: t.episodeId })),
       languages: ctx.config.subtitle.languages,
       media,
@@ -211,38 +219,34 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       allEpisodes: targets,
     };
 
-    const byVideoPath = new Map(missingList.map((m) => [m.videoPath, m]));
-    const missing: EpisodeTarget[] = targets
+    const byVideoPath = new Map(gapList.map((g) => [g.videoPath, g]));
+    const gaps: EpisodeTarget[] = targets
       .filter((t) => byVideoPath.has(t.videoPath))
       .map((t) => {
-        const m = byVideoPath.get(t.videoPath)!;
-        return { ...t, missingLanguages: m.languages, embeddedRefs: m.embeddedRefs };
+        const g = byVideoPath.get(t.videoPath)!;
+        return { ...t, lacking: g.lacking, covered: g.covered, embeddedRefs: g.embeddedRefs };
       });
 
-    if (missing.length === 0) {
+    const langs = describeLanguages(ctx.config.subtitle.languages);
+    const withoutSubs = uncovered(gaps);
+    if (withoutSubs.length > 0) {
       ctx.events.append({
-        kind: 'subtitle.complete',
+        kind: 'subtitle.missing',
         jobId: job.id,
-        message: `Nothing missing — every video already has subtitles for ${describeLanguages(ctx.config.subtitle.languages)}`,
-        data: targetEventData(job, { counts: { missing: 0, placed: 0 } }),
+        message: `${withoutSubs.length} video(s) without subtitles in ${langs}`,
+        data: targetEventData(job, {
+          counts: { missing: withoutSubs.length, byEpisode: withoutSubs.map((t) => t.episodeId) },
+        }),
       });
-      return;
     }
 
-    ctx.events.append({
-      kind: 'subtitle.missing',
-      jobId: job.id,
-      message: `${missing.length} video(s) missing subtitles for ${describeLanguages(ctx.config.subtitle.languages)}`,
-      data: targetEventData(job, {
-        counts: { missing: missing.length, byEpisode: missing.map((m) => m.episodeId) },
-      }),
-    });
-
     // Cache pass first — a previously-downloaded pack can cover a mid-season episode that
-    // landed after the pack was fetched, avoiding a re-download.
+    // landed after the pack was fetched, avoiding a re-download. It runs even when every
+    // episode is already covered: reading packs we already hold costs nothing, and it is the
+    // only way a lower-preference tag is ever collected for a series nobody has to search for.
     for (const row of cache.forTarget(job.arr_instance, job.target_kind, job.target_id)) {
-      if (missing.length === 0) break;
-      const { resolved } = await matchArchiveRow(ctx, job, row, missing, title, state, undefined);
+      if (gaps.length === 0) break;
+      const { resolved } = await matchArchiveRow(ctx, job, row, gaps, title, state, undefined);
       if (resolved.length > 0) {
         ctx.events.append({
           kind: 'subtitle.cache-hit',
@@ -253,9 +257,22 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
       }
     }
 
-    await siteSearchPass(ctx, job, meta, missing, state, cache, deps);
+    // Only an uncovered episode is worth a site search, and nothing the cache pass does can
+    // uncover one — so a run that opened with everything covered ends here.
+    if (withoutSubs.length === 0) {
+      ctx.events.append({
+        kind: 'subtitle.complete',
+        jobId: job.id,
+        message: `Nothing missing — every video already has subtitles in ${langs}`,
+        data: targetEventData(job, { counts: { missing: 0, placed: 0 } }),
+      });
+      return;
+    }
 
-    if (missing.length > 0) raiseUnresolved(ctx, job, title, missing, state.quarantined);
+    await siteSearchPass(ctx, job, meta, gaps, state, cache, deps);
+
+    const stillMissing = uncovered(gaps);
+    if (stillMissing.length > 0) raiseUnresolved(ctx, job, title, stillMissing, state.quarantined);
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }
@@ -293,7 +310,7 @@ async function settleGate(ctx: AppContext, job: JobRow, client: ArrApi): Promise
 
 /** Series: every hasFile episode with an episode file. Movie: the single movie file, if any.
  * `episodeId` for movies is the movie id so resolved tracking / attention de-dup still work. */
-async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): Promise<EpisodeTarget[]> {
+async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): Promise<VideoTarget[]> {
   if (job.target_kind === 'movie') {
     const movieFiles = await client.listMovieFiles(job.target_id);
     const file = movieFiles[0];
@@ -304,8 +321,6 @@ async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): P
         seasonNumber: 0,
         episodeNumber: 0,
         videoPath: mapArrPath(ctx.config.pathMappings, file.path),
-        missingLanguages: [],
-        embeddedRefs: [],
       },
     ];
   }
@@ -321,28 +336,28 @@ async function listVideoTargets(ctx: AppContext, client: ArrApi, job: JobRow): P
         seasonNumber: e.seasonNumber,
         episodeNumber: e.episodeNumber,
         videoPath: mapArrPath(ctx.config.pathMappings, file.path),
-        missingLanguages: [],
-        embeddedRefs: [],
       };
     });
 }
 
+/** The configured languages as a human reads the any-of rule: `zh-Hans or zh-Hant`. */
 function describeLanguages(langs: string[]): string {
-  return langs.length > 0 ? langs.join(', ') : 'the target';
+  return langs.length > 0 ? langs.join(' or ') : 'the target';
 }
 
-/** The languages still missing across every uncovered target, in the operator's configured
- * order — what the end-of-run rollup names. */
-function unresolvedLanguages(missing: EpisodeTarget[], configured: string[]): string[] {
-  return configured.filter((lang) => missing.some((t) => t.missingLanguages.includes(lang)));
+/** The targets a site search is actually for. A covered episode still lacking a lower-
+ * preference tag rides along with whatever the search brings back, but it is not a reason to
+ * go looking, and it is not something a human is asked to act on. */
+function uncovered(gaps: EpisodeTarget[]): EpisodeTarget[] {
+  return gaps.filter((t) => !t.covered);
 }
 
 /**
  * The run's one "still not covered" attention item. One per job, not one per episode: a
  * four-season series that found nothing is a single fact a human acts on once, and the
  * per-episode variant is what filled the queue with hundreds of identical cards. The detail
- * survives in `data.episodes` — which languages each episode still lacks, and how many
- * candidates were set aside for it this run — for the dashboard to expand.
+ * survives in `data.episodes` — which episodes are still uncovered, and how many candidates
+ * were set aside for each this run — for the dashboard to expand.
  */
 function raiseUnresolved(
   ctx: AppContext,
@@ -355,10 +370,9 @@ function raiseUnresolved(
     episodeId: t.episodeId,
     seasonNumber: t.seasonNumber,
     episodeNumber: t.episodeNumber,
-    missingLanguages: t.missingLanguages,
     quarantined: quarantined.get(t.episodeId) ?? 0,
   }));
-  const langs = describeLanguages(unresolvedLanguages(missing, ctx.config.subtitle.languages));
+  const langs = describeLanguages(ctx.config.subtitle.languages);
   // A movie has exactly one target, so episode ranges say nothing; the candidate count is
   // the only thing that distinguishes "nothing was ever found" from "nothing survived".
   const message =
@@ -412,27 +426,23 @@ async function assertProbeAvailable(ctx: AppContext, job: JobRow, media: MediaTo
   throw new RescheduleError('ffprobe missing', MOUNT_RETRY_MS);
 }
 
-/** Removes fully-resolved episodes (every target language filled) from the working
- * `missing` list so later passes (next cache row / next site / later files in this pack)
- * don't keep chasing them. */
-function removeResolved(missing: EpisodeTarget[], resolvedEpisodeIds: number[]): void {
-  const gone = new Set(resolvedEpisodeIds);
-  for (let i = missing.length - 1; i >= 0; i--) {
-    if (gone.has(missing[i]!.episodeId)) missing.splice(i, 1);
-  }
-}
-
 /**
- * After a successful place, drops every still-missing language that `placedLang` covers
- * (same rule as reconcile). When the gap is empty the episode is fully resolved and
- * removed from `missing` immediately so subsequent files in this pack (and the LLM
- * remainder pass) don't re-match it — placing zh-Hans must not stop the hunt for zh-Hant.
+ * After a successful place, drops the tag `placedLang` filled from the episode's `lacking`
+ * set (same rule as reconcile). The first placement covers the episode — one tag is enough —
+ * and that is what `resolved` reports back. The episode stays a placement target while it
+ * still lacks something, so later files in this pack (and the LLM remainder pass) can add
+ * zh-Hant to an episode this run just gave zh-Hans; it drops out of `gaps` only once it
+ * lacks nothing.
  */
-function notePlacement(missing: EpisodeTarget[], resolved: number[], t: EpisodeTarget, placedLang: string): void {
-  t.missingLanguages = t.missingLanguages.filter((want) => !langCovers(want, placedLang));
-  if (t.missingLanguages.length === 0) {
+function notePlacement(gaps: EpisodeTarget[], resolved: number[], t: EpisodeTarget, placedLang: string): void {
+  t.lacking = t.lacking.filter((want) => !langCovers(want, placedLang));
+  if (!t.covered) {
+    t.covered = true;
     resolved.push(t.episodeId);
-    removeResolved(missing, [t.episodeId]);
+  }
+  if (t.lacking.length === 0) {
+    const i = gaps.indexOf(t);
+    if (i >= 0) gaps.splice(i, 1);
   }
 }
 
@@ -461,32 +471,32 @@ function wantedCandidates(ctx: AppContext, job: JobRow, row: ArchiveCacheRow): C
   return wanted;
 }
 
-/** Whether this candidate is worth trying against this episode: its language has to cover a
- * language the episode is still missing. `wantedCandidates` has already checked it against
- * the configured set; this narrows to what THIS episode still lacks (a zh-Hans file is worth
- * nothing to an episode that only lacks zh-Hant). */
+/** Whether this candidate is worth trying against this episode: its language has to be one
+ * the episode still lacks. `wantedCandidates` has already checked it against the configured
+ * set; this narrows to what THIS episode lacks (a zh-Hans file is worth nothing to an episode
+ * that already carries zh-Hans, covered or not). */
 function wantedFor(entry: Candidate, t: EpisodeTarget): boolean {
-  return t.missingLanguages.some((want) => langCovers(want, entry.lang));
+  return t.lacking.some((want) => langCovers(want, entry.lang));
 }
 
 /**
  * Matches one archive's files (from a cached row, or a just-downloaded+extracted pack) to the
- * still-missing episodes and drift-gates + places each match. Deterministic matching first
+ * episodes still lacking a language and drift-gates + places each match. Deterministic matching first
  * (via the entry's pre-parsed `episodeRef`), then one `mapArchiveWithLlm` call for whatever's
  * left — mirroring ingest's match-then-LLM ordering. "Whatever's left" is narrower than
  * "everything that didn't match": see `routeEntry` for what gets dropped before the paid call.
  *
- * Returns two different counts, for two different callers: `resolved` is the episode ids that
- * got FULLY resolved (every target language filled) — what the cache-hit event reports.
- * `placedCount` is how many individual files this call placed on disk, full resolution or
- * not — the number `extractAndMatch` needs, since one language landing out of several
- * configured is still a real, verifiable placement (see the design doc's "Writing" section).
+ * Returns two different counts, for two different callers: `resolved` is the episode ids this
+ * call took from uncovered to covered — what the cache-hit event reports. `placedCount` is how
+ * many individual files this call placed on disk, newly covering an episode or merely adding a
+ * second language to one — the number `extractAndMatch` needs, since any file landing is a
+ * real, verifiable placement (see the design doc's "Writing" section).
  */
 async function matchArchiveRow(
   ctx: AppContext,
   job: JobRow,
   row: ArchiveCacheRow,
-  missing: EpisodeTarget[],
+  gaps: EpisodeTarget[],
   seriesTitle: string,
   state: RunState,
   site: string | undefined,
@@ -499,8 +509,8 @@ async function matchArchiveRow(
   const unmatchedPaths: string[] = [];
   let covered = 0;
   for (const entry of candidates) {
-    if (missing.length === 0) break;
-    const route = routeEntry(entry, missing, state.allEpisodes, job.target_kind === 'movie');
+    if (gaps.length === 0) break;
+    const route = routeEntry(entry, gaps, state.allEpisodes, job.target_kind === 'movie');
     if (route.kind === 'covered') {
       covered++;
       continue;
@@ -512,7 +522,7 @@ async function matchArchiveRow(
     const placedLang = await driftAndPlace(ctx, job, row, entry, route.target, state, site);
     if (placedLang !== undefined) {
       placedCount++;
-      notePlacement(missing, resolved, route.target, placedLang);
+      notePlacement(gaps, resolved, route.target, placedLang);
     }
   }
   if (covered > 0) {
@@ -525,30 +535,30 @@ async function matchArchiveRow(
   }
 
   // Movies: a single video slot — every remaining archive file targets that one video
-  // (lang filtering is via notePlacement shrinking missingLanguages).
-  if (job.target_kind === 'movie' && unmatchedPaths.length > 0 && missing[0]) {
-    const only = missing[0];
+  // (lang filtering is via notePlacement shrinking `lacking`).
+  if (job.target_kind === 'movie' && unmatchedPaths.length > 0 && gaps[0]) {
+    const only = gaps[0];
     for (const path of unmatchedPaths) {
-      // notePlacement may have removed `only` from `missing` once every language is filled.
-      if (!missing.includes(only)) break;
+      // notePlacement may have removed `only` from `gaps` once every language is filled.
+      if (!gaps.includes(only)) break;
       const entry = entryByPath.get(path)!;
       const placedLang = await driftAndPlace(ctx, job, row, entry, only, state, site);
       if (placedLang !== undefined) {
         placedCount++;
-        notePlacement(missing, resolved, only, placedLang);
+        notePlacement(gaps, resolved, only, placedLang);
       }
     }
     return { resolved, placedCount };
   }
 
-  if (unmatchedPaths.length > 0 && missing.length > 0) {
+  if (unmatchedPaths.length > 0 && gaps.length > 0) {
     const unmatchedEntries = unmatchedPaths.map((p) => entryByPath.get(p)!);
     const ids = await mapArchiveWithLlm({
       llm: ctx.llm,
       seriesTitle,
       files: unmatchedEntries,
       rootDir: row.path,
-      episodes: missing.map((m) => ({
+      episodes: gaps.map((m) => ({
         id: m.episodeId,
         seriesId: job.target_id,
         seasonNumber: m.seasonNumber,
@@ -559,18 +569,18 @@ async function matchArchiveRow(
       })),
       jobId: job.id,
     });
-    const episodesById = new Map(missing.map((m) => [m.episodeId, m]));
+    const episodesById = new Map(gaps.map((m) => [m.episodeId, m]));
     for (let i = 0; i < unmatchedEntries.length; i++) {
       const episodeId = ids[i] ?? null;
       if (episodeId === null) continue;
       const t = episodesById.get(episodeId);
-      // Episode may already have been fully resolved by an earlier file in this pack
-      // (and removed from `missing`); skip rather than re-placing over a closed gap.
+      // Episode may already lack nothing after an earlier file in this pack (and have been
+      // removed from `gaps`); skip rather than re-placing over a closed gap.
       if (!t) continue;
       const placedLang = await driftAndPlace(ctx, job, row, unmatchedEntries[i]!, t, state, site);
       if (placedLang !== undefined) {
         placedCount++;
-        notePlacement(missing, resolved, t, placedLang);
+        notePlacement(gaps, resolved, t, placedLang);
       }
     }
   }
@@ -588,22 +598,22 @@ type EntryRoute =
 /**
  * Routes one archive entry.
  *
- * The `covered` verdict is the point of this function. `missing` holds only the episodes the
- * run still wants, so matching against it alone reads every file for an already-covered
- * episode as "unmatched" — and on a re-run against a cached 1,500-file pack that is most of
- * the pack, several hundred files handed to `mapArchiveWithLlm` in batches to learn what
- * their own filenames already said. Resolving the ref against every episode on disk tells
+ * The `covered` verdict is the point of this function. `gaps` holds only the episodes the
+ * run still wants a file for, so matching against it alone reads every file for an
+ * already-filled episode as "unmatched" — and on a re-run against a cached 1,500-file pack
+ * that is most of the pack, several hundred files handed to `mapArchiveWithLlm` in batches
+ * to learn what their own filenames already said. Resolving the ref against every episode on disk tells
  * "this names an episode we have covered" apart from "this names nothing this show has", and
  * only the second is worth paying for.
  *
- * A season the entry names outright that nothing missing belongs to is the same fact one
- * level up: whichever episode of season 1 this is, season 1 is done.
+ * A season the entry names outright that no gap belongs to is the same fact one level up:
+ * whichever episode of season 1 this is, season 1 is done.
  *
  * Movies keep the old path: one video slot, no episode refs to resolve, and the caller's
  * movie branch tries every leftover file against that slot itself.
  */
-function routeEntry(entry: Candidate, missing: EpisodeTarget[], all: EpisodeTarget[], isMovie: boolean): EntryRoute {
-  const direct = matchDeterministic(missing, entry, isMovie);
+function routeEntry(entry: Candidate, gaps: EpisodeTarget[], all: VideoTarget[], isMovie: boolean): EntryRoute {
+  const direct = matchDeterministic(gaps, entry, isMovie);
   if (direct) return { kind: 'match', target: direct };
   if (isMovie) return { kind: 'llm' };
 
@@ -612,16 +622,16 @@ function routeEntry(entry: Candidate, missing: EpisodeTarget[], all: EpisodeTarg
 
   const hit = matchEpisodeRef(ref, asEpisodeResources(all));
   if (hit !== null) {
-    const stillMissing = missing.find((m) => m.episodeId === hit.id);
-    return stillMissing ? { kind: 'match', target: stillMissing } : { kind: 'covered' };
+    const stillWanted = gaps.find((m) => m.episodeId === hit.id);
+    return stillWanted ? { kind: 'match', target: stillWanted } : { kind: 'covered' };
   }
-  if (ref.season !== null && !missing.some((m) => m.seasonNumber === ref.season)) return { kind: 'covered' };
+  if (ref.season !== null && !gaps.some((m) => m.seasonNumber === ref.season)) return { kind: 'covered' };
   return { kind: 'llm' };
 }
 
 /** Episode targets in the shape `matchEpisodeRef` reads. Only the season/episode numbers and
  * the id carry meaning here; the rest of `EpisodeResource` exists to satisfy the type. */
-function asEpisodeResources(targets: EpisodeTarget[]): EpisodeResource[] {
+function asEpisodeResources(targets: VideoTarget[]): EpisodeResource[] {
   return targets.map((m) => ({
     id: m.episodeId,
     seriesId: 0,
@@ -633,16 +643,16 @@ function asEpisodeResources(targets: EpisodeTarget[]): EpisodeResource[] {
   }));
 }
 
-/** Deterministically matches an archive entry to a still-missing episode, using the ref
+/** Deterministically matches an archive entry to an episode still lacking something, using the ref
  * `entriesForFiles` already parsed at cache-write time — that ref carries the season the
  * pack's directory names implied, which re-parsing the basename here would throw away.
  * Matching itself is ingest's own `matchEpisodeRef` (same season/episode/absolute rules).
- * Movies with a single missing slot always match that slot. Returns null when nothing matches. */
-function matchDeterministic(missing: EpisodeTarget[], entry: ArchiveCacheEntry, isMovie: boolean): EpisodeTarget | null {
-  if (isMovie && missing.length === 1) return missing[0]!;
+ * Movies with a single open slot always match that slot. Returns null when nothing matches. */
+function matchDeterministic(gaps: EpisodeTarget[], entry: ArchiveCacheEntry, isMovie: boolean): EpisodeTarget | null {
+  if (isMovie && gaps.length === 1) return gaps[0]!;
   if (entry.episodeRef === null) return null;
-  const hit = matchEpisodeRef(entry.episodeRef, asEpisodeResources(missing));
-  return hit ? missing.find((m) => m.episodeId === hit.id) ?? null : null;
+  const hit = matchEpisodeRef(entry.episodeRef, asEpisodeResources(gaps));
+  return hit ? gaps.find((m) => m.episodeId === hit.id) ?? null : null;
 }
 
 /** The sidecar path a candidate would land at, derived from the candidate alone: its own
@@ -673,7 +683,7 @@ function reportBlocked(ctx: AppContext, job: JobRow, block: PlaceBlock, sourcePa
 
 /**
  * The gates + placement for one candidate file against one episode. Returns the language tag
- * that was placed (which the caller uses to shrink the episode's still-missing set), or
+ * that was placed (which the caller uses to shrink the episode's `lacking` set), or
  * `undefined` when nothing was placed.
  *
  * The cheap gates run first and in this order, because everything after them costs real
@@ -718,10 +728,15 @@ async function driftAndPlace(
 
   const plan = await decideCandidate(entry, t, state);
   if (plan.kind === 'quarantine') {
-    quarantine(ctx, job, state, t, entry.path);
-    // The trip fires here rather than at the first skipped candidate, so it is exactly one
-    // event per episode whether the pack held five more candidates or none.
-    if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
+    // A covered episode is already watchable; a candidate that fails to add a second
+    // language to it is nothing to warn about and nothing to set aside. Only an episode
+    // with no subtitles at all reaches the rollup, so only that one earns these events.
+    if (!t.covered) {
+      quarantine(ctx, job, state, t, entry.path);
+      // The trip fires here rather than at the first skipped candidate, so it is exactly one
+      // event per episode whether the pack held five more candidates or none.
+      if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
+    }
     return undefined;
   }
 
@@ -891,7 +906,7 @@ function quarantine(ctx: AppContext, job: JobRow, state: RunState, t: EpisodeTar
  * Atomically copies a candidate (original or resynced) beside its episode video and records
  * provenance. The foreign-file + collision guards already ran in `driftAndPlace`, against
  * this same destination and before any media work; this only writes. Returns the language
- * tag it placed, which the caller uses to shrink the episode's still-missing set.
+ * tag it placed, which the caller uses to shrink the episode's `lacking` set.
  */
 function placeSubtitle(
   ctx: AppContext,
@@ -968,7 +983,7 @@ async function siteSearchPass(
   ctx: AppContext,
   job: JobRow,
   meta: TargetMeta,
-  missing: EpisodeTarget[],
+  gaps: EpisodeTarget[],
   state: RunState,
   cache: ArchiveCache,
   deps: RunSubtitleDeps,
@@ -983,7 +998,7 @@ async function siteSearchPass(
   const cached = cachedPacks(cache, job);
 
   for (const site of sites) {
-    if (missing.length === 0) break;
+    if (uncovered(gaps).length === 0) break;
 
     // A disabled site simply doesn't exist for this pass: no run, no reflection, no
     // cooldown touch, and no event of its own — the human already saw the evidence when
@@ -993,7 +1008,7 @@ async function siteSearchPass(
     const profile = profiles.get(site.baseUrl);
     if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
 
-    await searchSiteRounds(ctx, job, site, meta, missing, state, cache, deps, profiles, cached);
+    await searchSiteRounds(ctx, job, site, meta, gaps, state, cache, deps, profiles, cached);
   }
 }
 
@@ -1027,7 +1042,7 @@ async function searchSiteRounds(
   job: JobRow,
   site: SubtitleSiteConfig,
   meta: TargetMeta,
-  missing: EpisodeTarget[],
+  gaps: EpisodeTarget[],
   state: RunState,
   cache: ArchiveCache,
   deps: RunSubtitleDeps,
@@ -1040,7 +1055,8 @@ async function searchSiteRounds(
   let downloadedHere = false;
 
   for (let round = 0; round < MAX_SEARCH_ROUNDS; round++) {
-    if (missing.length === 0) break;
+    const stillMissing = uncovered(gaps);
+    if (stillMissing.length === 0) break;
 
     // Rebuilt per round, not per site and certainly not once per pass: a pack from the
     // previous round (or the previous site) may have covered a season, and this round should
@@ -1051,7 +1067,7 @@ async function searchSiteRounds(
       languages: ctx.config.subtitle.languages,
       preferredGroups: ctx.config.subtitle.preferredGroups,
       alternates: meta.alternates,
-      missingSeasons: job.target_kind === 'movie' ? [] : summarizeMissingSeasons(missing, meta.seasonTitles),
+      missingSeasons: job.target_kind === 'movie' ? [] : summarizeMissingSeasons(stillMissing, meta.seasonTitles),
       alreadyFetched,
     });
 
@@ -1081,7 +1097,7 @@ async function searchSiteRounds(
     let verifiedSuccess = false;
     try {
       verifiedSuccess = result.download
-        ? await extractAndMatch(ctx, job, site, result.download, meta.title, missing, state, cache)
+        ? await extractAndMatch(ctx, job, site, result.download, meta.title, gaps, state, cache)
         : false;
     } catch (err) {
       // A hard extraction failure (not UnsupportedArchiveError, which extractAndMatch
@@ -1198,19 +1214,19 @@ function packEmpty(ctx: AppContext, job: JobRow, url: string, message: string): 
 }
 
 /** Extracts one site's downloaded payload into the archive cache and matches it against the
- * still-missing episodes. Returns whether anything actually got placed this call —
+ * episodes still lacking a language. Returns whether anything actually got placed this call —
  * `matchArchiveRow`'s `placedCount` is the placement oracle (at least one subtitle file
  * landed on disk), not "every target language for an episode landed" and not "a download
  * happened" or "extraction succeeded". `false` covers every non-placing case alike: not an
  * ingestible payload, an archive format extractArchive can't open, an archive with nothing
- * in it, or one that extracted fine but matched no missing episode. */
+ * in it, or one that extracted fine but matched no episode that wanted it. */
 async function extractAndMatch(
   ctx: AppContext,
   job: JobRow,
   site: SubtitleSiteConfig,
   download: { filePath: string; url: string },
   seriesTitle: string,
-  missing: EpisodeTarget[],
+  gaps: EpisodeTarget[],
   state: RunState,
   cache: ArchiveCache,
 ): Promise<boolean> {
@@ -1263,8 +1279,8 @@ async function extractAndMatch(
     files: entries,
     created_at: Date.now(),
   };
-  // matchArchiveRow drops fully-resolved episodes from `missing` itself.
-  const { placedCount } = await matchArchiveRow(ctx, job, row, missing, seriesTitle, state, siteLabel(site.baseUrl));
+  // matchArchiveRow drops episodes that lack nothing from `gaps` itself.
+  const { placedCount } = await matchArchiveRow(ctx, job, row, gaps, seriesTitle, state, siteLabel(site.baseUrl));
   return placedCount > 0;
 }
 

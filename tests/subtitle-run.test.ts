@@ -453,7 +453,7 @@ describe('runSubtitleJob', () => {
     const unresolved = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved');
     expect(unresolved!.data).toMatchObject({
       dedupeKey: 'unresolved',
-      episodes: [{ episodeId: 1, seasonNumber: 1, episodeNumber: 5, missingLanguages: ['zh-Hans'], quarantined: 1 }],
+      episodes: [{ episodeId: 1, seasonNumber: 1, episodeNumber: 5, quarantined: 1 }],
     });
     expect(new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId)).toHaveLength(0);
   });
@@ -483,7 +483,7 @@ describe('runSubtitleJob', () => {
     expect(capped[0]!.message).toBe('S1E5: 4 candidates tried, none verified; giving up on it this run');
     expect(capped[0]!.data).toMatchObject({ instance: fx.arrInstance, targetId: fx.targetId, episodeId: 1, tried: 4 });
     const unresolved = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved');
-    expect(unresolved!.data).toMatchObject({ episodes: [{ episodeId: 1, missingLanguages: ['zh-Hans'], quarantined: 4 }] });
+    expect(unresolved!.data).toMatchObject({ episodes: [{ episodeId: 1, quarantined: 4 }] });
   });
 
   it('no sites configured -> one subtitle.unresolved attention item naming the episode', async () => {
@@ -496,8 +496,21 @@ describe('runSubtitleJob', () => {
     expect(unresolved!.message).toBe('Frieren: 1 episode(s) still without zh-Hans (S1E5)');
     expect(unresolved!.data).toMatchObject({
       dedupeKey: 'unresolved',
-      episodes: [{ episodeId: 1, seasonNumber: 1, episodeNumber: 5, missingLanguages: ['zh-Hans'], quarantined: 0 }],
+      episodes: [{ episodeId: 1, seasonNumber: 1, episodeNumber: 5, quarantined: 0 }],
     });
+  });
+
+  it('names every configured language with "or" when nothing was found', async () => {
+    const fx = subtitleFixture({ sites: [], languages: ['zh-Hans', 'zh-Hant'] });
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job);
+
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.missing')!.message).toBe(
+      '1 video(s) without subtitles in zh-Hans or zh-Hant',
+    );
+    expect(findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')!.message).toBe(
+      'Frieren: 1 episode(s) still without zh-Hans or zh-Hant (S1E5)',
+    );
   });
 
   it('one attention item for the whole job, with the still-missing episodes collapsed into ranges', async () => {
@@ -587,25 +600,134 @@ describe('runSubtitleJob', () => {
     expect(rows[0]!.data).toMatchObject({ lang: 'zh-Hans' });
   });
 
-  it('ignores a candidate in a language this episode no longer needs', async () => {
-    // Config wants both Chinese variants; the video already carries zh-Hans embedded, so
-    // only zh-Hant is missing. The pack's zh-Hans file is wanted by the config and matches
-    // the episode — and must still be left alone, or the library gains a sidecar nobody
-    // asked for beside the one that was.
-    const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
+  it('collects a second language for an already-covered episode without counting it as unresolved', async () => {
+    // Season 1 already carries zh-Hans embedded, so it is covered and drives no search of
+    // its own — but the run is out searching for season 2 anyway, and a pack that also holds
+    // season 1's zh-Hant is worth taking. Its zh-Hans file must still be left alone, or the
+    // library gains a sidecar beside the embedded track nobody asked to duplicate.
+    const fx = multiSeasonFixture(2);
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(
+      fx.ctx,
+      job,
+      siteStub({ 'Show - S01E05.chs.ass': SRT, 'Show - S01E05.cht.ass': SRT, 'Show - S02E05.cht.ass': SRT }),
+    );
+
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(false);
+    expect(existsSync(join(fx.libraryDir, 'Show - S02E05.zh-Hant.ass'))).toBe(true);
+    // Season 2 is covered by its zh-Hant file even though zh-Hans never arrived.
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(false);
+    // Only season 2 was ever missing, so only it was counted.
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.missing')!.data).toMatchObject({ counts: { missing: 1 } });
+  });
+
+  it('every episode covered but lacking a second language -> the cache still fills it, no site search', async () => {
+    // The cache pass costs nothing but local file reads, so it runs even when no episode is
+    // uncovered: a pack already on disk can hand over zh-Hant without anyone going looking.
+    const fx = subtitleFixture();
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+    const extractDir = tmpDir();
+    const filePath = join(extractDir, '0-Show - S01E05.cht.ass');
+    writeFileSync(filePath, SRT);
+    new ArchiveCache(fx.ctx.db).upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: 'series',
+      targetId: fx.targetId,
+      sourceUrl: 'https://example.test/pack.zip',
+      path: extractDir,
+      files: entriesForFiles([filePath], extractDir),
+    });
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
+  });
+
+  it('a covered episode never quarantines the candidates that failed to fill its second language', async () => {
+    // Nothing is wrong with this episode: it has subtitles. A cached pack that cannot be
+    // verified against it is a non-event, not a warning and not a file to set aside.
+    const fx = subtitleFixture();
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    const extractDir = tmpDir();
+    const files: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const filePath = join(extractDir, `${i}-[G${i}] Show - S01E05.cht.ass`);
+      writeFileSync(filePath, SRT_UNRELATED);
+      files.push(filePath);
+    }
+    new ArchiveCache(fx.ctx.db).upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: 'series',
+      targetId: fx.targetId,
+      sourceUrl: 'https://example.test/pack.zip',
+      path: extractDir,
+      files: entriesForFiles(files, extractDir),
+    });
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.quarantined')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.candidates-capped')).toBe(false);
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
+    expect(files.every((f) => existsSync(f))).toBe(true);
+  });
+
+  it('every episode covered and the cache empty -> subtitle.complete, no site search', async () => {
+    const fx = subtitleFixture();
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
     fx.media.setStreams(fx.videoPath, [
       { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
       { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
     ]);
 
     const job = claimSubtitleJob(fx);
-    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT, 'Show - S01E05.cht.ass': SRT }));
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
 
-    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hant.ass'))).toBe(true);
-    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(false);
-    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.data).toMatchObject({ lang: 'zh-Hant' });
+    expect(findEvent(fx.ctx.events.list(), 'subtitle.complete')).toBeTruthy();
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.missing')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(false);
+  });
+
+  it('leaves a covered season out of the search hints', async () => {
+    // Season 1 is covered by its embedded zh-Hans and still lacks zh-Hant, but the search is
+    // for season 2 alone — a covered episode is never a reason to go looking.
+    const fx = multiSeasonFixture(2);
+    fx.ctx.config.subtitle.languages = ['zh-Hans', 'zh-Hant'];
+    fx.media.setStreams(fx.videoPath, [
+      { index: 0, codecType: 'video', codecName: 'hevc', language: null, forced: false, title: null },
+      { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'zh-Hans', forced: false, title: null },
+    ]);
+
+    let hints: SearchHints | undefined;
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, {
+      searchSite: async (_ctx, _job, _site, query) => {
+        hints = query as SearchHints;
+        return { download: null, transcript: [], outcome: 'gave-up' as const };
+      },
+    });
+
+    expect(hints!.missingSeasons).toEqual([{ seasonNumber: 2, episodes: 1, titles: [] }]);
   });
 
   it('skips a candidate whose destination is already claimed before doing any media work', async () => {
@@ -901,11 +1023,9 @@ describe('runSubtitleJob', () => {
     expect(listEpisodes).not.toHaveBeenCalled();
   });
 
-  it('places one of two target languages without treating the episode as fully resolved', async () => {
-    // Config wants both zh-Hans and zh-Hant. The pack only carries a zh-Hans-tagged file:
-    // that language must land, but the episode stays in the working set (and raises
-    // subtitle.unresolved) because zh-Hant is still missing. Pre-fix this collapsed the
-    // whole episode after any single placement.
+  it('one of two configured languages is enough to cover the episode', async () => {
+    // Any-of coverage: the pack only carries zh-Hans, and that is enough. The episode is
+    // covered, so nothing goes to the unresolved rollup even though zh-Hant never arrived.
     const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
     // No embedded ref -> place unverified (avoids needing cue content for the gate).
     const job = claimSubtitleJob(fx);
@@ -916,15 +1036,14 @@ describe('runSubtitleJob', () => {
     expect(existsSync(hansPath)).toBe(true);
     expect(existsSync(hantPath)).toBe(false);
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
-    // Still unresolved: zh-Hant was never filled.
-    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(true);
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(false);
 
     const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.data).toMatchObject({ lang: 'zh-Hans' });
   });
 
-  it('fully resolves an episode only after every target language is placed', async () => {
+  it('collects every configured language a single pack holds for one episode', async () => {
     const fx = subtitleFixture({ languages: ['zh-Hans', 'zh-Hant'] });
     const job = claimSubtitleJob(fx);
     await runSubtitleJob(
@@ -1026,9 +1145,7 @@ describe('runSubtitleJob', () => {
       reflectOnRun: reflectSpy(calls),
     });
 
-    // Two rounds, because round 1 placed something and the episode still lacks zh-Hant. Only
-    // round 1 reflects: round 2 comes back with the same pack under the same url, which ends
-    // the site before anything is unpacked — the site was already judged on that exact run.
+    // One round: zh-Hans landing covers the episode, so there is nothing left to search for.
     expect(calls).toEqual([{ verifiedSuccess: true }]);
   });
 

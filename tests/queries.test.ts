@@ -82,6 +82,13 @@ describe('formatSearchHintsForPrompt', () => {
     expect(text).toMatch(/Chinese/i);
   });
 
+  it('tells the agent any one target language is enough, and to collect the rest anyway', () => {
+    const text = formatSearchHintsForPrompt(buildSearchHints({ title: 'X', languages: ['zh-Hans', 'zh-Hant'] }));
+    expect(text).toContain(
+      'Target subtitle languages, in order of preference (any one is enough; collect every one you can): zh-Hans, zh-Hant.',
+    );
+  });
+
   it('lists the still-missing seasons with their episode counts and per-season titles', () => {
     const text = formatSearchHintsForPrompt(
       buildSearchHints({
