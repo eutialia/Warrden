@@ -112,9 +112,18 @@ function httpFailure(res: FetchResult): string {
   return text === '' ? status : `${status}: ${text.slice(0, ERROR_SNIPPET_CAP)}`;
 }
 
+/** Script and style blocks gone, contents and all. Every reader of a page runs on this
+ * first: what a page says inside a `<script>` is code the site's own browser would run,
+ * never markup the page served, and reading it as markup is how a form written as a
+ * JavaScript string got its `name=value` pairs into the prompt as if they were real. */
+function withoutCode(body: string): string {
+  return body.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+}
+
 /**
- * A page as the model should read it: script and style blocks dropped before the tags so
- * their contents do not survive as text, then the tags themselves, then whitespace collapsed.
+ * A page as the model should read it: tags stripped, whitespace collapsed. Feed it a body
+ * that has already been through `withoutCode`, or a raw one — it runs the strip itself so
+ * no caller can forget it.
  *
  * Three things survive the tag strip, because without them the text is unusable rather than
  * merely smaller: an anchor's `href` (the run navigates by the links it reads), a form's
@@ -124,8 +133,7 @@ function httpFailure(res: FetchResult): string {
  * bounded prompt.
  */
 function pageText(body: string): string {
-  return body
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+  return withoutCode(body)
     .replace(/<a\b[^>]*>/gi, (tag) => {
       const href = attr(tag, 'href');
       return href === undefined || href === '' ? ' ' : ` [${href}] `;
@@ -154,7 +162,8 @@ const MAX_HIDDEN_FIELDS = 20;
  * The hidden `name=value` pairs of a page's forms, as one `[form: a=1, b=2]` line — or `''`
  * when the page has none. These are the per-session tokens (`formhash`, `searchsubmit`, CSRF
  * nonces) a POST search is rejected without, and they live only in attributes, so a plain tag
- * strip is exactly what loses them.
+ * strip is exactly what loses them. Expects a body already through `withoutCode`: an input
+ * a script only writes as a string is not a field the page served.
  */
 function hiddenFields(body: string): string {
   const fields = new Map<string, string>();
@@ -175,8 +184,9 @@ function hiddenFields(body: string): string {
  * the next step cannot make.
  */
 function observation(body: string): string {
-  const fields = hiddenFields(body);
-  const text = pageText(body);
+  const clean = withoutCode(body);
+  const fields = hiddenFields(clean);
+  const text = pageText(clean);
   return `${fields === '' ? '' : `${fields} `}${text}`.slice(0, OBSERVATION_CAP);
 }
 
