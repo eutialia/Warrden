@@ -6,7 +6,6 @@ import type { TranscriptEntry } from '../db/subtitleRuns.js';
 import { targetEventData } from '../events/target.js';
 import type { JobRow } from '../jobs/queue.js';
 import { LlmError, resolveModel } from '../llm/generator.js';
-import { errorMessage } from '../util/errors.js';
 import {
   AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
@@ -19,6 +18,7 @@ import {
   type KnowledgeSection,
   type SiteKnowledge,
 } from './siteKnowledge.js';
+import { describeStop, stopFromError, type StopReason } from './stop.js';
 import { scanForThreats } from './threatPatterns.js';
 
 /** The call-site reflection resolves against. Leaving it out of the active LLM profile is
@@ -28,6 +28,12 @@ export const REFLECT_CALLSITE = 'site-notes';
 
 /** What the run says about the site itself, independent of whether anything was learned. */
 export type SiteVerdict = 'usable' | 'transient-failure' | 'unusable';
+
+/** What one reflection call ended as. A verdict only exists when the model actually
+ * answered, so it and its evidence sentence arrive together or not at all. */
+export type ReflectionResult =
+  | { stop: StopReason; verdict?: undefined; reason?: undefined }
+  | { stop: StopReason; verdict: SiteVerdict; reason: string };
 
 /** Most recent transcript steps handed to the model. A run is bounded by the step budget
  * already; this bounds the prompt against a budget an operator raised. */
@@ -77,11 +83,28 @@ const LINE_BREAK_RE = /[\r\n\v\f\u0085\u2028\u2029]/;
  * may not write, or simply more bullets than the one operation being applied. The parser
  * was made strict at exactly these boundaries; the writer must not be able to forge them
  * from the other side. */
-const FORGERY_CHECKS: readonly { test: RegExp; why: string }[] = [
-  { test: LINE_BREAK_RE, why: 'line break in bullet text — a bullet is one line' },
+const FORGERY_CHECKS: readonly { test: RegExp; why: string; hostile?: true }[] = [
+  // A line break is the one that cannot be a mistake: nothing about writing one rule on one
+  // line produces a second line, and what follows it is a forged heading or a second bullet.
+  { test: LINE_BREAK_RE, why: 'line break in bullet text — a bullet is one line', hostile: true },
+  // These two are ordinary markdown habits. A model that writes `## Access` or a nested `- `
+  // at the start of a rule is far more likely to be formatting than attacking, and calling
+  // that an attack put typos on the channel reserved for recorded attempts to poison the
+  // file. One leading marker is stripped before we get here; what is left is a real refusal,
+  // and a plain one.
   { test: /^#{1,6}\s/, why: 'bullet text starts a markdown heading' },
-  { test: /^-\s/, why: 'bullet text starts a markdown bullet marker' },
+  { test: /^[-*+]\s/, why: 'bullet text starts a markdown bullet marker' },
 ];
+
+/** One leading list marker, as a model writing markdown will produce. `renderKnowledge`
+ * adds the `- ` itself, so a marker the model wrote is duplication, not structure — stripping
+ * it is what makes a bullet copied straight out of the rendered file a usable `target`. */
+const LEADING_MARKER_RE = /^[-*+]\s+/;
+
+/** Bullet text as the file means it: without the list marker the renderer supplies. */
+function withoutMarker(text: string): string {
+  return text.replace(LEADING_MARKER_RE, '');
+}
 
 /**
  * Flat root object, every field REQUIRED — the same strict-mode constraint documented on
@@ -136,12 +159,30 @@ function stamped(text: string, today: string): string {
   return `${withoutStamp(text)} (confirmed ${today})`;
 }
 
+/**
+ * What this run has earned the right to write, in the model's own terms. A verified file is
+ * the strongest evidence and opens everything. A run that only read a search listing has
+ * still seen the search work, first-hand — that is exactly the fact `## Search` is for, and
+ * gating it on a download meant a site whose search the agent had figured out three times
+ * over could never write it down. A run that saw neither has nothing to describe.
+ */
+function protocolPermission(verifiedSuccess: boolean, searchObserved: boolean): string {
+  if (verifiedSuccess) {
+    return 'This run verifiably succeeded: it produced a usable subtitle file. Access, Search and Download are open to you.';
+  }
+  if (searchObserved) {
+    return 'This run produced no subtitle file, but it did get search results back from the site. Access, Search and Download are open to you for what this run actually OBSERVED — how the page was reached, how the search was made, what came back. A download route nobody took is not something this run observed.';
+  }
+  return 'This run did NOT produce a usable subtitle file, and never got search results back. Nothing here proves how the site works, so add/update against Access, Search and Download will be refused. Pitfalls is still open, if there is a rule worth writing.';
+}
+
 function isAgentSection(section: string): section is KnowledgeSection {
   return (AGENT_SECTIONS as readonly string[]).includes(section);
 }
 
-/** Protocol sections — the ones a run has to have actually succeeded to write. `Pitfalls`
- * is deliberately not here: a failure is exactly the evidence a pitfall records. */
+/** Protocol sections — the ones a run has to have observed the site working to write: a
+ * download, or at least a search listing it got back. `Pitfalls` is deliberately not here:
+ * a failure is exactly the evidence a pitfall records. */
 const PROTOCOL_SECTIONS: readonly KnowledgeSection[] = ['Access', 'Search', 'Download'];
 
 /** Deep-enough copy for operation application: `sections` is rebuilt so the caller's
@@ -247,14 +288,15 @@ export function applyOps(
     // validation below runs against THESE bytes, not the raw `op.text`, so a fake
     // `(confirmed ...)` stamp buried in the op can't pad past a scanner gap or hide a
     // forged heading/marker behind text that `withoutStamp` deletes before storage (C-01).
-    if (withoutStamp(op.text) === '') {
+    const text = withoutMarker(op.text);
+    if (withoutStamp(text) === '') {
       drop(op, `${op.op} with no bullet text`);
       continue;
     }
-    const candidate = stamped(op.text, opts.today);
+    const candidate = stamped(text, opts.today);
     const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate));
     if (forgery) {
-      drop(op, forgery.why, true);
+      drop(op, forgery.why, forgery.hostile);
       continue;
     }
     if (scanForThreats(candidate, 'strict').length > 0) {
@@ -268,8 +310,7 @@ export function applyOps(
       knowledge.sections[section].some((bullet, index) => index !== exclude && withoutStamp(bullet) === text);
 
     if (op.op === 'add') {
-      const text = withoutStamp(op.text);
-      if (duplicates(text)) {
+      if (duplicates(withoutStamp(text))) {
         drop(op, `${section} already has this bullet`);
         continue;
       }
@@ -277,7 +318,7 @@ export function applyOps(
       continue;
     }
 
-    const wanted = withoutStamp(op.target);
+    const wanted = withoutStamp(withoutMarker(op.target));
     if (wanted === '') {
       drop(op, `${op.op} with no target bullet`);
       continue;
@@ -300,7 +341,7 @@ export function applyOps(
     // rewrites one bullet into the text of another leaves two identical bullets, and from
     // then on every `update` naming that text is ambiguous, so neither copy can be edited
     // again except by the operator.
-    if (duplicates(withoutStamp(op.text), index)) {
+    if (duplicates(withoutStamp(text), index)) {
       drop(op, `${section} already has this bullet`);
       continue;
     }
@@ -324,9 +365,10 @@ function buildSystemPrompt(input: {
   site: SubtitleSiteConfig;
   knowledge: SiteKnowledge;
   verifiedSuccess: boolean;
+  searchObserved: boolean;
   today: string;
 }): string {
-  const { site, knowledge, verifiedSuccess, today } = input;
+  const { site, knowledge, verifiedSuccess, searchObserved, today } = input;
   return [
     `You keep the notes on ${site.baseUrl} for an agent that searches it for subtitle files. A run just finished. Decide what, if anything, the notes should now say.`,
     '',
@@ -348,9 +390,11 @@ function buildSystemPrompt(input: {
     '- Pitfalls: what goes wrong and what to do about it.',
     '- Operator notes: written by a human, authoritative, and not yours to edit. No operation may target it.',
     '',
-    'Bullets are conditional rules: "IF <observable condition> THEN <action>." A conditional can be proved wrong on the next run; "the search is flaky" cannot. One rule per bullet, on a single line: text containing a line break, a heading or a bullet marker is refused. Do not write the date yourself — every bullet you add or update is stamped `(confirmed ' +
+    'Bullets are conditional rules: "IF <observable condition> THEN <action>." A conditional can be proved wrong on the next run; "the search is flaky" cannot. The file above renders each bullet with a leading `- `, which is not part of the rule: write `text` and `target` without it (one leading marker is stripped for you if you include it anyway). One rule per bullet, on a single line: `text` carrying a line break, a heading, or a further bullet marker is refused. Do not write the date yourself — every bullet you add or update is stamped `(confirmed ' +
       today +
       ')` for you.',
+    '',
+    'A Pitfall that this run and an earlier one both confirmed, and that describes how to search the site rather than what went wrong, belongs in `## Search` instead: update it into a step ("POST the search form at /search.php with formhash from the page"), not an IF/THEN about a failure.',
     '',
     'The file is a set of distinct facts, one bullet per fact — not a log of edits. Before writing anything, check what this run observed against the facts already on file: same endpoint, same failure mode, same page behavior as an existing bullet means that fact is already covered, even if the condition or the conclusion has changed since. Covered is an update, always — correcting a bullet this run showed wrong, refreshing the date on a bullet this run relied on and found still true, or folding one bullet into another that overlaps it (leave the now-redundant one for the operator to prune). `add` is only for a subject the file has never described. When in doubt, update: a lazy add next to a near-duplicate just sits there, since nothing here can delete it.',
     '',
@@ -361,12 +405,10 @@ function buildSystemPrompt(input: {
     '',
     'There is no delete operation. You cannot remove a bullet — only the operator can, from the dashboard. If a bullet is wrong, correct it with update; if two bullets overlap, update one to absorb the other and leave the redundant one alone.',
     '',
-    verifiedSuccess
-      ? 'This run verifiably succeeded: it produced a usable subtitle file. Access, Search and Download are open to you.'
-      // No push to write something: a failed run is the one most likely to have been fed
-      // attacker-chosen page text, and "write what went wrong" is an invitation to copy it
-      // into the file.
-      : 'This run did NOT produce a usable subtitle file. Nothing here proves how the site works, so add/update against Access, Search and Download will be refused. Pitfalls is still open, if there is a rule worth writing.',
+    // No push to write something on a run that saw nothing: that is the run most likely to
+    // have been fed attacker-chosen page text, and "write what went wrong" is an invitation
+    // to copy it into the file.
+    protocolPermission(verifiedSuccess, searchObserved),
     '',
     'Two rules about honesty, and they matter more than the volume of what you write:',
     '- Do not write a sequence of failed attempts up as a recommended approach. Something that did not work is a pitfall, never a protocol.',
@@ -389,13 +431,14 @@ function buildSystemPrompt(input: {
  * YYYY-MM-DD)` stamp is the only signal of age, refreshed whenever a bullet is re-confirmed
  * or updated, and it is the operator's to act on from the dashboard.
  *
- * Returns `null`, having changed nothing, in two cases that are reported differently: the
- * `site-notes` call-site is unconfigured, which is the off switch and is quiet, or anything
- * past that point failed — the generate call, the notes file read, the save — which is a
- * warning. The off-switch check runs before any file I/O so it stays quiet even when the
- * site's notes path itself is unreadable. Every failure after it, whatever raised it, is
- * caught here: this function is the caller's whole contract for "reflection never fails a
- * job," so nothing it does may propagate.
+ * Always returns a `stop`, and a verdict only when the model actually produced one. Two
+ * endings change nothing and are reported differently: the `site-notes` call-site is
+ * unconfigured, which is the off switch and is quiet (`skipped`), or anything past that point
+ * failed — the generate call, the notes file read, the save — which is a warning. The
+ * off-switch check runs before any file I/O so it stays quiet even when the site's notes path
+ * itself is unreadable. Every failure after it, whatever raised it, is caught here: this
+ * function is the caller's whole contract for "reflection never fails a job," so nothing it
+ * does may propagate.
  */
 export async function reflectOnRun(input: {
   ctx: AppContext;
@@ -403,13 +446,16 @@ export async function reflectOnRun(input: {
   site: SubtitleSiteConfig;
   transcript: TranscriptEntry[];
   /** The pipeline's own oracle: this run produced at least one usable subtitle file for
-   * this site. Gates protocol writes. */
+   * this site. Opens every protocol section. */
   verifiedSuccess: boolean;
+  /** The run read at least one search result page. Weaker evidence than a file, and enough
+   * for the sections describing how the site is reached and searched. */
+  searchObserved: boolean;
   today: string;
   /** Overrides `defaultSeedsDir()`, as in `searchSite` — tests point it at a fixture. */
   seedsDir?: string;
-}): Promise<{ verdict: SiteVerdict; reason: string } | null> {
-  const { ctx, job, site, transcript, verifiedSuccess, today } = input;
+}): Promise<ReflectionResult> {
+  const { ctx, job, site, transcript, verifiedSuccess, searchObserved, today } = input;
   const label = siteLabel(site.baseUrl);
 
   try {
@@ -420,13 +466,14 @@ export async function reflectOnRun(input: {
     resolveModel(ctx.config);
   } catch (err) {
     if (!(err instanceof LlmError)) throw err;
+    const stop: StopReason = { kind: 'skipped', why: 'no-model' };
     ctx.events.append({
       kind: 'subtitle.knowledge-skipped',
       jobId: job.id,
-      message: `No knowledge update for ${label}: ${errorMessage(err)}`,
-      data: targetEventData(job, { site: label }),
+      message: `No knowledge update for ${label}: ${describeStop(stop)}`,
+      data: targetEventData(job, { site: label, stop }),
     });
-    return null;
+    return { stop };
   }
 
   try {
@@ -444,7 +491,7 @@ export async function reflectOnRun(input: {
     const reflection = await ctx.llm.generate({
       callsite: REFLECT_CALLSITE,
       schema: ReflectionSchema,
-      system: buildSystemPrompt({ site, knowledge, verifiedSuccess, today }),
+      system: buildSystemPrompt({ site, knowledge, verifiedSuccess, searchObserved, today }),
       prompt: [
         `Run outcome: ${verifiedSuccess ? 'a usable subtitle file was produced' : 'no usable subtitle file was produced'}.`,
         '',
@@ -455,7 +502,7 @@ export async function reflectOnRun(input: {
     });
 
     const { knowledge: applied, dropped } = applyOps(knowledge, reflection.ops, {
-      allowProtocol: verifiedSuccess,
+      allowProtocol: verifiedSuccess || searchObserved,
       today,
     });
     const appliedCount = reflection.ops.length - dropped.length;
@@ -483,7 +530,7 @@ export async function reflectOnRun(input: {
     if (appliedCount === 0) {
       // Nothing changed, so nothing is written: a no-op run leaves the file — and its
       // single `.bak` — exactly as it found them.
-      return { verdict: reflection.verdict, reason: reflection.reason };
+      return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
 
     const size = agentCharCount(applied);
@@ -498,7 +545,7 @@ export async function reflectOnRun(input: {
         message: `Knowledge update for ${label} dropped — it would reach ${size} chars, over the ${KNOWLEDGE_CHAR_CAP} cap`,
         data: targetEventData(job, { site: label, size, cap: KNOWLEDGE_CHAR_CAP }),
       });
-      return { verdict: reflection.verdict, reason: reflection.reason };
+      return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
 
     try {
@@ -517,7 +564,7 @@ export async function reflectOnRun(input: {
         message: `Site knowledge for ${label} was edited elsewhere while this run's reflection was in progress; its edits were dropped rather than overwrite that change`,
         data: targetEventData(job, { site: label }),
       });
-      return { verdict: reflection.verdict, reason: reflection.reason };
+      return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
     ctx.events.append({
       kind: 'subtitle.knowledge-updated',
@@ -531,19 +578,20 @@ export async function reflectOnRun(input: {
       }),
     });
 
-    return { verdict: reflection.verdict, reason: reflection.reason };
+    return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
   } catch (err) {
     // The call-site resolved a moment ago, so this is a configured feature failing — a
     // provider outage, a timeout, a response that didn't match the schema, or a filesystem
     // error reading/saving the notes file. Worth a warning: left alone it would silently
     // learn nothing, run after run.
+    const stop = stopFromError(err);
     ctx.events.append({
       kind: 'subtitle.knowledge-failed',
       level: 'warn',
       jobId: job.id,
-      message: `Knowledge update for ${label} failed: ${errorMessage(err)}`,
-      data: targetEventData(job, { site: label }),
+      message: `Knowledge update for ${label} failed: ${describeStop(stop)}`,
+      data: targetEventData(job, { site: label, stop }),
     });
-    return null;
+    return { stop };
   }
 }

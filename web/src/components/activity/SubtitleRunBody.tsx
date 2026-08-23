@@ -164,7 +164,7 @@ function EpisodeRow({ group }: { group: EpisodeGroup }) {
 
 /** Event kinds that narrate the search itself rather than its result: why the pass was
  * scoped down, and what ended each round. */
-const SEARCH_NOTE_KINDS = ['subtitle.search-scoped', 'subtitle.search-round'];
+const SEARCH_NOTE_KINDS = ['subtitle.search-scoped', 'agent.stop'];
 
 /**
  * The search's own running commentary, above the per-site transcripts: one line per round

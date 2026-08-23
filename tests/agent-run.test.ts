@@ -43,6 +43,7 @@ function act(
     contentType?: string;
     referer?: string;
     reason?: string;
+    because?: 'not-found' | 'blocked' | 'unsure';
   },
 ) {
   return {
@@ -51,6 +52,7 @@ function act(
     contentType: '',
     referer: '',
     reason: '',
+    because: 'unsure' as const,
     ...partial,
   };
 }
@@ -145,7 +147,7 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out.download).toEqual({ filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip' });
-    expect(out.outcome).toBe('downloaded');
+    expect(out.stop).toEqual({ kind: 'done' });
     expect(tiers.made).toEqual(['curl', 'chromium']);
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.last_working_tier).toBe('chromium');
@@ -167,21 +169,6 @@ describe('searchSite', () => {
     expect(steps.every((r) => r.parent_seq === site?.seq)).toBe(true);
   });
 
-  it('skips when within cooldown, emitting subtitle.site-cooldown', async () => {
-    const { ctx, job } = setup();
-    const profiles = new SiteProfiles(ctx.db);
-    profiles.upsert({ baseUrl: 'https://acg.rip' });
-    profiles.update('https://acg.rip', { lastFailureAt: Date.now(), failCount: 2 });
-    const tiers = stubTiers([]);
-
-    await withFakeTime(async () => {
-      const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-      expect(out).toEqual({ download: null, transcript: [], steps: 0, outcome: 'cooldown' });
-    });
-    expect(tiers.made).toHaveLength(0);
-    expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeDefined();
-  });
-
   it('records total failure (fail_count/last_failure_at) and emits subtitle.site-failed', async () => {
     const { ctx, job } = setup();
     ctx.llm = new FakeGenerator([new Error('bad llm output')]);
@@ -189,7 +176,7 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out.download).toBeNull();
-    expect(out.outcome).toBe('error');
+    expect(out.stop).toMatchObject({ kind: 'error', message: 'bad llm output' });
     const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
     expect(profile.fail_count).toBe(1);
     expect(profile.last_failure_at).not.toBeNull();
@@ -211,7 +198,7 @@ describe('searchSite', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out.download).toBeNull();
-    expect(out.outcome).toBe('error');
+    expect(out.stop.kind).toBe('error');
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')).toBeDefined();
   });
 
@@ -235,21 +222,6 @@ describe('searchSite', () => {
     const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acg.rip')!;
     expect(row.status).toBe('done');
     expect(row.transcript).toHaveLength(1);
-  });
-
-  it('does not skip a site after success just because last_failure_at is still recent', async () => {
-    // fail_count is 0 (post-success / post-reset) but last_failure_at is 5s ago: without
-    // the fail_count > 0 guard, failBackoffMs(0) would still block for the base cooldown.
-    const { ctx, job } = setup();
-    const profiles = new SiteProfiles(ctx.db);
-    profiles.upsert({ baseUrl: 'https://acg.rip' });
-    profiles.update('https://acg.rip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
-    ctx.llm = new FakeGenerator([act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'dl' })]);
-    const tiers = stubTiers([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
-
-    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
-    expect(out.download).not.toBeNull();
-    expect(findEvent(ctx.events.list(), 'subtitle.site-cooldown')).toBeUndefined();
   });
 
   it('success appends a newly discovered search pattern', async () => {
@@ -286,7 +258,7 @@ describe('searchSite', () => {
       llm: [act({ action: 'download', url: 'https://acg.rip/dl/1.zip', note: 'dl' })],
       results: [{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }],
       expectedDownload: { filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/1.zip' },
-      expectedOutcome: 'downloaded',
+      expectedStop: { kind: 'done' },
     },
     {
       name: 'give_up returns no download after exhausting rungs',
@@ -296,15 +268,78 @@ describe('searchSite', () => {
       ],
       results: [],
       expectedDownload: null,
-      expectedOutcome: 'gave-up',
+      expectedStop: { kind: 'gave-up', because: 'unsure', reason: 'no reason given' },
     },
-  ])('adapter-free path: $name', async ({ llm, results, expectedDownload, expectedOutcome }) => {
+  ])('adapter-free path: $name', async ({ llm, results, expectedDownload, expectedStop }) => {
     const { ctx, job } = setup();
     ctx.llm = new FakeGenerator(llm);
     const tiers = stubTiers(results as FetchResult[]);
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
     expect(out.download).toEqual(expectedDownload);
-    expect(out.outcome).toBe(expectedOutcome);
+    expect(out.stop).toEqual(expectedStop);
+  });
+
+  /**
+   * The ladder's answer to a give-up, by what the agent said it was. A wall it named itself
+   * is what escalation is for; "I searched and found nothing", with two distinct listings
+   * behind it, is believed and ends the site there; anything weaker buys one more rung.
+   */
+  it.each([
+    ['a wall the agent named itself', 'blocked' as const, 2, ['curl', 'chromium']],
+    ['nothing found, two listings behind it', 'not-found' as const, 2, ['curl']],
+    ['nothing found, only one listing behind it', 'not-found' as const, 1, ['curl', 'chromium']],
+    ['could not tell', 'unsure' as const, 2, ['curl', 'chromium']],
+  ])('gives up %s -> tries %s', async (_name, because, listings, expectedRungs) => {
+    const { ctx, job } = setup();
+    const searches = Array.from({ length: listings }, (_v, i) =>
+      act({ action: 'search', url: `https://acg.rip/?term=${i}`, note: 's' }),
+    );
+    const giveUp = act({ action: 'give_up', url: '', note: 'stop', reason: 'r', because });
+    ctx.llm = new FakeGenerator([...searches, giveUp, giveUp]);
+    const tiers = stubTiers(
+      // Distinct by their words: a fingerprint collapses digits, so two pages that differ
+      // only by a number are the same look at the same nothing.
+      Array.from({ length: listings }, (_v, i) => ({
+        ok: true,
+        status: 200,
+        body: `<html>results for query ${'x'.repeat(i + 1)}</html>`,
+        blocked: false,
+      })),
+    );
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
+
+    expect(tiers.made).toEqual(expectedRungs);
+    expect(out.stop).toEqual({ kind: 'gave-up', because, reason: 'r' });
+  });
+
+  /** An honest give-up is not a broken site. Booking a failure for one is how a site that
+   * says "nothing aired yet" ends up in a cooldown the next job has to wait out. */
+  it('leaves fail_count and last_failure_at alone when the agent gave up', async () => {
+    const { ctx, job } = setup();
+    const giveUp = act({ action: 'give_up', url: '', note: 'stop', reason: 'r', because: 'not-found' as const });
+    ctx.llm = new FakeGenerator([giveUp, giveUp]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
+
+    const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
+    expect(profile.fail_count).toBe(0);
+    expect(profile.last_failure_at).toBeNull();
+    // Still reported: no download came back, and an operator reading the run should see why.
+    expect(hasEvent(ctx.events.list(), 'subtitle.site-exhausted')).toBe(true);
+  });
+
+  it.each([
+    ['a spent step budget', [act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' })], 1],
+    ['a hard error', [new Error('boom')], 1],
+  ])('books a site failure for %s', async (_name, queue, expected) => {
+    const { ctx, job } = setup();
+    ctx.config.browser.stepBudget = 1;
+    ctx.llm = new FakeGenerator([...queue, ...queue]);
+
+    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML, OK_HTML]), seedsDir: NO_SEEDS });
+
+    expect(new SiteProfiles(ctx.db).get('https://acg.rip')!.fail_count).toBe(expected);
   });
 
   it('createRunTiers produces independent jars across two factory instances', async () => {
@@ -404,7 +439,7 @@ describe('searchSite', () => {
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
 
     expect(out.download).toBeNull();
-    expect(out.outcome).toBe('error');
+    expect(out.stop).toEqual({ kind: 'refused', refusals: 3 });
     expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')?.message).toContain('refused address');
   });
@@ -444,9 +479,9 @@ describe('searchSite', () => {
 });
 
 describe('searchSite — per-round reporting', () => {
-  /** The `subtitle.search-round` line a run emitted, or undefined when it emitted none. */
+  /** The `agent.stop` line a run emitted, or undefined when it emitted none. */
   function roundEvent(ctx: ReturnType<typeof setup>['ctx']) {
-    return findEvent(ctx.events.list(), 'subtitle.search-round');
+    return findEvent(ctx.events.list(), 'agent.stop');
   }
 
   it('a download reports the round, its tier and the pack', async () => {
@@ -457,9 +492,18 @@ describe('searchSite — per-round reporting', () => {
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS, round: 2, maxRounds: 3 });
 
     const event = roundEvent(ctx)!;
-    expect(event.message).toBe('[acg.rip] round 2/3 (curl): downloaded https://acg.rip/dl/123.zip');
+    expect(event.message).toBe('[acg.rip] round 2/3 (curl): downloaded');
     expect(event.level).toBe('info');
-    expect(event.data).toMatchObject({ site: 'acg.rip', round: 2, tier: 'curl', steps: 1, outcome: 'downloaded' });
+    expect(event.data).toMatchObject({
+      callsite: 'site-search',
+      site: 'acg.rip',
+      round: 2,
+      maxRounds: 3,
+      tier: 'curl',
+      steps: 1,
+      url: 'https://acg.rip/dl/123.zip',
+      stop: { kind: 'done' },
+    });
   });
 
   it('a give-up reports the model own reason', async () => {
@@ -471,8 +515,11 @@ describe('searchSite — per-round reporting', () => {
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS, escalate: false });
 
     const event = roundEvent(ctx)!;
-    expect(event.message).toBe('[acg.rip] round 1/1 (curl): gave up: nothing is listed for this season yet');
-    expect(event.data).toMatchObject({ outcome: 'gave-up', reason: 'nothing is listed for this season yet', steps: 1 });
+    expect(event.message).toBe('[acg.rip] round 1/1 (curl): gave up (could not tell): nothing is listed for this season yet');
+    expect(event.data).toMatchObject({
+      steps: 1,
+      stop: { kind: 'gave-up', because: 'unsure', reason: 'nothing is listed for this season yet' },
+    });
   });
 
   it('a spent step budget reports the steps it took', async () => {
@@ -485,7 +532,8 @@ describe('searchSite — per-round reporting', () => {
 
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML, OK_HTML]), seedsDir: NO_SEEDS, escalate: false });
 
-    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): step budget exhausted after 2 steps');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): step budget exhausted');
+    expect(roundEvent(ctx)!.data).toMatchObject({ steps: 2, stop: { kind: 'exhausted' } });
   });
 
   it('refused destinations report how many ended the run', async () => {
@@ -496,7 +544,7 @@ describe('searchSite — per-round reporting', () => {
 
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
 
-    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): refused 3 times');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): 3 steps targeted a refused address');
   });
 
   it('a hard failure reports the error', async () => {
@@ -505,18 +553,8 @@ describe('searchSite — per-round reporting', () => {
 
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML]), seedsDir: NO_SEEDS });
 
-    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): error: bad llm output');
-  });
-
-  it('a site in cooldown reports no round at all', async () => {
-    const { ctx, job } = setup();
-    const profiles = new SiteProfiles(ctx.db);
-    profiles.upsert({ baseUrl: 'https://acg.rip' });
-    profiles.update('https://acg.rip', { lastFailureAt: Date.now(), failCount: 2 });
-
-    await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
-
-    expect(roundEvent(ctx)).toBeUndefined();
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): bad llm output');
+    expect(roundEvent(ctx)!.data).toMatchObject({ stop: { kind: 'error', permanent: false } });
   });
 
   // A wall on the only rung an escalate:false run is allowed says nothing about the site
@@ -533,7 +571,7 @@ describe('searchSite — per-round reporting', () => {
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS, escalate: false });
 
     expect(tiers.made).toEqual(['chromium']);
-    expect(out.outcome).toBe('blocked');
+    expect(out.stop).toEqual({ kind: 'blocked', tier: 'chromium' });
     expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at chromium');
     expect(hasEvent(ctx.events.list(), 'subtitle.site-exhausted')).toBe(false);
     const profile = profiles.get('https://acg.rip')!;
@@ -553,8 +591,9 @@ describe('searchSite — per-round reporting', () => {
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
 
     expect(tiers.made).toEqual(['curl', 'chromium']);
-    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at every tier');
-    expect(out.outcome).toBe('blocked');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): blocked at chromium');
+    expect(out.stop).toEqual({ kind: 'blocked', tier: 'chromium' });
+    expect(findEvent(ctx.events.list(), 'subtitle.site-exhausted')!.message).toContain('blocked at every tier');
     expect(new SiteProfiles(ctx.db).get('https://acg.rip')!.fail_count).toBe(1);
   });
 
@@ -572,7 +611,7 @@ describe('searchSite — per-round reporting', () => {
 
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });
 
-    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): error: no browser installed');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (chromium): no browser installed');
   });
 
   it('malformed replies fail the site the way refusals do', async () => {
@@ -581,8 +620,8 @@ describe('searchSite — per-round reporting', () => {
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers(), seedsDir: NO_SEEDS });
 
-    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): malformed replies 3 times');
-    expect(out.outcome).toBe('error');
+    expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): 3 replies were not valid JSON');
+    expect(out.stop).toEqual({ kind: 'malformed', failures: 3 });
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')!.message).toContain('3 replies were not valid JSON');
     // One rung only: another rung would put the same prompt to the same model.
     expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);

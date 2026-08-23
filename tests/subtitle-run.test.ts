@@ -101,11 +101,16 @@ function claimSubtitleJob(fx: SubtitleFixture, opts?: { source?: string }) {
 }
 
 /** A `runSubtitleJob` `deps` stub: `searchSite` returns a downloaded zip pack built from
- * `files`, as a completed (`'downloaded'`) `SiteRunResult` with an empty transcript. */
+ * `files`, as a completed `SiteRunResult` with an empty transcript. */
 function siteStub(files: Record<string, string>) {
   const zipPath = makeZip(files);
   return {
-    searchSite: async () => ({ download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], steps: 1, outcome: 'downloaded' as const }),
+    searchSite: async () => ({
+      stop: { kind: 'done' as const },
+      steps: 1,
+      download: { filePath: zipPath, url: 'https://example.test/pack.zip' },
+      transcript: [], searchObserved: false,
+    }),
   };
 }
 
@@ -128,7 +133,7 @@ function roundStub(packs: Record<string, string>[], urlOf: (round: number) => st
       calls.push(query as SearchHints);
       const download = zips[round];
       if (!download) throw new Error(`unexpected search round ${round + 1}`);
-      return { download, transcript: [], steps: 1, outcome: 'downloaded' as const };
+      return { stop: { kind: 'done' as const }, steps: 1, download, transcript: [], searchObserved: false };
     },
   };
   return { calls, deps };
@@ -164,7 +169,7 @@ const NO_SITES = { searchSite: async () => { throw new Error('searchSite must no
 function reflectSpy(calls: Array<{ verifiedSuccess: boolean }>) {
   return async (input: { verifiedSuccess: boolean }) => {
     calls.push({ verifiedSuccess: input.verifiedSuccess });
-    return { verdict: 'usable' as const, reason: 'ok' };
+    return { stop: { kind: 'done' as const }, verdict: 'usable' as const, reason: 'ok' };
   };
 }
 
@@ -327,7 +332,7 @@ describe('runSubtitleJob', () => {
     return {
       searchSite: async () => {
         n += 1;
-        return { download: { filePath: makeZip({ 'Bonus.ass': SRT }, `acg.rip-${Date.now()}-${n}-pack.zip`), url }, transcript: [], steps: 1, outcome: 'downloaded' as const };
+        return { download: { filePath: makeZip({ 'Bonus.ass': SRT }, `acg.rip-${Date.now()}-${n}-pack.zip`), url }, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'done' as const } };
       },
     };
   }
@@ -562,7 +567,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async () => {
         writeFileSync(targetPath, 'foreign-content');
-        return { download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], steps: 1, outcome: 'downloaded' as const };
+        return { download: { filePath: zipPath, url: 'https://example.test/pack.zip' }, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'done' as const } };
       },
     });
 
@@ -724,7 +729,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, _site, query) => {
         hints = query as SearchHints;
-        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
+        return { download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } };
       },
     });
 
@@ -780,7 +785,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, _site, query) => {
         hints = query as SearchHints;
-        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
+        return { download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } };
       },
     });
 
@@ -865,7 +870,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, _site, query) => {
         hints = query as SearchHints;
-        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
+        return { download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } };
       },
     });
 
@@ -942,11 +947,11 @@ describe('runSubtitleJob', () => {
         if (round === 1) {
           // What searchSite records on a download.
           profiles.update(site.baseUrl, { lastWorkingTier: 'curl', lastSuccessAt: Date.now(), failCount: 0, lastFailureAt: null });
-          return { download: { filePath: zipPath, url: 'https://example.test/round-1.zip' }, transcript: [], steps: 1, outcome: 'downloaded' as const };
+          return { download: { filePath: zipPath, url: 'https://example.test/round-1.zip' }, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'done' as const } };
         }
         // What searchSite records when every rung comes up empty.
         profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profiles.get(site.baseUrl)!.fail_count + 1 });
-        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
+        return { download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } };
       },
     };
 
@@ -1094,19 +1099,41 @@ describe('runSubtitleJob', () => {
     expect(calls).toEqual([{ verifiedSuccess: false }]);
   });
 
-  it('skips reflection entirely when the site was on cooldown', async () => {
-    let called = false;
+  // The filter lives in the pass, not in `searchSite`: a site in cooldown or disabled never
+  // gets an attempt at all, so there is no run to reflect on and nothing to say about it
+  // beyond the one line that says it was skipped.
+  it.each([
+    ['in failure cooldown', { failCount: 2, lastFailureAt: Date.now() }, 'cooldown'],
+    ['disabled', { disabledAt: Date.now(), disabledReason: 'bot wall' }, 'disabled'],
+  ])('never searches a site that is %s', async (_name, update, why) => {
     const fx = subtitleFixture();
+    const profiles = new SiteProfiles(fx.ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', update);
     const job = claimSubtitleJob(fx);
+
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: null, transcript: [], steps: 1, outcome: 'cooldown' as const }),
+      ...NO_SITES,
       reflectOnRun: async () => {
-        called = true;
-        return null;
+        throw new Error('reflectOnRun must not be called');
       },
     });
 
-    expect(called).toBe(false);
+    const skip = findEvent(fx.ctx.events.list(), 'agent.stop')!;
+    expect(skip.data).toMatchObject({ site: 'acg.rip', stop: { kind: 'skipped', why } });
+  });
+
+  it('searches a site whose failures were reset even though its last failure is recent', async () => {
+    const fx = subtitleFixture();
+    const profiles = new SiteProfiles(fx.ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, siteStub(PACK));
+
+    expect(hasEvent(fx.ctx.events.list(), 'agent.stop')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
   });
 
   it('a reflection failure for one site does not stop the job or swallow later sites/attention items', async () => {
@@ -1130,7 +1157,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async (_ctx, _job, site) => {
         searched.push(site.baseUrl);
-        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
+        return { download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } };
       },
     });
 
@@ -1175,7 +1202,7 @@ describe('runSubtitleJob', () => {
     const job = claimSubtitleJob(fx);
 
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: { filePath: bogus, url: 'https://example.test/pack.rar' }, transcript: [], steps: 1, outcome: 'downloaded' as const }),
+      searchSite: async () => ({ download: { filePath: bogus, url: 'https://example.test/pack.rar' }, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'done' as const } }),
     });
 
     const empty = findEvent(fx.ctx.events.list({ level: 'warn' }), 'subtitle.pack-empty');
@@ -1197,9 +1224,9 @@ describe('runSubtitleJob', () => {
       runSubtitleJob(fx.ctx, job, {
         searchSite: async () => ({
           download: { filePath: zipPath, url: 'https://example.test/corrupt.zip' },
-          transcript: [],
+          transcript: [], searchObserved: false,
           steps: 1,
-          outcome: 'downloaded' as const,
+          stop: { kind: 'done' as const },
         }),
         reflectOnRun: reflectSpy(calls),
       }),
@@ -1213,8 +1240,8 @@ describe('runSubtitleJob', () => {
     const job = claimSubtitleJob(fx);
     const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
     const deps = {
-      searchSite: async () => ({ download: null, transcript, steps: 1, outcome: 'exhausted' as const }),
-      reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
+      searchSite: async () => ({ download: null, transcript, searchObserved: false, steps: 1, stop: { kind: 'exhausted' as const } }),
+      reflectOnRun: async () => ({ stop: { kind: 'done' as const }, verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
     };
     await runSubtitleJob(fx.ctx, job, deps);
     await runSubtitleJob(fx.ctx, job, deps);
@@ -1235,8 +1262,8 @@ describe('runSubtitleJob', () => {
     const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
     const longReason = `Cloudflare wall survives every tier. ${'x'.repeat(400)}`;
     const deps = {
-      searchSite: async () => ({ download: null, transcript, steps: 1, outcome: 'exhausted' as const }),
-      reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: longReason }),
+      searchSite: async () => ({ download: null, transcript, searchObserved: false, steps: 1, stop: { kind: 'exhausted' as const } }),
+      reflectOnRun: async () => ({ stop: { kind: 'done' as const }, verdict: 'unusable' as const, reason: longReason }),
     };
     await runSubtitleJob(fx.ctx, job, deps);
     await runSubtitleJob(fx.ctx, job, deps);
@@ -1266,8 +1293,8 @@ describe('runSubtitleJob', () => {
     });
     const transcript = [{ ts: 1, tier: 'chromium' as const, action: 'open', detail: 'HTTP 403 bot wall' }];
     const deps = {
-      searchSite: async () => ({ download: null, transcript, steps: 1, outcome: 'exhausted' as const }),
-      reflectOnRun: async () => ({ verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
+      searchSite: async () => ({ download: null, transcript, searchObserved: false, steps: 1, stop: { kind: 'exhausted' as const } }),
+      reflectOnRun: async () => ({ stop: { kind: 'done' as const }, verdict: 'unusable' as const, reason: 'Cloudflare wall survives every tier' }),
     };
 
     await runSubtitleJob(fx.ctx, jobA, deps);
@@ -1286,7 +1313,7 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, {
       searchSite: async () => {
         ran = true;
-        return { download: null, transcript: [], steps: 1, outcome: 'gave-up' as const };
+        return { download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } };
       },
     });
     expect(ran).toBe(false);
@@ -1444,11 +1471,15 @@ describe('runSubtitleJob — fresh gaps', () => {
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
   });
 
-  it('says nothing about scoping the pass down when no site is attempted at all', async () => {
+  it.each([
+    ['disabled', { disabledAt: Date.now(), disabledReason: 'bot wall' }],
+    ['in failure cooldown', { failCount: 2, lastFailureAt: Date.now() }],
+  ])('says nothing about scoping the pass down when the only site is %s', async (_name, update) => {
     const fx = subtitleFixture();
     airedDaysAgo(fx, 1);
-    new SiteProfiles(fx.ctx.db).upsert({ baseUrl: 'https://acg.rip' });
-    new SiteProfiles(fx.ctx.db).update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'bot wall' });
+    const profiles = new SiteProfiles(fx.ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', update);
 
     const job = claimSubtitleJob(fx);
     await runSubtitleJob(fx.ctx, job, NO_SITES);
@@ -1465,7 +1496,7 @@ describe('runSubtitleJob — fresh gaps', () => {
     const job = claimSubtitleJob(fx);
 
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: null, transcript: [], steps: 2, outcome: 'gave-up' as const }),
+      searchSite: async () => ({ download: null, transcript: [], searchObserved: false, steps: 2, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } }),
       reflectOnRun: reflectSpy(calls),
     });
 
@@ -1479,7 +1510,7 @@ describe('runSubtitleJob — fresh gaps', () => {
     const job = claimSubtitleJob(fx);
 
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: null, transcript: [], steps: 3, outcome: 'gave-up' as const }),
+      searchSite: async () => ({ download: null, transcript: [], searchObserved: false, steps: 3, stop: { kind: 'gave-up' as const, because: 'not-found' as const, reason: 'nothing listed' } }),
       reflectOnRun: reflectSpy(calls),
     });
 
@@ -1494,7 +1525,7 @@ describe('runSubtitleJob — fresh gaps', () => {
     const job = claimSubtitleJob(fx);
 
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: null, transcript: [], steps: 1, outcome: 'error' as const }),
+      searchSite: async () => ({ download: null, transcript: [], searchObserved: false, steps: 1, stop: { kind: 'error' as const, message: 'boom', permanent: false } }),
       reflectOnRun: reflectSpy(calls),
     });
 
