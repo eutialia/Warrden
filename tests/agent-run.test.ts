@@ -297,7 +297,14 @@ describe('searchSite', () => {
     const giveUp = act({ action: 'give_up', url: '', note: 'stop', reason: 'r', because });
     ctx.llm = new FakeGenerator([...searches, giveUp, giveUp]);
     const tiers = stubTiers(
-      Array.from({ length: listings }, (_v, i) => ({ ok: true, status: 200, body: `<html>page ${i}</html>`, blocked: false })),
+      // Distinct by their words: a fingerprint collapses digits, so two pages that differ
+      // only by a number are the same look at the same nothing.
+      Array.from({ length: listings }, (_v, i) => ({
+        ok: true,
+        status: 200,
+        body: `<html>results for query ${'x'.repeat(i + 1)}</html>`,
+        blocked: false,
+      })),
     );
 
     const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers, seedsDir: NO_SEEDS });

@@ -190,6 +190,28 @@ function observation(body: string): string {
   return `${fields === '' ? '' : `${fields} `}${text}`.slice(0, OBSERVATION_CAP);
 }
 
+/** Longest a token can be and still count toward a listing's identity. Session ids, cache
+ * keys and nonces are longer than any word a result row is made of. */
+const FINGERPRINT_TOKEN_CAP = 24;
+
+/**
+ * What makes one search result page distinct from another, for the evidence count behind a
+ * `not-found` give-up. Not the bytes: an empty result shell that carries "generated in
+ * 0.031s" and a request id is a different page every time it is fetched, and hashing it
+ * raw let two looks at the same nothing pass for two looks. Digits collapse and long
+ * tokens drop, so what is left is the words the page actually listed.
+ */
+function listingFingerprint(body: string): string {
+  const normalized = pageText(body)
+    .split(' ')
+    // Length is judged before digits collapse, or a 32-hex request id shrinks under the cap
+    // and survives as the one token that makes every fetch look like a new page.
+    .filter((token) => token.length <= FINGERPRINT_TOKEN_CAP)
+    .join(' ')
+    .replace(/\d+/g, '#');
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
 /** One history step: what the model did, why it said it was doing it, how the fetch ended,
  * and the page it got back (already OBSERVATION_CAP-capped). */
 interface HistoryStep {
@@ -493,7 +515,7 @@ export async function runAgentLoop(input: {
     if (res.blocked) throw new TierBlockedError(`${action.action} blocked at ${action.url}`);
     if (res.ok && action.action === 'search') {
       lastSearchUrl = action.url;
-      listings.add(createHash('sha256').update(pageText(res.body ?? '')).digest('hex'));
+      listings.add(listingFingerprint(res.body ?? ''));
     }
     const verb = action.action === 'request' ? `request ${action.method}` : post ? 'search POST' : action.action;
     history.push({
