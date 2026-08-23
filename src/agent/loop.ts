@@ -126,16 +126,22 @@ function httpFailure(res: FetchResult): string {
 function pageText(body: string): string {
   return body
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<a\b[^>]*\bhref\s*=\s*["']?([^"'\s>]+)[^>]*>/gi, ' [$1] ')
+    .replace(/<a\b[^>]*>/gi, (tag) => {
+      const href = attr(tag, 'href');
+      return href === undefined || href === '' ? ' ' : ` [${href}] `;
+    })
     .replace(/<form\b[^>]*>/gi, (tag) => ` [form ${attr(tag, 'action') ?? ''} ${(attr(tag, 'method') ?? 'get').toLowerCase()}] `)
     .replace(/<[^>]*>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-/** One attribute's value out of a single tag, quoted or not. */
+/** One attribute's value out of a single tag, quoted or not. The name has to START an
+ * attribute, not merely end one: `-` is not a word character, so a `\b` boundary let
+ * `data-name=` answer for `name` and `data-action=` for `action`, and which one won was
+ * decided by whichever the page wrote first. */
 function attr(tag: string, name: string): string | undefined {
-  return new RegExp(`\\b${name}\\s*=\\s*["']?([^"'\\s>]*)`, 'i').exec(tag)?.[1];
+  return new RegExp(`(?:^|[\\s<])${name}\\s*=\\s*["']?([^"'\\s>]*)`, 'i').exec(tag)?.[1];
 }
 
 /** Longest a single hidden field's value rides into the prompt. Session tokens are short;
@@ -153,7 +159,7 @@ const MAX_HIDDEN_FIELDS = 20;
 function hiddenFields(body: string): string {
   const fields = new Map<string, string>();
   for (const tag of body.match(/<input\b[^>]*>/gi) ?? []) {
-    if (!/\btype\s*=\s*["']?hidden/i.test(tag)) continue;
+    if (attr(tag, 'type')?.toLowerCase() !== 'hidden') continue;
     const name = attr(tag, 'name');
     if (name === undefined || name === '' || fields.has(name)) continue;
     fields.set(name, (attr(tag, 'value') ?? '').slice(0, HIDDEN_VALUE_CAP));

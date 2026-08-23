@@ -675,6 +675,7 @@ describe('runAgentLoop', () => {
       '<form data-action="/analytics/track" data-method="beacon" action="/search.php" method="post">',
       '<input data-name="tracking" type="hidden" name="formhash" value="a1b2c3">',
       '</form>',
+      '<a data-href="/analytics/click" href="/t/8891">Frieren S01 batch</a>',
     ].join('');
     const llm = new FakeGenerator([
       act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
@@ -685,7 +686,9 @@ describe('runAgentLoop', () => {
     const prompt = llm.calls[1]!.prompt;
     expect(prompt).toContain('[form /search.php post]');
     expect(prompt).toContain('[form: formhash=a1b2c3]');
+    expect(prompt).toContain('[/t/8891] Frieren S01 batch');
     expect(prompt).not.toContain('/analytics/track');
+    expect(prompt).not.toContain('/analytics/click');
     expect(prompt).not.toContain('tracking=');
   });
 
