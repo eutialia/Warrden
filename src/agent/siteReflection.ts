@@ -83,11 +83,28 @@ const LINE_BREAK_RE = /[\r\n\v\f\u0085\u2028\u2029]/;
  * may not write, or simply more bullets than the one operation being applied. The parser
  * was made strict at exactly these boundaries; the writer must not be able to forge them
  * from the other side. */
-const FORGERY_CHECKS: readonly { test: RegExp; why: string }[] = [
-  { test: LINE_BREAK_RE, why: 'line break in bullet text — a bullet is one line' },
+const FORGERY_CHECKS: readonly { test: RegExp; why: string; hostile?: true }[] = [
+  // A line break is the one that cannot be a mistake: nothing about writing one rule on one
+  // line produces a second line, and what follows it is a forged heading or a second bullet.
+  { test: LINE_BREAK_RE, why: 'line break in bullet text — a bullet is one line', hostile: true },
+  // These two are ordinary markdown habits. A model that writes `## Access` or a nested `- `
+  // at the start of a rule is far more likely to be formatting than attacking, and calling
+  // that an attack put typos on the channel reserved for recorded attempts to poison the
+  // file. One leading marker is stripped before we get here; what is left is a real refusal,
+  // and a plain one.
   { test: /^#{1,6}\s/, why: 'bullet text starts a markdown heading' },
-  { test: /^-\s/, why: 'bullet text starts a markdown bullet marker' },
+  { test: /^[-*+]\s/, why: 'bullet text starts a markdown bullet marker' },
 ];
+
+/** One leading list marker, as a model writing markdown will produce. `renderKnowledge`
+ * adds the `- ` itself, so a marker the model wrote is duplication, not structure — stripping
+ * it is what makes a bullet copied straight out of the rendered file a usable `target`. */
+const LEADING_MARKER_RE = /^[-*+]\s+/;
+
+/** Bullet text as the file means it: without the list marker the renderer supplies. */
+function withoutMarker(text: string): string {
+  return text.replace(LEADING_MARKER_RE, '');
+}
 
 /**
  * Flat root object, every field REQUIRED — the same strict-mode constraint documented on
@@ -270,14 +287,15 @@ export function applyOps(
     // validation below runs against THESE bytes, not the raw `op.text`, so a fake
     // `(confirmed ...)` stamp buried in the op can't pad past a scanner gap or hide a
     // forged heading/marker behind text that `withoutStamp` deletes before storage (C-01).
-    if (withoutStamp(op.text) === '') {
+    const text = withoutMarker(op.text);
+    if (withoutStamp(text) === '') {
       drop(op, `${op.op} with no bullet text`);
       continue;
     }
-    const candidate = stamped(op.text, opts.today);
+    const candidate = stamped(text, opts.today);
     const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate));
     if (forgery) {
-      drop(op, forgery.why, true);
+      drop(op, forgery.why, forgery.hostile);
       continue;
     }
     if (scanForThreats(candidate, 'strict').length > 0) {
@@ -291,8 +309,7 @@ export function applyOps(
       knowledge.sections[section].some((bullet, index) => index !== exclude && withoutStamp(bullet) === text);
 
     if (op.op === 'add') {
-      const text = withoutStamp(op.text);
-      if (duplicates(text)) {
+      if (duplicates(withoutStamp(text))) {
         drop(op, `${section} already has this bullet`);
         continue;
       }
@@ -300,7 +317,7 @@ export function applyOps(
       continue;
     }
 
-    const wanted = withoutStamp(op.target);
+    const wanted = withoutStamp(withoutMarker(op.target));
     if (wanted === '') {
       drop(op, `${op.op} with no target bullet`);
       continue;
@@ -323,7 +340,7 @@ export function applyOps(
     // rewrites one bullet into the text of another leaves two identical bullets, and from
     // then on every `update` naming that text is ambiguous, so neither copy can be edited
     // again except by the operator.
-    if (duplicates(withoutStamp(op.text), index)) {
+    if (duplicates(withoutStamp(text), index)) {
       drop(op, `${section} already has this bullet`);
       continue;
     }
@@ -372,7 +389,7 @@ function buildSystemPrompt(input: {
     '- Pitfalls: what goes wrong and what to do about it.',
     '- Operator notes: written by a human, authoritative, and not yours to edit. No operation may target it.',
     '',
-    'Bullets are conditional rules: "IF <observable condition> THEN <action>." A conditional can be proved wrong on the next run; "the search is flaky" cannot. One rule per bullet, on a single line: text containing a line break, a heading or a bullet marker is refused. Do not write the date yourself — every bullet you add or update is stamped `(confirmed ' +
+    'Bullets are conditional rules: "IF <observable condition> THEN <action>." A conditional can be proved wrong on the next run; "the search is flaky" cannot. The file above renders each bullet with a leading `- `, which is not part of the rule: write `text` and `target` without it (one leading marker is stripped for you if you include it anyway). One rule per bullet, on a single line: `text` or `target` carrying a line break, a heading, or a further bullet marker is refused. Do not write the date yourself — every bullet you add or update is stamped `(confirmed ' +
       today +
       ')` for you.',
     '',
