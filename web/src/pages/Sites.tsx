@@ -621,10 +621,10 @@ export default function Sites() {
             <Skeleton className="h-96 w-full" />
           ) : (
             !knowledgeError && (
-              <div className="space-y-1">
+              <div className="flex min-h-0 flex-col gap-1">
                 <Textarea
                   rows={24}
-                  className="font-mono text-xs"
+                  className="min-h-0 field-sizing-fixed font-mono text-xs"
                   value={knowledgeMarkdown}
                   onChange={(e) => setKnowledgeMarkdown(e.target.value)}
                 />
