@@ -65,7 +65,7 @@ const DEFAULT_WEB_DIST_DIR = join(dirname(fileURLToPath(import.meta.url)), '..',
  * run of any length fills that cap with `subtitle.transcript` steps before the first round
  * ever ends — so these are fetched again, unbounded, and merged back in by id.
  */
-const NARRATION_KINDS = ['subtitle.search-scoped', 'subtitle.search-round'];
+const NARRATION_KINDS = ['subtitle.search-scoped', 'agent.stop'];
 
 function jobEvents(events: EventLog | undefined, jobId: number): EventRow[] {
   if (events === undefined) return [];

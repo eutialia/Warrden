@@ -1,6 +1,6 @@
+import { describeStop, stopFromError } from '../agent/stop.js';
 import type { AppContext } from '../context.js';
 import { targetEventData } from '../events/target.js';
-import { errorMessage } from '../util/errors.js';
 import { subtitleDebounceMs } from './debounce.js';
 import { isPermanentError, RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
@@ -68,7 +68,7 @@ export function startRunner(
           });
           return;
         }
-        failJob(ctx, job, errorMessage(err), isPermanentError(err));
+        failJob(ctx, job, describeStop(stopFromError(err)), isPermanentError(err));
       }
     } finally {
       ticking = false;

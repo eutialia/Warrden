@@ -505,7 +505,7 @@ describe('reflectOnRun', () => {
     saveKnowledge(ctx.dataDir, k);
     const before = readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8');
     const out = await reflect(ctx);
-    expect(out).toEqual({ verdict: 'transient-failure', reason: 'timeout' });
+    expect(out).toEqual({ stop: { kind: 'done' }, verdict: 'transient-failure', reason: 'timeout' });
     expect(readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8')).toBe(before);
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-updated')).toBe(false);
   });
@@ -592,17 +592,18 @@ describe('reflectOnRun', () => {
     expect(saved.sections.Pitfalls).toEqual([`IF 503 THEN retry. (confirmed ${TODAY})`]);
   });
 
-  it('leaves the file untouched and returns null when no model is configured', async () => {
+  it('leaves the file untouched and reports a skip when no model is configured', async () => {
     // The real generator on a config with no `llm.model`: the production off switch.
     // Nothing reaches it, `reflectOnRun` resolves the model itself first.
     const ctx = makeCtx({ llm: new AiSdkGenerator(() => baseConfig()) });
     saveKnowledge(ctx.dataDir, base());
     const before = readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8');
     const out = await reflect(ctx);
-    expect(out).toBeNull();
+    expect(out).toEqual({ stop: { kind: 'skipped', why: 'no-model' } });
     expect(readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8')).toBe(before);
     const skipped = findEvent(ctx.events.list({}), 'subtitle.knowledge-skipped');
     expect(skipped?.level).toBe('info');
+    expect(skipped?.message).toBe('No knowledge update for x.test: no LLM model configured');
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-failed')).toBe(false);
   });
 
@@ -615,9 +616,11 @@ describe('reflectOnRun', () => {
     saveKnowledge(ctx.dataDir, base());
     const before = readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8');
     const out = await reflect(ctx);
-    expect(out).toBeNull();
+    expect(out).toEqual({ stop: { kind: 'error', message: 'provider returned 500', permanent: false } });
     expect(readFileSync(knowledgePath(ctx.dataDir, SITE), 'utf8')).toBe(before);
-    expect(findEvent(ctx.events.list({}), 'subtitle.knowledge-failed')?.level).toBe('warn');
+    const failed = findEvent(ctx.events.list({}), 'subtitle.knowledge-failed');
+    expect(failed?.level).toBe('warn');
+    expect(failed?.message).toBe('Knowledge update for x.test failed: provider returned 500');
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-skipped')).toBe(false);
   });
 
@@ -628,7 +631,7 @@ describe('reflectOnRun', () => {
     const ctx = reflectCtx({ llm: new FakeGenerator([reflection()]) });
     mkdirSync(knowledgePath(ctx.dataDir, SITE), { recursive: true });
     const out = await reflect(ctx);
-    expect(out).toBeNull();
+    expect(out.stop.kind).toBe('error');
     expect(findEvent(ctx.events.list({}), 'subtitle.knowledge-failed')?.level).toBe('warn');
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-skipped')).toBe(false);
   });

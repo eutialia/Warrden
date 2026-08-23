@@ -9,7 +9,8 @@ import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/querie
 import { errorMessage } from '../util/errors.js';
 import { AGENT_SECTIONS, defaultSeedsDir, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
 import { scanForThreats } from './threatPatterns.js';
-import { runAgentLoop, TierBlockedError } from './loop.js';
+import { runAgentLoop, SEARCH_CALLSITE, TierBlockedError } from './loop.js';
+import { describeStop, stopFromError, stopIsSiteFault, type StopReason } from './stop.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
@@ -55,17 +56,45 @@ export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): Tier
   return { make: (t) => makeTier(t, { cookieJar, fetchImpl: opts.fetchImpl }) };
 }
 
-/** What one `searchSite` call produced, whether or not it ended in a download. `outcome`
- * lets a caller decide whether the run is worth reflecting on: `'cooldown'` means nothing
- * ran at all (the site was skipped before any tier was tried), so it is the one value a
- * caller should treat as "skip reflection" rather than "reflect on a failure". */
+/** What one `searchSite` call produced, whether or not it ended in a download. */
 export interface SiteRunResult {
+  /** Why the last attempt stopped — the one vocabulary every caller reports and decides on. */
+  stop: StopReason;
+  /** LLM steps the last attempt actually took — 0 when nothing ran (a wall on every rung).
+   * What separates "searched once, nothing there" from a spent budget. */
+  steps: number;
   download: { filePath: string; url: string } | null;
   transcript: TranscriptEntry[];
-  /** LLM steps the last attempt actually took — 0 when nothing ran (cooldown, a wall on
-   * every rung). What separates "searched once, nothing there" from a spent budget. */
-  steps: number;
-  outcome: 'downloaded' | 'gave-up' | 'exhausted' | 'blocked' | 'cooldown' | 'error';
+}
+
+/**
+ * One `agent.stop` event: the single line that says why a piece of LLM-driven work ended.
+ * Every part of the location is optional because the callers differ — a ladder rung has a
+ * round and a tier, a site skipped before anything ran has neither — but the ending itself is
+ * always `describeStop`, never a sentence written at the call site.
+ */
+export function reportAgentStop(
+  ctx: AppContext,
+  job: JobRow,
+  stop: StopReason,
+  where: { callsite: string; site?: string; round?: number; maxRounds?: number; tier?: AccessTier; steps: number } & Record<
+    string,
+    unknown
+  >,
+): void {
+  const head = [
+    where.site !== undefined ? `[${where.site}]` : '',
+    where.round !== undefined ? `round ${where.round}/${where.maxRounds ?? where.round}` : '',
+    where.tier !== undefined ? `(${where.tier})` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  ctx.events.append({
+    kind: 'agent.stop',
+    jobId: job.id,
+    message: head === '' ? describeStop(stop) : `${head}: ${describeStop(stop)}`,
+    data: targetEventData(job, { ...where, stop }),
+  });
 }
 
 export interface SearchSiteOptions {
@@ -182,13 +211,9 @@ export async function searchSite(
     profile.last_failure_at !== null &&
     Date.now() - profile.last_failure_at < cooldownMs
   ) {
-    ctx.events.append({
-      kind: 'subtitle.site-cooldown',
-      jobId: job.id,
-      message: `Skipping ${siteLabel(site.baseUrl)} — in failure cooldown (${Math.round(cooldownMs / 60_000)}m backoff)`,
-      data: targetEventData(job, { site: siteLabel(site.baseUrl) }),
-    });
-    return { download: null, transcript: [], steps: 0, outcome: 'cooldown' };
+    const stop: StopReason = { kind: 'skipped', why: 'cooldown' };
+    reportAgentStop(ctx, job, stop, { callsite: SEARCH_CALLSITE, site: siteLabel(site.baseUrl), steps: 0, backoffMs: cooldownMs });
+    return { stop, steps: 0, download: null, transcript: [] };
   }
 
   const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, opts.seedsDir ?? defaultSeedsDir());
@@ -241,56 +266,56 @@ export async function searchSite(
     });
   };
 
-  /**
-   * One line per round, so an operator reading the run can see what ended each one without
-   * opening the transcript: which tier it ran on, how many steps it spent, and whether it
-   * downloaded, gave up (in the agent's own words), ran out of budget, or broke. Emitted
-   * once per `searchSite` call — a call that climbs two rungs is still one round, reported
-   * against the rung it finished on.
-   */
-  const reportRound = (tier: AccessTier, outcome: string, detail: string, extra: Record<string, unknown>): void => {
-    ctx.events.append({
-      kind: 'subtitle.search-round',
-      jobId: job.id,
-      message: `[${siteLabel(site.baseUrl)}] round ${round}/${maxRounds} (${tier}): ${detail}`,
-      data: targetEventData(job, { site: siteLabel(site.baseUrl), round, tier, outcome, ...extra }),
-    });
-  };
+  /** The rung the ladder is on — what the stop event reports against. Set before `make()`
+   * so a factory throw names the rung it threw for, not the one that worked. */
+  let lastTier: AccessTier = TIER_ORDER[startIdx]!;
 
-  /** Persist a site-level failure (genuine error or every rung empty) and emit the event. */
-  const failSite = (
-    kind: 'subtitle.site-failed' | 'subtitle.site-exhausted',
-    message: string,
-    outcome: 'error' | 'exhausted' | 'gave-up' | 'blocked',
+  /**
+   * Ends a run that brought back no file: one `agent.stop` line saying which tier it
+   * finished on, how many steps it spent and why it ended, the `subtitle_runs` row closed,
+   * and the failure booked against the site's profile — but only when the stop is the
+   * site's own fault. `failure` is the separate question of whether an operator is told at
+   * all: a wall on a run that was never allowed to climb says nothing about the site, so it
+   * gets neither the event nor the backoff.
+   */
+  const endRun = (
+    stop: StopReason,
+    steps: number,
+    failure?: { kind: 'subtitle.site-failed' | 'subtitle.site-exhausted'; message: string },
   ): SiteRunResult => {
+    reportAgentStop(ctx, job, stop, {
+      callsite: SEARCH_CALLSITE,
+      site: siteLabel(site.baseUrl),
+      round,
+      maxRounds,
+      tier: lastTier,
+      steps,
+    });
     runs.finish(runId, 'failed');
     siteStep.end('error');
-    profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
-    ctx.events.append({
-      kind,
-      level: 'warn',
-      jobId: job.id,
-      message,
-      data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
-    });
-    return { download: null, transcript, steps: stepsSpent, outcome };
+    if (failure !== undefined) {
+      if (stopIsSiteFault(stop)) {
+        profiles.update(site.baseUrl, { lastFailureAt: Date.now(), failCount: profile.fail_count + 1 });
+      }
+      ctx.events.append({
+        kind: failure.kind,
+        level: 'warn',
+        jobId: job.id,
+        message: failure.message,
+        data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
+      });
+    }
+    return { stop, steps, download: null, transcript };
   };
 
   try {
-    // What the last rung's loop reported when it fell through (rather than erroring or
-    // refusing) — carried into the final "every rung came up empty" outcome so a caller can
-    // tell a deliberate give-up from a ladder that genuinely ran dry.
-    let lastAttemptOutcome: 'exhausted' | 'gave-up' = 'exhausted';
-    // The rung the ladder is currently on — what the round event reports against. Set before
-    // `make()` so a factory throw names the rung it threw for, not the one that worked.
-    let lastTier: AccessTier = TIER_ORDER[startIdx]!;
-    // Whether any rung got as far as returning an outcome. False after the loop means every
+    // What the last rung reported: the wall it would be if no rung ever got to run.
+    let lastStop: StopReason = { kind: 'blocked', tier: lastTier };
+    // Whether any rung got as far as returning a stop. False after the loop means every
     // rung hit a wall, which is a different story from a ladder that ran and found nothing.
     let attempted = false;
-    // Carried out of the loop so the round event can name the step count and the model's own
-    // give-up sentence after the ladder has ended.
-    let lastSteps = 0;
-    let lastReason: string | null = null;
+    // Steps the last attempt spent. A throw reports none: the loop never returned.
+    let steps = 0;
 
     // Without escalation the ladder is one rung tall: the site's remembered starting tier.
     const lastIdx = opts.escalate === false ? startIdx : TIER_ORDER.length - 1;
@@ -302,7 +327,7 @@ export async function searchSite(
       try {
         const tier = tiers.make(tierName);
         activeTiers.push(tier);
-        const outcome = await runAgentLoop({
+        const run = await runAgentLoop({
           llm: ctx.llm,
           tier,
           site,
@@ -317,12 +342,13 @@ export async function searchSite(
         });
 
         attempted = true;
-        lastSteps = outcome.steps;
-        stepsSpent = outcome.steps;
-        if (outcome.kind === 'downloaded') {
+        steps = run.steps;
+        lastStop = run.stop;
+
+        if (run.download !== undefined) {
           runs.finish(runId, 'done');
           siteStep.end('ok');
-          const searchUrl = outcome.searchUrl;
+          const searchUrl = run.download.searchUrl;
           const isNew =
             searchUrl !== null &&
             searchUrl !== site.searchUrlTemplate &&
@@ -337,82 +363,67 @@ export async function searchSite(
             lastFailureAt: null,
             searchUrlPatterns: learned,
           });
-          reportRound(tierName, 'downloaded', `downloaded ${outcome.url}`, { steps: outcome.steps });
-          return { download: { filePath: outcome.filePath, url: outcome.url }, transcript, steps: outcome.steps, outcome: 'downloaded' };
+          reportAgentStop(ctx, job, run.stop, {
+            callsite: SEARCH_CALLSITE,
+            site: siteLabel(site.baseUrl),
+            round,
+            maxRounds,
+            tier: tierName,
+            steps: run.steps,
+            url: run.download.url,
+          });
+          return {
+            stop: run.stop,
+            steps: run.steps,
+            download: { filePath: run.download.filePath, url: run.download.url },
+            transcript,
+          };
         }
-        if (outcome.kind === 'refused-repeatedly') {
-          // The knowledge file (or the model reading it) keeps aiming at addresses the
-          // guards refuse. Escalating would replay the same refusals on every remaining
-          // rung at full step budget, so the site stops here and takes the usual failure
-          // backoff — the next job retries it, after a human has had the chance to look.
-          reportRound(tierName, 'refused-repeatedly', `refused ${outcome.refusals} times`, { steps: outcome.steps });
-          return failSite(
-            'subtitle.site-failed',
-            `Site ${siteLabel(site.baseUrl)} failed: ${outcome.refusals} steps targeted a refused address`,
-            'error',
-          );
-        }
-        if (outcome.kind === 'malformed-repeatedly') {
-          // The model is not answering the schema on this prompt. Another rung would put
-          // the same prompt to the same model, so the site stops here — same shape as a run
-          // that kept aiming at refused addresses.
-          reportRound(tierName, 'malformed-repeatedly', `malformed replies ${outcome.failures} times`, { steps: outcome.steps });
-          return failSite(
-            'subtitle.site-failed',
-            `Site ${siteLabel(site.baseUrl)} failed: ${outcome.failures} replies were not valid JSON`,
-            'error',
-          );
+
+        // Refusals and malformed replies end the site here rather than on the next rung: one
+        // would replay the same guarded destinations at full step budget, the other would put
+        // the same prompt to the same model. Both take the usual failure backoff.
+        if (run.stop.kind === 'refused' || run.stop.kind === 'malformed') {
+          return endRun(run.stop, run.steps, {
+            kind: 'subtitle.site-failed',
+            message: `Site ${siteLabel(site.baseUrl)} failed: ${describeStop(run.stop)}`,
+          });
         }
         // exhausted/gave-up: fall through to the next rung.
-        lastAttemptOutcome = outcome.kind === 'gave-up' ? 'gave-up' : 'exhausted';
-        lastReason = outcome.kind === 'gave-up' ? outcome.reason : null;
       } catch (err) {
         if (!(err instanceof TierBlockedError)) {
-          // A genuine error (bad LLM output after retries, FS failure, factory throw, ...)
-          // is a site-level failure, not an escalation signal.
-          // Steps are not reported for a throw: the loop never returned an outcome to count.
-          reportRound(lastTier, 'error', `error: ${errorMessage(err)}`, { steps: 0, error: errorMessage(err) });
-          return failSite('subtitle.site-failed', `Site ${siteLabel(site.baseUrl)} failed: ${errorMessage(err)}`, 'error');
+          // A genuine error (a dead route, an FS failure, a factory throw, ...) is a
+          // site-level failure, not an escalation signal.
+          const stop = stopFromError(err);
+          return endRun(stop, 0, {
+            kind: 'subtitle.site-failed',
+            message: `Site ${siteLabel(site.baseUrl)} failed: ${describeStop(stop)}`,
+          });
         }
         // TierBlockedError: note the wall in the run's transcript and try the next rung.
+        lastStop = { kind: 'blocked', tier: tierName };
+        steps = 0;
         onTranscriptEvent({ ts: Date.now(), tier: tierName, action: 'escalate', detail: errorMessage(err) });
       }
     }
 
-    // Every rung hit a wall before the loop could run: nothing was searched, so there is no
-    // step count and no give-up sentence to report. Without escalation that is not the
-    // site's fault at all — the run simply was not allowed to answer the wall — so it takes
-    // no failure and no cooldown, and the next job (or the next round with escalation on)
-    // finds the site exactly as it left it.
+    // Every rung hit a wall before the loop could run: nothing was searched. Without
+    // escalation that is not the site's fault at all — the run simply was not allowed to
+    // answer the wall — so it takes no failure and no cooldown, and the next job (or the next
+    // round with escalation on) finds the site exactly as it left it.
     if (!attempted) {
-      if (opts.escalate === false) {
-        reportRound(lastTier, 'blocked', `blocked at ${lastTier}`, { steps: 0 });
-        runs.finish(runId, 'failed');
-        siteStep.end('error');
-        return { download: null, transcript, steps: 0, outcome: 'blocked' };
-      }
-      reportRound(lastTier, 'blocked', 'blocked at every tier', { steps: 0 });
-      return failSite(
-        'subtitle.site-exhausted',
-        `Site ${siteLabel(site.baseUrl)} was blocked at every tier (${lastIdx - startIdx + 1})`,
-        'blocked',
-      );
+      if (opts.escalate === false) return endRun(lastStop, 0);
+      return endRun(lastStop, 0, {
+        kind: 'subtitle.site-exhausted',
+        message: `Site ${siteLabel(site.baseUrl)} was blocked at every tier (${lastIdx - startIdx + 1})`,
+      });
     }
 
     // Every rung came up empty.
-    if (lastAttemptOutcome === 'gave-up') {
-      reportRound(lastTier, 'gave-up', `gave up: ${lastReason ?? 'no reason given'}`, {
-        steps: lastSteps,
-        reason: lastReason ?? 'no reason given',
-      });
-    } else {
-      reportRound(lastTier, 'exhausted', `step budget exhausted after ${lastSteps} steps`, { steps: lastSteps });
-    }
-    return failSite(
-      'subtitle.site-exhausted',
-      `Site ${siteLabel(site.baseUrl)} produced no download across ${lastIdx - startIdx + 1} tier(s)`,
-      lastAttemptOutcome,
-    );
+    return endRun(lastStop, steps, {
+      kind: 'subtitle.site-exhausted',
+      message: `Site ${siteLabel(site.baseUrl)} produced no download across ${lastIdx - startIdx + 1} tier(s)`,
+    });
   } finally {
     await Promise.all(activeTiers.map((t) => t.close()));
   }

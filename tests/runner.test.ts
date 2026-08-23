@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AttentionItems } from '../src/db/attention.js';
 import { RescheduleError } from '../src/jobs/errors.js';
+import { parseFailure } from './llmFixtures.js';
 import { startRunner } from '../src/jobs/runner.js';
 import { makeCtx, findEvent, hasEvent } from './helpers.js';
 
@@ -129,6 +130,24 @@ describe('startRunner', () => {
     const attentionEvents = ctx.events.list({ level: 'attention' });
     expect(attentionEvents).toHaveLength(1);
     expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: true });
+  });
+
+  // The single-shot call-sites (archive-map, sidecar-match, bundle-map, release-pick) throw
+  // rather than returning a stop, so the runner is where their ending gets its words — and
+  // they have to be the same words the agent's own rounds use.
+  it('phrases a job failure with the stop vocabulary rather than the raw SDK error', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    const handler = vi.fn().mockRejectedValue(parseFailure());
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.message).toBe(
+      `Job #${id} (acquire) failed: 1 reply was not valid JSON`,
+    );
+    expect(ctx.queue.get(id!)!.error).toBe('1 reply was not valid JSON');
   });
 
   it('keeps retrying an unmarked error, tagging the warn event as not permanent', async () => {

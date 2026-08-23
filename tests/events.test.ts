@@ -223,25 +223,25 @@ describe('EventLog.listByJobKinds', () => {
     const events = new EventLog(freshDb());
     events.append({ kind: 'subtitle.search-scoped', jobId: 1, message: 'scoped' });
     for (let i = 0; i < 200; i++) events.append({ kind: 'subtitle.transcript', jobId: 1, message: String(i) });
-    events.append({ kind: 'subtitle.search-round', jobId: 1, message: 'round 1/1' });
-    events.append({ kind: 'subtitle.search-round', jobId: 2, message: 'other job' });
+    events.append({ kind: 'agent.stop', jobId: 1, message: 'round 1/1' });
+    events.append({ kind: 'agent.stop', jobId: 2, message: 'other job' });
 
-    const rows = events.listByJobKinds(1, ['subtitle.search-scoped', 'subtitle.search-round']);
+    const rows = events.listByJobKinds(1, ['subtitle.search-scoped', 'agent.stop']);
 
     expect(rows.map((r) => r.message)).toEqual(['scoped', 'round 1/1']);
     // The cap is what hid them: the same rows are nowhere in the default window.
-    expect(events.listByJob(1).some((r) => r.kind === 'subtitle.search-round')).toBe(false);
+    expect(events.listByJob(1).some((r) => r.kind === 'agent.stop')).toBe(false);
   });
 
   it('returns an empty array when no kind is asked for', () => {
     const events = new EventLog(freshDb());
-    events.append({ kind: 'subtitle.search-round', jobId: 1, message: 'round' });
+    events.append({ kind: 'agent.stop', jobId: 1, message: 'round' });
     expect(events.listByJobKinds(1, [])).toEqual([]);
   });
 
   it('parses the data column', () => {
     const events = new EventLog(freshDb());
-    events.append({ kind: 'subtitle.search-round', jobId: 1, message: 'm', data: { round: 2 } });
-    expect(events.listByJobKinds(1, ['subtitle.search-round'])[0]!.data).toEqual({ round: 2 });
+    events.append({ kind: 'agent.stop', jobId: 1, message: 'm', data: { round: 2 } });
+    expect(events.listByJobKinds(1, ['agent.stop'])[0]!.data).toEqual({ round: 2 });
   });
 });

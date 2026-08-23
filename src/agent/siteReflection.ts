@@ -6,7 +6,6 @@ import type { TranscriptEntry } from '../db/subtitleRuns.js';
 import { targetEventData } from '../events/target.js';
 import type { JobRow } from '../jobs/queue.js';
 import { LlmError, resolveModel } from '../llm/generator.js';
-import { errorMessage } from '../util/errors.js';
 import {
   AGENT_SECTIONS,
   KNOWLEDGE_CHAR_CAP,
@@ -19,6 +18,7 @@ import {
   type KnowledgeSection,
   type SiteKnowledge,
 } from './siteKnowledge.js';
+import { describeStop, stopFromError, type StopReason } from './stop.js';
 import { scanForThreats } from './threatPatterns.js';
 
 /** The call-site reflection resolves against. Leaving it out of the active LLM profile is
@@ -28,6 +28,12 @@ export const REFLECT_CALLSITE = 'site-notes';
 
 /** What the run says about the site itself, independent of whether anything was learned. */
 export type SiteVerdict = 'usable' | 'transient-failure' | 'unusable';
+
+/** What one reflection call ended as. A verdict only exists when the model actually
+ * answered, so it and its evidence sentence arrive together or not at all. */
+export type ReflectionResult =
+  | { stop: StopReason; verdict?: undefined; reason?: undefined }
+  | { stop: StopReason; verdict: SiteVerdict; reason: string };
 
 /** Most recent transcript steps handed to the model. A run is bounded by the step budget
  * already; this bounds the prompt against a budget an operator raised. */
@@ -389,13 +395,14 @@ function buildSystemPrompt(input: {
  * YYYY-MM-DD)` stamp is the only signal of age, refreshed whenever a bullet is re-confirmed
  * or updated, and it is the operator's to act on from the dashboard.
  *
- * Returns `null`, having changed nothing, in two cases that are reported differently: the
- * `site-notes` call-site is unconfigured, which is the off switch and is quiet, or anything
- * past that point failed — the generate call, the notes file read, the save — which is a
- * warning. The off-switch check runs before any file I/O so it stays quiet even when the
- * site's notes path itself is unreadable. Every failure after it, whatever raised it, is
- * caught here: this function is the caller's whole contract for "reflection never fails a
- * job," so nothing it does may propagate.
+ * Always returns a `stop`, and a verdict only when the model actually produced one. Two
+ * endings change nothing and are reported differently: the `site-notes` call-site is
+ * unconfigured, which is the off switch and is quiet (`skipped`), or anything past that point
+ * failed — the generate call, the notes file read, the save — which is a warning. The
+ * off-switch check runs before any file I/O so it stays quiet even when the site's notes path
+ * itself is unreadable. Every failure after it, whatever raised it, is caught here: this
+ * function is the caller's whole contract for "reflection never fails a job," so nothing it
+ * does may propagate.
  */
 export async function reflectOnRun(input: {
   ctx: AppContext;
@@ -408,7 +415,7 @@ export async function reflectOnRun(input: {
   today: string;
   /** Overrides `defaultSeedsDir()`, as in `searchSite` — tests point it at a fixture. */
   seedsDir?: string;
-}): Promise<{ verdict: SiteVerdict; reason: string } | null> {
+}): Promise<ReflectionResult> {
   const { ctx, job, site, transcript, verifiedSuccess, today } = input;
   const label = siteLabel(site.baseUrl);
 
@@ -420,13 +427,14 @@ export async function reflectOnRun(input: {
     resolveModel(ctx.config);
   } catch (err) {
     if (!(err instanceof LlmError)) throw err;
+    const stop: StopReason = { kind: 'skipped', why: 'no-model' };
     ctx.events.append({
       kind: 'subtitle.knowledge-skipped',
       jobId: job.id,
-      message: `No knowledge update for ${label}: ${errorMessage(err)}`,
-      data: targetEventData(job, { site: label }),
+      message: `No knowledge update for ${label}: ${describeStop(stop)}`,
+      data: targetEventData(job, { site: label, stop }),
     });
-    return null;
+    return { stop };
   }
 
   try {
@@ -483,7 +491,7 @@ export async function reflectOnRun(input: {
     if (appliedCount === 0) {
       // Nothing changed, so nothing is written: a no-op run leaves the file — and its
       // single `.bak` — exactly as it found them.
-      return { verdict: reflection.verdict, reason: reflection.reason };
+      return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
 
     const size = agentCharCount(applied);
@@ -498,7 +506,7 @@ export async function reflectOnRun(input: {
         message: `Knowledge update for ${label} dropped — it would reach ${size} chars, over the ${KNOWLEDGE_CHAR_CAP} cap`,
         data: targetEventData(job, { site: label, size, cap: KNOWLEDGE_CHAR_CAP }),
       });
-      return { verdict: reflection.verdict, reason: reflection.reason };
+      return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
 
     try {
@@ -517,7 +525,7 @@ export async function reflectOnRun(input: {
         message: `Site knowledge for ${label} was edited elsewhere while this run's reflection was in progress; its edits were dropped rather than overwrite that change`,
         data: targetEventData(job, { site: label }),
       });
-      return { verdict: reflection.verdict, reason: reflection.reason };
+      return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
     ctx.events.append({
       kind: 'subtitle.knowledge-updated',
@@ -531,19 +539,20 @@ export async function reflectOnRun(input: {
       }),
     });
 
-    return { verdict: reflection.verdict, reason: reflection.reason };
+    return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
   } catch (err) {
     // The call-site resolved a moment ago, so this is a configured feature failing — a
     // provider outage, a timeout, a response that didn't match the schema, or a filesystem
     // error reading/saving the notes file. Worth a warning: left alone it would silently
     // learn nothing, run after run.
+    const stop = stopFromError(err);
     ctx.events.append({
       kind: 'subtitle.knowledge-failed',
       level: 'warn',
       jobId: job.id,
-      message: `Knowledge update for ${label} failed: ${errorMessage(err)}`,
-      data: targetEventData(job, { site: label }),
+      message: `Knowledge update for ${label} failed: ${describeStop(stop)}`,
+      data: targetEventData(job, { site: label, stop }),
     });
-    return null;
+    return { stop };
   }
 }

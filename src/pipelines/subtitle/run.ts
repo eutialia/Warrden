@@ -1135,7 +1135,7 @@ async function searchSiteRounds(
     // A cooldown means the site never ran at all this job — nothing happened worth writing
     // to its notes file. Every other outcome (a download that placed nothing, an archive
     // that failed to extract, a give-up, a hard failure) is a completed run and reflects.
-    if (result.outcome === 'cooldown') return;
+    if (result.stop.kind === 'skipped') return;
 
     // A pack this job already has, from an earlier round or from a run that cached it, means
     // the agent is circling, and this is the cheapest possible moment to say so: before
@@ -1208,9 +1208,13 @@ async function searchSiteRounds(
  */
 function worthReflectingOn(fresh: boolean, result: SiteRunResult): boolean {
   if (!fresh || result.download !== null) return true;
-  if (result.outcome === 'error') return true;
+  if (BROKEN_STOPS.includes(result.stop.kind)) return true;
   return result.steps >= MIN_REFLECTABLE_STEPS;
 }
+
+/** The stops that are about the site rather than the calendar: a round that broke, went
+ * malformed or kept aiming at refused addresses has something to teach however short it was. */
+const BROKEN_STOPS: readonly string[] = ['error', 'malformed', 'refused'];
 
 /** Below this many steps a fruitless fresh-gap round is just "the site had nothing listed". */
 const MIN_REFLECTABLE_STEPS = 3;
