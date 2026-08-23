@@ -56,6 +56,11 @@ export function createRunTiers(opts: Pick<MakeTierOpts, 'fetchImpl'> = {}): Tier
   return { make: (t) => makeTier(t, { cookieJar, fetchImpl: opts.fetchImpl }) };
 }
 
+/** Distinct search result pages a `not-found` give-up needs behind it to be taken at its
+ * word and end the ladder there. One listing is a single look, which a cheap tier that
+ * renders nothing produces just as readily as a site with nothing on it. */
+const EVIDENCE_LISTINGS = 2;
+
 /** What one `searchSite` call produced, whether or not it ended in a download. */
 export interface SiteRunResult {
   /** Why the last attempt stopped — the one vocabulary every caller reports and decides on. */
@@ -166,8 +171,10 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
 }
 
 /**
- * Runs the site-search agent for one site with full access-ladder orchestration: cooldown
- * check, then generic browse loop with tier escalation. Site-specific protocols live in
+ * Runs the site-search agent for one site with full access-ladder orchestration: a generic
+ * browse loop, once per rung, with tier escalation. Whether the site should be searched at
+ * all (disabled, in cooldown) is the caller's filter, not this function's: reaching here
+ * means an attempt starts. Site-specific protocols live in
  * the site's knowledge file (injected into the loop prompt), not in code adapters. Returns
  * a `SiteRunResult` carrying the download (if any), the full transcript, and an outcome —
  * never throws (a broken site is a health event, not a job failure). The transcript lands
@@ -201,20 +208,6 @@ export async function searchSite(
         })
       : query;
   const primaryQuery = hints.title;
-
-  // Cooldown only applies while fail_count > 0. Success (and the dashboard "reset
-  // failures" path) set fail_count back to 0; without this guard a stale last_failure_at
-  // would still block the site for failBackoffMs(0) even after a clean success/reset.
-  const cooldownMs = failBackoffMs(profile.fail_count, ctx.config.browser.siteCooldownSeconds);
-  if (
-    profile.fail_count > 0 &&
-    profile.last_failure_at !== null &&
-    Date.now() - profile.last_failure_at < cooldownMs
-  ) {
-    const stop: StopReason = { kind: 'skipped', why: 'cooldown' };
-    reportAgentStop(ctx, job, stop, { callsite: SEARCH_CALLSITE, site: siteLabel(site.baseUrl), steps: 0, backoffMs: cooldownMs });
-    return { stop, steps: 0, download: null, transcript: [] };
-  }
 
   const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, opts.seedsDir ?? defaultSeedsDir());
 
@@ -316,12 +309,17 @@ export async function searchSite(
     let attempted = false;
     // Steps the last attempt spent. A throw reports none: the loop never returned.
     let steps = 0;
+    // Rungs that actually returned or threw — what the site-level events count.
+    let rungsTried = 0;
+    // Rungs spent answering a give-up the agent could not back up. One is the allowance.
+    let softEscalations = 0;
 
     // Without escalation the ladder is one rung tall: the site's remembered starting tier.
     const lastIdx = opts.escalate === false ? startIdx : TIER_ORDER.length - 1;
     for (let i = startIdx; i <= lastIdx; i++) {
       const tierName = TIER_ORDER[i]!;
       lastTier = tierName;
+      rungsTried += 1;
       // make() lives inside the try so a factory throw cannot escape searchSite's
       // never-throws contract — it is handled like any other tier failure.
       try {
@@ -380,6 +378,20 @@ export async function searchSite(
           };
         }
 
+        if (run.stop.kind === 'gave-up') {
+          // The agent's own account of the site, answered rung by rung. A wall it named
+          // itself is exactly what the ladder exists for, so it climbs. "I searched and
+          // found nothing", with two distinct listings behind it, is believed: another rung
+          // would pay chromium prices to read the same empty results. Anything less — one
+          // listing, none, or "I could not tell" — buys exactly one more rung, because a
+          // cheap tier that renders nothing looks identical to a site with nothing on it.
+          if (run.stop.because === 'blocked') continue;
+          if (run.stop.because === 'not-found' && run.listings >= EVIDENCE_LISTINGS) break;
+          if (softEscalations >= 1) break;
+          softEscalations += 1;
+          continue;
+        }
+
         // Refusals and malformed replies end the site here rather than on the next rung: one
         // would replay the same guarded destinations at full step budget, the other would put
         // the same prompt to the same model. Both take the usual failure backoff.
@@ -415,14 +427,14 @@ export async function searchSite(
       if (opts.escalate === false) return endRun(lastStop, 0);
       return endRun(lastStop, 0, {
         kind: 'subtitle.site-exhausted',
-        message: `Site ${siteLabel(site.baseUrl)} was blocked at every tier (${lastIdx - startIdx + 1})`,
+        message: `Site ${siteLabel(site.baseUrl)} was blocked at every tier (${rungsTried})`,
       });
     }
 
     // Every rung came up empty.
     return endRun(lastStop, steps, {
       kind: 'subtitle.site-exhausted',
-      message: `Site ${siteLabel(site.baseUrl)} produced no download across ${lastIdx - startIdx + 1} tier(s)`,
+      message: `Site ${siteLabel(site.baseUrl)} produced no download across ${rungsTried} tier(s)`,
     });
   } finally {
     await Promise.all(activeTiers.map((t) => t.close()));

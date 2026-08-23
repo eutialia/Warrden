@@ -14,6 +14,7 @@ function act(
     url: string;
     note: string;
     reason?: string;
+    because?: 'not-found' | 'blocked' | 'unsure';
     method?: 'GET' | 'POST';
     body?: string;
     contentType?: string;
@@ -26,6 +27,7 @@ function act(
     contentType: '',
     referer: '',
     reason: '',
+    because: 'unsure' as const,
     ...partial,
   };
 }
@@ -60,6 +62,7 @@ describe('runAgentLoop', () => {
     expect(out).toEqual({
       stop: { kind: 'done' },
       steps: 3,
+      listings: 1,
       download: { filePath: '/dl/pack.zip', url: 'https://acg.rip/dl/123.zip', searchUrl: 'https://acg.rip/?term=frieren' },
     });
     expect(tier.calls.map((c) => c.url)).toEqual(['https://acg.rip/?term=frieren', 'https://acg.rip/t/123', 'https://acg.rip/dl/123.zip']);
@@ -72,7 +75,7 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 2, onTranscript: () => {} });
-    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 2 });
+    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 2, listings: 1 });
   });
 
   it('returns gave-up with the model own reason and the steps it took', async () => {
@@ -81,13 +84,62 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'nothing here', reason: 'the site lists nothing for this season yet' }),
     ]);
     const out = await runAgentLoop({ llm, tier: fakeTier([OK_HTML]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'the site lists nothing for this season yet' }, steps: 2 });
+    expect(out).toEqual({
+      stop: { kind: 'gave-up', because: 'unsure', reason: 'the site lists nothing for this season yet' },
+      steps: 2,
+      listings: 1,
+    });
   });
 
   it('falls back to a stated-nothing reason when give_up carries no sentence', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nothing here' })]);
     const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
-    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'no reason given' }, steps: 1 });
+    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'no reason given' }, steps: 1, listings: 0 });
+  });
+
+  it.each(['not-found', 'blocked', 'unsure'] as const)('carries a give_up because=%s through to the stop', async (because) => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stopping', reason: 'r', because })]);
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.stop).toEqual({ kind: 'gave-up', because, reason: 'r' });
+  });
+
+  it('spells out what each give_up because means', async () => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+    const system = llm.calls[0]!.system!;
+    expect(system).toContain('- not-found: you searched and the site has nothing for these episodes');
+    expect(system).toContain('- blocked: you could not get through');
+    expect(system).toContain('- unsure: you could not tell');
+  });
+
+  /** The evidence behind a `not-found`: two searches that came back with the SAME page are
+   * one look, and the ladder is not allowed to read them as two. */
+  it.each([
+    ['two different result pages', '<html>results for a</html>', '<html>results for b</html>', 2],
+    ['the same result page twice', '<html>results</html>', '<html>results</html>', 1],
+    ['the same page under different markup', '<html><b>results</b></html>', '<html><i>results</i></html>', 1],
+  ])('counts %s as %s listing(s)', async (_name, first, second, expected) => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=a', note: 's' }),
+      act({ action: 'search', url: 'https://acg.rip/?term=b', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
+    ]);
+    const tier = fakeTier([
+      { ok: true, status: 200, body: first, blocked: false },
+      { ok: true, status: 200, body: second, blocked: false },
+    ]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.listings).toBe(expected);
+  });
+
+  it('counts no listing for a search that failed', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=a', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
+    ]);
+    const tier = fakeTier([{ ok: false, status: 503, body: 'nope', blocked: false }]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.listings).toBe(0);
   });
 
   it('throws TierBlockedError when the tier reports a bot wall', async () => {
@@ -382,7 +434,7 @@ describe('runAgentLoop', () => {
     );
     const entries: TranscriptEntry[] = [];
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 4, onTranscript: (e) => entries.push(e) });
-    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 4 });
+    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 4, listings: 0 });
     const refusals = entries.filter((e) => e.action === 'refused');
     expect(refusals).toHaveLength(4);
     expect(refusals[0]!.level).toBeUndefined();
@@ -412,7 +464,7 @@ describe('runAgentLoop', () => {
     );
     const tier = fakeTier(new Array(5).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl: 'http://[::1]/x' })));
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3 });
+    expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3, listings: 0 });
   });
 
   it('passes referer on download to the tier', async () => {
@@ -472,7 +524,7 @@ describe('runAgentLoop', () => {
     );
     const tier = fakeTier([]);
     const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
-    expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3 });
+    expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3, listings: 0 });
     expect(llm.calls).toHaveLength(3);
   });
 
@@ -486,7 +538,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator(new Array(6).fill(null).map(() => action));
     const entries: TranscriptEntry[] = [];
     const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 6, onTranscript: (e) => entries.push(e) });
-    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 6 });
+    expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 6, listings: 0 });
     // Every step still refused, and every refusal still reached the transcript.
     expect(entries.filter((e) => e.action === 'refused')).toHaveLength(6);
   });
@@ -560,7 +612,7 @@ describe('runAgentLoop', () => {
       maxSteps: 10,
       onTranscript: (e) => transcript.push(e),
     });
-    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'nothing listed' }, steps: 5 });
+    expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'nothing listed' }, steps: 5, listings: 1 });
     expect(transcript.filter((e) => e.action === 'malformed')).toHaveLength(3);
     // The correction rides in the next prompt, or the model has no idea what went wrong.
     const lastPrompt = llm.calls.at(-1)!.prompt;
@@ -580,7 +632,7 @@ describe('runAgentLoop', () => {
       maxSteps: 10,
       onTranscript: () => {},
     });
-    expect(out).toEqual({ stop: { kind: 'malformed', failures: 3 }, steps: 3 });
+    expect(out).toEqual({ stop: { kind: 'malformed', failures: 3 }, steps: 3, listings: 0 });
     // The fourth queued action was never asked for.
     expect(llm.calls).toHaveLength(3);
   });
@@ -605,7 +657,7 @@ describe('runAgentLoop', () => {
   it('strict-mode schema requires every action field (no optional)', () => {
     // Zod 4: optional fields wrap as ZodOptional; required sentinels must parse without defaults.
     const shape = AgentActionSchema.shape;
-    for (const key of ['action', 'url', 'note', 'method', 'body', 'contentType', 'referer', 'reason'] as const) {
+    for (const key of ['action', 'url', 'note', 'method', 'body', 'contentType', 'referer', 'reason', 'because'] as const) {
       expect(shape[key].isOptional()).toBe(false);
       expect(shape[key].def.type).not.toBe('optional');
     }
@@ -621,7 +673,8 @@ describe('runAgentLoop', () => {
         contentType: '',
         referer: '',
         reason: '',
+        because: 'not-found',
       }),
-    ).toMatchObject({ action: 'give_up', method: 'GET', body: '' });
+    ).toMatchObject({ action: 'give_up', method: 'GET', body: '', because: 'not-found' });
   });
 });

@@ -1099,19 +1099,41 @@ describe('runSubtitleJob', () => {
     expect(calls).toEqual([{ verifiedSuccess: false }]);
   });
 
-  it('skips reflection entirely when the site was on cooldown', async () => {
-    let called = false;
+  // The filter lives in the pass, not in `searchSite`: a site in cooldown or disabled never
+  // gets an attempt at all, so there is no run to reflect on and nothing to say about it
+  // beyond the one line that says it was skipped.
+  it.each([
+    ['in failure cooldown', { failCount: 2, lastFailureAt: Date.now() }, 'cooldown'],
+    ['disabled', { disabledAt: Date.now(), disabledReason: 'bot wall' }, 'disabled'],
+  ])('never searches a site that is %s', async (_name, update, why) => {
     const fx = subtitleFixture();
+    const profiles = new SiteProfiles(fx.ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', update);
     const job = claimSubtitleJob(fx);
+
     await runSubtitleJob(fx.ctx, job, {
-      searchSite: async () => ({ download: null, transcript: [], steps: 1, stop: { kind: 'skipped' as const, why: 'cooldown' as const } }),
+      ...NO_SITES,
       reflectOnRun: async () => {
-        called = true;
-        return { stop: { kind: 'done' as const } };
+        throw new Error('reflectOnRun must not be called');
       },
     });
 
-    expect(called).toBe(false);
+    const skip = findEvent(fx.ctx.events.list(), 'agent.stop')!;
+    expect(skip.data).toMatchObject({ site: 'acg.rip', stop: { kind: 'skipped', why } });
+  });
+
+  it('searches a site whose failures were reset even though its last failure is recent', async () => {
+    const fx = subtitleFixture();
+    const profiles = new SiteProfiles(fx.ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', { failCount: 0, lastFailureAt: Date.now() - 5_000 });
+    const job = claimSubtitleJob(fx);
+
+    await runSubtitleJob(fx.ctx, job, siteStub(PACK));
+
+    expect(hasEvent(fx.ctx.events.list(), 'agent.stop')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
   });
 
   it('a reflection failure for one site does not stop the job or swallow later sites/attention items', async () => {
@@ -1449,11 +1471,15 @@ describe('runSubtitleJob — fresh gaps', () => {
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.search-scoped')).toBe(false);
   });
 
-  it('says nothing about scoping the pass down when no site is attempted at all', async () => {
+  it.each([
+    ['disabled', { disabledAt: Date.now(), disabledReason: 'bot wall' }],
+    ['in failure cooldown', { failCount: 2, lastFailureAt: Date.now() }],
+  ])('says nothing about scoping the pass down when the only site is %s', async (_name, update) => {
     const fx = subtitleFixture();
     airedDaysAgo(fx, 1);
-    new SiteProfiles(fx.ctx.db).upsert({ baseUrl: 'https://acg.rip' });
-    new SiteProfiles(fx.ctx.db).update('https://acg.rip', { disabledAt: Date.now(), disabledReason: 'bot wall' });
+    const profiles = new SiteProfiles(fx.ctx.db);
+    profiles.upsert({ baseUrl: 'https://acg.rip' });
+    profiles.update('https://acg.rip', update);
 
     const job = claimSubtitleJob(fx);
     await runSubtitleJob(fx.ctx, job, NO_SITES);

@@ -1,13 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import { searchSite, type SiteRunResult } from '../../agent/run.js';
+import { SEARCH_CALLSITE } from '../../agent/loop.js';
+import { failBackoffMs, reportAgentStop, searchSite, type SiteRunResult } from '../../agent/run.js';
 import { reflectOnRun } from '../../agent/siteReflection.js';
+import type { StopReason } from '../../agent/stop.js';
 import type { AppContext } from '../../context.js';
 import { siteKey, siteLabel } from '../../config/siteLabel.js';
 import type { SubtitleSiteConfig } from '../../config/schema.js';
 import { ArchiveCache, type ArchiveCacheEntry, type ArchiveCacheRow } from '../../db/archiveCache.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
-import { SiteProfiles } from '../../db/siteProfiles.js';
+import { SiteProfiles, type SiteProfileRow } from '../../db/siteProfiles.js';
 import type { TranscriptEntry } from '../../db/subtitleRuns.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
@@ -1053,17 +1055,46 @@ async function siteSearchPass(
   for (const site of sites) {
     if (uncovered(gaps).length === 0) break;
 
-    // A disabled site simply doesn't exist for this pass: no run, no reflection, no
-    // cooldown touch, and no event of its own — the human already saw the evidence when
-    // they accepted the disable. If every configured site is disabled, this loop ends
-    // having done nothing, and the caller's own "no subtitle found" resolution covers it —
-    // no event spam of ours to add.
-    const profile = profiles.get(site.baseUrl);
-    if (profile?.disabled_at !== null && profile?.disabled_at !== undefined) continue;
+    // A site that is disabled or in failure cooldown gets no attempt: no run, no reflection,
+    // no cooldown touch. It is filtered HERE rather than inside `searchSite` so that
+    // reaching `searchSite` means an attempt actually starts — which is what keeps the
+    // scoped-down note below honest about a search that happened. If every configured site
+    // is skipped this loop ends having done nothing, and the caller's own "no subtitle
+    // found" resolution covers it.
+    const skip = skipReason(profiles.get(site.baseUrl), ctx.config.browser.siteCooldownSeconds, Date.now());
+    if (skip !== null) {
+      reportAgentStop(ctx, job, skip.stop, {
+        callsite: SEARCH_CALLSITE,
+        site: siteLabel(site.baseUrl),
+        steps: 0,
+        ...(skip.backoffMs !== undefined ? { backoffMs: skip.backoffMs } : {}),
+      });
+      continue;
+    }
 
     announceScoped();
     await searchSiteRounds(ctx, job, site, meta, gaps, state, cache, deps, profiles, cached, fresh);
   }
+}
+
+/**
+ * Why this site gets no attempt this pass, or `null` when it does. Cooldown only applies
+ * while `fail_count > 0`: success (and the dashboard's "reset failures") set it back to 0,
+ * and without that guard a stale `last_failure_at` would still hold the site for
+ * `failBackoffMs(0)` after a clean run.
+ */
+function skipReason(
+  profile: SiteProfileRow | null,
+  cooldownSeconds: number,
+  now: number,
+): { stop: StopReason; backoffMs?: number } | null {
+  if (profile === null) return null;
+  if (profile.disabled_at !== null) return { stop: { kind: 'skipped', why: 'disabled' } };
+  const backoffMs = failBackoffMs(profile.fail_count, cooldownSeconds);
+  if (profile.fail_count > 0 && profile.last_failure_at !== null && now - profile.last_failure_at < backoffMs) {
+    return { stop: { kind: 'skipped', why: 'cooldown' }, backoffMs };
+  }
+  return null;
 }
 
 /** Every pack url this target has in the archive cache, deduped, in the shape the search
@@ -1132,11 +1163,6 @@ async function searchSiteRounds(
       maxRounds,
       escalate: !fresh,
     });
-    // A cooldown means the site never ran at all this job — nothing happened worth writing
-    // to its notes file. Every other outcome (a download that placed nothing, an archive
-    // that failed to extract, a give-up, a hard failure) is a completed run and reflects.
-    if (result.stop.kind === 'skipped') return;
-
     // A pack this job already has, from an earlier round or from a run that cached it, means
     // the agent is circling, and this is the cheapest possible moment to say so: before
     // extracting it, before matching it, before reflecting on a round that navigated exactly
