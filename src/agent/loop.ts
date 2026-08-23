@@ -297,10 +297,11 @@ export async function runAgentLoop(input: {
     '  - blocked: you could not get through — a wall, a captcha, a login, or pages that come back empty or garbled',
     '  - unsure: you could not tell',
     'Cookies persist automatically across steps within this run — you never need to manage them.',
+    'Pages arrive stripped to text: a link reads as [url] before its text, a form as [form action method], and a form\'s hidden fields as [form: name=value, ...]. Reuse those values verbatim when a step needs them.',
     'Older observations in the transcript are elided; record key facts (candidate slugs/URLs) in your note so you can reuse them later.',
     'Only download links that look like complete season packs, batch archives, or full-movie packs — not single-episode files, unless nothing else exists.',
     'Preferred groups and languages are soft preferences: never give_up solely because the perfect group is missing.',
-    `When every missing episode aired within the last ${FRESH_DAYS} days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.`,
+    `When every missing episode aired within the last ${FRESH_DAYS} days and the site shows nothing for them, give_up with because=not-found: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.`,
     'Respond with JSON matching the schema — no prose outside the JSON.',
   ]
     .filter(Boolean)

@@ -547,7 +547,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
     await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
     expect(llm.calls[0]!.system).toContain(
-      'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
+      'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up with because=not-found: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
     );
   });
 
@@ -560,6 +560,7 @@ describe('runAgentLoop', () => {
     expect(system).toContain('Only download saves a file');
     expect(system).toContain('Cookies persist automatically');
     expect(system).toContain('Older observations in the transcript are elided');
+    expect(system).toContain('a link reads as [url] before its text');
   });
 
   it('keeps every step note on its own line, including the ones whose observation was elided', async () => {

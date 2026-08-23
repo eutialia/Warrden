@@ -1211,10 +1211,10 @@ async function searchSiteRounds(
 
     if (!result.download) {
       // The site is done for this target. If an earlier round DID download, that is the
-      // fact worth remembering: a round that came up empty has just been booked by
-      // `searchSite` as a site failure (fail_count up, last_failure_at set), which would put
-      // a site that worked twice today into cooldown for the next job. Restore what its own
-      // successful round left behind. last_working_tier and last_success_at survive a
+      // fact worth remembering: a round that ended in the site's own fault (a wall, a spent
+      // budget, a break) has just been booked by `searchSite` as a site failure, which would
+      // put a site that worked twice today into cooldown for the next job. Restore what its
+      // own successful round left behind. last_working_tier and last_success_at survive a
       // failure untouched, so only these two need putting back.
       if (downloadedHere) profiles.update(site.baseUrl, { failCount: 0, lastFailureAt: null });
       return;
