@@ -231,6 +231,16 @@ function isSameSite(url: string, baseUrl: string): boolean {
   }
 }
 
+/** The site's host as a refusal line names it, falling back to the configured string when
+ * the base URL is not parseable — the refusal still has to read as a sentence. */
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
+}
+
 /** A refused destination, phrased to complete `<action> refused: <url> ...`. */
 const REFUSAL_REASON: Record<RefusedDestination, string> = {
   private: 'targets a private/loopback address',
@@ -436,50 +446,27 @@ export async function runAgentLoop(input: {
       };
     }
 
-    if (action.action === 'request') {
-      // Same-site guard: request is a POST-capable primitive; third-party page text in
-      // the prompt must not aim it at a foreign host. open/search/download stay open —
-      // they legitimately reach mirrors and CDNs and hard-guarding them would break real
-      // sites; only the private/loopback check above applies to those verbs.
-      if (!isSameSite(action.url, site.baseUrl)) {
-        let siteHost: string;
-        try {
-          siteHost = new URL(site.baseUrl).host;
-        } catch {
-          siteHost = site.baseUrl;
-        }
-        const line = `request refused: ${capUrl(action.url)} is not on ${siteHost}`;
-        if (refuse(line)) return { stop: { kind: 'refused', refusals }, steps: step + 1, listings: listings.size };
-        continue;
-      }
+    // One fetch path for the three browsing verbs, because there is only one guard worth
+    // having and it must not be reachable around. A search the site serves over POST is
+    // still a search — the verb says what the step is for, not which method the site wants
+    // — and `request` is the arbitrary-protocol verb on either method. `open` stays GET.
+    const post = action.method === 'POST' && (action.action === 'request' || action.action === 'search');
+    const explicitMethod = action.action === 'request' || post;
 
-      const method = action.method;
-      // Body/contentType only on POST — GET never carries a body on any tier.
-      const res = await tier.fetch(action.url, {
-        method,
-        ...(method === 'POST' && action.body !== '' ? { body: action.body } : {}),
-        ...(method === 'POST' && action.contentType !== '' ? { contentType: action.contentType } : {}),
-        ...(referer !== undefined ? { referer } : {}),
-      });
-      const hop = refuseHop(res);
-      if (hop === 'stop') return { stop: { kind: 'refused', refusals }, steps: step + 1, listings: listings.size };
-      if (hop === 'continue') continue;
-      if (res.blocked) throw new TierBlockedError(`request blocked at ${action.url}`);
-      history.push({
-        prefix: `request ${method} ${action.url}`,
-        note: action.note,
-        ...(res.ok ? { result: ' -> OK: ', observation: observation(res.body ?? '') } : { result: ` -> ${httpFailure(res)}` }),
-      });
+    // Same-site guard. A POST is what third-party page text must not be able to aim at a
+    // foreign host, whichever verb carries it, and `request` is guarded on both methods
+    // since it exists to speak a site's own protocol. Plain GET open/search/download stay
+    // open — they legitimately reach mirrors and CDNs, and hard-guarding them would break
+    // real sites; only the private/loopback check above applies to those.
+    if (explicitMethod && !isSameSite(action.url, site.baseUrl)) {
+      const line = `${action.action} refused: ${capUrl(action.url)} is not on ${hostOf(site.baseUrl)}`;
+      if (refuse(line)) return { stop: { kind: 'refused', refusals }, steps: step + 1, listings: listings.size };
       continue;
     }
 
-    // A search the site serves over POST is still a search: the verb is about what the step
-    // is for, not which HTTP method the site happens to want. `open` stays GET — it visits a
-    // page the model already has a URL for.
-    const post = action.action === 'search' && action.method === 'POST';
-    const verb = post ? 'search POST' : action.action;
+    // Body/contentType only on POST — GET never carries a body on any tier.
     const res = await tier.fetch(action.url, {
-      ...(post ? { method: 'POST' as const } : {}),
+      ...(explicitMethod ? { method: post ? ('POST' as const) : ('GET' as const) } : {}),
       ...(post && action.body !== '' ? { body: action.body } : {}),
       ...(post && action.contentType !== '' ? { contentType: action.contentType } : {}),
       ...(referer !== undefined ? { referer } : {}),
@@ -492,6 +479,7 @@ export async function runAgentLoop(input: {
       lastSearchUrl = action.url;
       listings.add(createHash('sha256').update(pageText(res.body ?? '')).digest('hex'));
     }
+    const verb = action.action === 'request' ? `request ${action.method}` : post ? 'search POST' : action.action;
     history.push({
       prefix: `${verb} ${action.url}`,
       note: action.note,
