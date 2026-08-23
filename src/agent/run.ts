@@ -70,6 +70,9 @@ export interface SiteRunResult {
   steps: number;
   download: { filePath: string; url: string } | null;
   transcript: TranscriptEntry[];
+  /** Whether any rung of this run got a search result page back. A run that read a listing
+   * has seen how the site's search actually works, whether or not it ended with a file. */
+  searchObserved: boolean;
 }
 
 /**
@@ -259,6 +262,10 @@ export async function searchSite(
     });
   };
 
+  /** Whether any rung read a search listing — carried across rungs, since the run's whole
+   * transcript is what reflection is handed. */
+  let searchObserved = false;
+
   /** The rung the ladder is on — what the stop event reports against. Set before `make()`
    * so a factory throw names the rung it threw for, not the one that worked. */
   let lastTier: AccessTier = TIER_ORDER[startIdx]!;
@@ -298,7 +305,7 @@ export async function searchSite(
         data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
       });
     }
-    return { stop, steps, download: null, transcript };
+    return { stop, steps, download: null, transcript, searchObserved };
   };
 
   try {
@@ -342,6 +349,7 @@ export async function searchSite(
         attempted = true;
         steps = run.steps;
         lastStop = run.stop;
+        searchObserved ||= run.listings > 0;
 
         if (run.download !== undefined) {
           runs.finish(runId, 'done');
@@ -375,6 +383,7 @@ export async function searchSite(
             steps: run.steps,
             download: { filePath: run.download.filePath, url: run.download.url },
             transcript,
+            searchObserved,
           };
         }
 

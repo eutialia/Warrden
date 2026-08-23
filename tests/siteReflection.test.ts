@@ -59,13 +59,17 @@ function reflectCtx(overrides?: Partial<AppContext>): AppContext {
 /** No seeds: an empty directory, so a shipped seed can never leak into a test. */
 const NO_SEEDS = tmpDir();
 
-function reflect(ctx: AppContext, overrides?: { transcript?: TranscriptEntry[]; verifiedSuccess?: boolean }) {
+function reflect(
+  ctx: AppContext,
+  overrides?: { transcript?: TranscriptEntry[]; verifiedSuccess?: boolean; searchObserved?: boolean },
+) {
   return reflectOnRun({
     ctx,
     job: enqueueAndClaim(ctx, subtitleJobInput()),
     site: { baseUrl: SITE },
     transcript: overrides?.transcript ?? [{ ts: 1, tier: 'curl', action: 'search', detail: 'GET /s' }],
     verifiedSuccess: overrides?.verifiedSuccess ?? true,
+    searchObserved: overrides?.searchObserved ?? false,
     today: TODAY,
     seedsDir: NO_SEEDS,
   });
@@ -546,6 +550,58 @@ describe('reflectOnRun', () => {
     expect(saved.sections.Pitfalls).toEqual([`IF the pack link 404s THEN try the mirror. (confirmed ${TODAY})`]);
   });
 
+  /** A run that read a search listing has seen the search work first-hand. Gating `## Search`
+   * on a download meant a site whose search the agent had figured out could never write it
+   * down — the pitfall it wrote instead is the wrong shape for the fact. */
+  it('lets a run that read a search listing write the protocol sections', async () => {
+    const ctx = reflectCtx({
+      llm: new FakeGenerator([
+        reflection({
+          ops: [
+            { op: 'add', section: 'Search', text: 'POST /search.php with formhash from the page.', target: '' },
+            { op: 'add', section: 'Access', text: 'IF curl returns the listing THEN stay on curl.', target: '' },
+            { op: 'add', section: 'Download', text: 'IF a pack page is open THEN GET /down/{id}.', target: '' },
+          ],
+        }),
+      ]),
+    });
+
+    await reflect(ctx, { verifiedSuccess: false, searchObserved: true });
+
+    const saved = loadKnowledge(ctx.dataDir, SITE);
+    expect(saved.sections.Search).toContain(`POST /search.php with formhash from the page. (confirmed ${TODAY})`);
+    expect(saved.sections.Access).toHaveLength(1);
+    expect(saved.sections.Download).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      'a verified success',
+      { verifiedSuccess: true, searchObserved: false },
+      'This run verifiably succeeded',
+    ],
+    [
+      'a run that only read a listing',
+      { verifiedSuccess: false, searchObserved: true },
+      'it did get search results back from the site',
+    ],
+    [
+      'a run that saw nothing',
+      { verifiedSuccess: false, searchObserved: false },
+      'never got search results back',
+    ],
+  ])('tells the model what %s may write', async (_name, opts, expected) => {
+    const llm = new FakeGenerator([reflection()]);
+    await reflect(reflectCtx({ llm }), opts);
+    expect(llm.calls[0]!.system).toContain(expected);
+  });
+
+  it('tells the model a twice-confirmed how-to-search pitfall belongs in Search as a step', async () => {
+    const llm = new FakeGenerator([reflection()]);
+    await reflect(reflectCtx({ llm }));
+    expect(llm.calls[0]!.system).toContain('belongs in `## Search` instead');
+  });
+
   it('raises an attention event when a refused edit was an attempt to tamper', async () => {
     const ctx = reflectCtx({
       llm: new FakeGenerator([
@@ -582,6 +638,7 @@ describe('reflectOnRun', () => {
       site: { baseUrl: SITE },
       transcript: [],
       verifiedSuccess: false,
+      searchObserved: false,
       today: TODAY,
       seedsDir,
     });

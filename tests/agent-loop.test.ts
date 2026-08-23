@@ -187,7 +187,7 @@ describe('runAgentLoop', () => {
       },
     });
     const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain('request POST https://acg.rip/api/dl -> OK:');
+    expect(secondPrompt).toContain('request POST https://acg.rip/api/dl — protocol step -> OK:');
     expect(secondPrompt).toContain('{"url":"https://cdn/x.zip"}');
   });
 
@@ -224,7 +224,7 @@ describe('runAgentLoop', () => {
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain(
-      'request GET https://acg.rip/down/uE7Rx2 -> HTTP 403: Download page expired Go back to the detail page and download again.',
+      'request GET https://acg.rip/down/uE7Rx2 — protocol step -> HTTP 403: Download page expired Go back to the detail page and download again.',
     );
     expect(secondPrompt).not.toContain('<title>');
     expect(secondPrompt).not.toContain('<p>');
@@ -240,7 +240,7 @@ describe('runAgentLoop', () => {
     ]);
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain('open https://acg.rip/t/123 -> HTTP 403: Session expired, please sign in.');
+    expect(secondPrompt).toContain('open https://acg.rip/t/123 — opening -> HTTP 403: Session expired, please sign in.');
     expect(secondPrompt).not.toContain('<div');
   });
 
@@ -252,7 +252,7 @@ describe('runAgentLoop', () => {
     const tier = fakeTier([{ ok: false, status: 403, body: '', blocked: false }]);
     await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
-    expect(secondPrompt).toContain('open https://acg.rip/t/123 -> HTTP 403');
+    expect(secondPrompt).toContain('open https://acg.rip/t/123 — opening -> HTTP 403');
     expect(secondPrompt).not.toContain('HTTP 403:');
   });
 
@@ -560,6 +560,98 @@ describe('runAgentLoop', () => {
     expect(system).toContain('Only download saves a file');
     expect(system).toContain('Cookies persist automatically');
     expect(system).toContain('Older observations in the transcript are elided');
+  });
+
+  it('keeps every step note on its own line, including the ones whose observation was elided', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 'candidate slug is /t/8891' }),
+      act({ action: 'open', url: 'https://acg.rip/t/8891', note: 'opening the batch page' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([
+      { ok: true, status: 200, body: 'A'.repeat(3000), blocked: false },
+      { ok: true, status: 200, body: 'B'.repeat(3000), blocked: false },
+    ]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[2]!.prompt;
+    expect(prompt).toContain('search https://acg.rip/?term=x — candidate slug is /t/8891 -> OK: ');
+    expect(prompt).toContain('open https://acg.rip/t/8891 — opening the batch page -> OK: ');
+    // The first step's page is elided, and its note is exactly what has to outlive it.
+    expect(prompt).toContain('…[elided]');
+  });
+
+  it('strips a successful page to text while keeping links and hidden form fields', async () => {
+    const body = [
+      '<html><head><style>.a{color:red}</style><script>var token="secret"</script></head><body>',
+      '<form action="/search.php" method="post">',
+      '<input type="hidden" name="formhash" value="a1b2c3">',
+      '<input type="hidden" name="searchsubmit" value="yes">',
+      '<input type="text" name="q" value="typed">',
+      '</form>',
+      '<a href="/t/8891" class="tracked">Frieren S01 batch</a>',
+      '</body></html>',
+    ].join('');
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[1]!.prompt;
+    expect(prompt).toContain('[form: formhash=a1b2c3, searchsubmit=yes]');
+    expect(prompt).toContain('[/t/8891] Frieren S01 batch');
+    expect(prompt).toContain('[form /search.php post]');
+    // The bulk is gone: script and style contents, classes, and the tags themselves.
+    expect(prompt).not.toContain('secret');
+    expect(prompt).not.toContain('color:red');
+    expect(prompt).not.toContain('class=');
+    expect(prompt).not.toContain('<a ');
+  });
+
+  it('keeps the form tokens when the page is longer than the observation cap', async () => {
+    const body = `<input type="hidden" name="formhash" value="a1b2c3"><p>${'x'.repeat(40_000)}</p>`;
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    expect(llm.calls[1]!.prompt).toContain('[form: formhash=a1b2c3]');
+  });
+
+  it('posts a search when the site searches through a form', async () => {
+    const llm = new FakeGenerator([
+      act({
+        action: 'search',
+        url: 'https://acg.rip/search.php',
+        note: 'posting the search form',
+        method: 'POST',
+        body: 'formhash=a1b2c3&q=frieren',
+        contentType: 'application/x-www-form-urlencoded',
+      }),
+      act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: '<html>results</html>', blocked: false }]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    expect(tier.calls[0]).toEqual({
+      url: 'https://acg.rip/search.php',
+      opts: { method: 'POST', body: 'formhash=a1b2c3&q=frieren', contentType: 'application/x-www-form-urlencoded' },
+    });
+    // Still a search: it counts as a listing and is remembered as the search URL.
+    expect(out.listings).toBe(1);
+    expect(llm.calls[1]!.prompt).toContain('search POST https://acg.rip/search.php');
+  });
+
+  it('does not turn an open into a POST just because method says so', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'open', url: 'https://acg.rip/t/1', note: 'visiting', method: 'POST', body: 'nope' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: 'ok', blocked: false }]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls[0]!.opts).toEqual({});
   });
 
   it('elides older observations in the rendered prompt while keeping the latest full', async () => {

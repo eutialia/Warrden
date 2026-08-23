@@ -142,6 +142,23 @@ function stamped(text: string, today: string): string {
   return `${withoutStamp(text)} (confirmed ${today})`;
 }
 
+/**
+ * What this run has earned the right to write, in the model's own terms. A verified file is
+ * the strongest evidence and opens everything. A run that only read a search listing has
+ * still seen the search work, first-hand — that is exactly the fact `## Search` is for, and
+ * gating it on a download meant a site whose search the agent had figured out three times
+ * over could never write it down. A run that saw neither has nothing to describe.
+ */
+function protocolPermission(verifiedSuccess: boolean, searchObserved: boolean): string {
+  if (verifiedSuccess) {
+    return 'This run verifiably succeeded: it produced a usable subtitle file. Access, Search and Download are open to you.';
+  }
+  if (searchObserved) {
+    return 'This run produced no subtitle file, but it did get search results back from the site. Access, Search and Download are open to you for what this run actually OBSERVED — how the page was reached, how the search was made, what came back. A download route nobody took is not something this run observed.';
+  }
+  return 'This run did NOT produce a usable subtitle file, and never got search results back. Nothing here proves how the site works, so add/update against Access, Search and Download will be refused. Pitfalls is still open, if there is a rule worth writing.';
+}
+
 function isAgentSection(section: string): section is KnowledgeSection {
   return (AGENT_SECTIONS as readonly string[]).includes(section);
 }
@@ -330,9 +347,10 @@ function buildSystemPrompt(input: {
   site: SubtitleSiteConfig;
   knowledge: SiteKnowledge;
   verifiedSuccess: boolean;
+  searchObserved: boolean;
   today: string;
 }): string {
-  const { site, knowledge, verifiedSuccess, today } = input;
+  const { site, knowledge, verifiedSuccess, searchObserved, today } = input;
   return [
     `You keep the notes on ${site.baseUrl} for an agent that searches it for subtitle files. A run just finished. Decide what, if anything, the notes should now say.`,
     '',
@@ -358,6 +376,8 @@ function buildSystemPrompt(input: {
       today +
       ')` for you.',
     '',
+    'A Pitfall that this run and an earlier one both confirmed, and that describes how to search the site rather than what went wrong, belongs in `## Search` instead: update it into a step ("POST the search form at /search.php with formhash from the page"), not an IF/THEN about a failure.',
+    '',
     'The file is a set of distinct facts, one bullet per fact — not a log of edits. Before writing anything, check what this run observed against the facts already on file: same endpoint, same failure mode, same page behavior as an existing bullet means that fact is already covered, even if the condition or the conclusion has changed since. Covered is an update, always — correcting a bullet this run showed wrong, refreshing the date on a bullet this run relied on and found still true, or folding one bullet into another that overlaps it (leave the now-redundant one for the operator to prune). `add` is only for a subject the file has never described. When in doubt, update: a lazy add next to a near-duplicate just sits there, since nothing here can delete it.',
     '',
     'Operations:',
@@ -367,12 +387,10 @@ function buildSystemPrompt(input: {
     '',
     'There is no delete operation. You cannot remove a bullet — only the operator can, from the dashboard. If a bullet is wrong, correct it with update; if two bullets overlap, update one to absorb the other and leave the redundant one alone.',
     '',
-    verifiedSuccess
-      ? 'This run verifiably succeeded: it produced a usable subtitle file. Access, Search and Download are open to you.'
-      // No push to write something: a failed run is the one most likely to have been fed
-      // attacker-chosen page text, and "write what went wrong" is an invitation to copy it
-      // into the file.
-      : 'This run did NOT produce a usable subtitle file. Nothing here proves how the site works, so add/update against Access, Search and Download will be refused. Pitfalls is still open, if there is a rule worth writing.',
+    // No push to write something on a run that saw nothing: that is the run most likely to
+    // have been fed attacker-chosen page text, and "write what went wrong" is an invitation
+    // to copy it into the file.
+    protocolPermission(verifiedSuccess, searchObserved),
     '',
     'Two rules about honesty, and they matter more than the volume of what you write:',
     '- Do not write a sequence of failed attempts up as a recommended approach. Something that did not work is a pitfall, never a protocol.',
@@ -410,13 +428,16 @@ export async function reflectOnRun(input: {
   site: SubtitleSiteConfig;
   transcript: TranscriptEntry[];
   /** The pipeline's own oracle: this run produced at least one usable subtitle file for
-   * this site. Gates protocol writes. */
+   * this site. Opens every protocol section. */
   verifiedSuccess: boolean;
+  /** The run read at least one search result page. Weaker evidence than a file, and enough
+   * for the sections describing how the site is reached and searched. */
+  searchObserved: boolean;
   today: string;
   /** Overrides `defaultSeedsDir()`, as in `searchSite` — tests point it at a fixture. */
   seedsDir?: string;
 }): Promise<ReflectionResult> {
-  const { ctx, job, site, transcript, verifiedSuccess, today } = input;
+  const { ctx, job, site, transcript, verifiedSuccess, searchObserved, today } = input;
   const label = siteLabel(site.baseUrl);
 
   try {
@@ -452,7 +473,7 @@ export async function reflectOnRun(input: {
     const reflection = await ctx.llm.generate({
       callsite: REFLECT_CALLSITE,
       schema: ReflectionSchema,
-      system: buildSystemPrompt({ site, knowledge, verifiedSuccess, today }),
+      system: buildSystemPrompt({ site, knowledge, verifiedSuccess, searchObserved, today }),
       prompt: [
         `Run outcome: ${verifiedSuccess ? 'a usable subtitle file was produced' : 'no usable subtitle file was produced'}.`,
         '',
@@ -463,7 +484,7 @@ export async function reflectOnRun(input: {
     });
 
     const { knowledge: applied, dropped } = applyOps(knowledge, reflection.ops, {
-      allowProtocol: verifiedSuccess,
+      allowProtocol: verifiedSuccess || searchObserved,
       today,
     });
     const appliedCount = reflection.ops.length - dropped.length;

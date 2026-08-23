@@ -109,19 +109,78 @@ function httpFailure(res: FetchResult): string {
   return text === '' ? status : `${status}: ${text.slice(0, ERROR_SNIPPET_CAP)}`;
 }
 
-/** A page as the model should read it: script and style blocks dropped before the tags so
- * their contents do not survive as text, then the tags themselves, then whitespace collapsed. */
+/**
+ * A page as the model should read it: script and style blocks dropped before the tags so
+ * their contents do not survive as text, then the tags themselves, then whitespace collapsed.
+ *
+ * Three things survive the tag strip, because without them the text is unusable rather than
+ * merely smaller: an anchor's `href` (the run navigates by the links it reads), a form's
+ * `action`/`method` (what a POST search has to be aimed at), and hidden input `name=value`
+ * pairs (the per-session tokens a form is rejected without). Everything else — classes,
+ * inline styles, tracking attributes — is the bulk that was crowding the real page out of a
+ * bounded prompt.
+ */
 function pageText(body: string): string {
   return body
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<a\b[^>]*\bhref\s*=\s*["']?([^"'\s>]+)[^>]*>/gi, ' [$1] ')
+    .replace(/<form\b[^>]*>/gi, (tag) => ` [form ${attr(tag, 'action') ?? ''} ${(attr(tag, 'method') ?? 'get').toLowerCase()}] `)
     .replace(/<[^>]*>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-/** One history step: a fixed prefix plus an optional observation body (already OBSERVATION_CAP-capped). */
+/** One attribute's value out of a single tag, quoted or not. */
+function attr(tag: string, name: string): string | undefined {
+  return new RegExp(`\\b${name}\\s*=\\s*["']?([^"'\\s>]*)`, 'i').exec(tag)?.[1];
+}
+
+/** Longest a single hidden field's value rides into the prompt. Session tokens are short;
+ * anything longer is a site putting a payload where a token belongs. */
+const HIDDEN_VALUE_CAP = 200;
+/** How many hidden fields one page contributes. A real form has a handful. */
+const MAX_HIDDEN_FIELDS = 20;
+
+/**
+ * The hidden `name=value` pairs of a page's forms, as one `[form: a=1, b=2]` line — or `''`
+ * when the page has none. These are the per-session tokens (`formhash`, `searchsubmit`, CSRF
+ * nonces) a POST search is rejected without, and they live only in attributes, so a plain tag
+ * strip is exactly what loses them.
+ */
+function hiddenFields(body: string): string {
+  const fields = new Map<string, string>();
+  for (const tag of body.match(/<input\b[^>]*>/gi) ?? []) {
+    if (!/\btype\s*=\s*["']?hidden/i.test(tag)) continue;
+    const name = attr(tag, 'name');
+    if (name === undefined || name === '' || fields.has(name)) continue;
+    fields.set(name, (attr(tag, 'value') ?? '').slice(0, HIDDEN_VALUE_CAP));
+  }
+  if (fields.size === 0) return '';
+  const shown = [...fields].slice(0, MAX_HIDDEN_FIELDS).map(([name, value]) => `${name}=${value}`);
+  return `[form: ${shown.join(', ')}]`;
+}
+
+/**
+ * A successful fetch as one observation: the form tokens first, then the page text, capped.
+ * The tokens lead because the cap cuts from the end, and a token the cap swallowed is a POST
+ * the next step cannot make.
+ */
+function observation(body: string): string {
+  const fields = hiddenFields(body);
+  const text = pageText(body);
+  return `${fields === '' ? '' : `${fields} `}${text}`.slice(0, OBSERVATION_CAP);
+}
+
+/** One history step: what the model did, why it said it was doing it, how the fetch ended,
+ * and the page it got back (already OBSERVATION_CAP-capped). */
 interface HistoryStep {
+  /** `<verb> <url>`, or a refusal/correction line that has no verb of its own. */
   prefix: string;
+  /** The model's own one-line reason for this step. It is the only part of a step that
+   * survives elision intact, which is what lets step twenty reuse a slug step three found. */
+  note?: string;
+  /** How the fetch ended: `-> OK: `, `-> FAILED`, `-> HTTP 403: ...`. */
+  result?: string;
   observation?: string;
 }
 
@@ -129,13 +188,14 @@ interface HistoryStep {
 function formatHistoryForPrompt(history: HistoryStep[]): string {
   return history
     .map((step, i) => {
-      if (step.observation === undefined) return step.prefix;
+      const head = `${step.prefix}${step.note !== undefined && step.note !== '' ? ` — ${step.note}` : ''}${step.result ?? ''}`;
+      if (step.observation === undefined) return head;
       const isLatest = i === history.length - 1;
       const obs =
         isLatest || step.observation.length <= ELIDED_OBSERVATION_CAP
           ? step.observation
           : `${step.observation.slice(0, ELIDED_OBSERVATION_CAP)}…[elided]`;
-      return `${step.prefix}${obs}`;
+      return `${head}${obs}`;
     })
     .join('\n');
 }
@@ -228,7 +288,7 @@ export async function runAgentLoop(input: {
     knowledge || '',
     hintBlock,
     'Choose one action per step:',
-    '- search: build a search URL and open it (GET)',
+    '- search: build a search URL and fetch it — GET, or POST with method/body/contentType when the site searches through a form',
     '- open: visit a result page (GET)',
     '- request: arbitrary GET/POST to a URL (set method; body/contentType/referer as needed, or empty string); use for API/protocol steps from the site notes — never for the archive file itself',
     '- download: fetch the archive file (terminal success; optional referer). Only download saves a file — never fetch the archive with request',
@@ -359,7 +419,7 @@ export async function runAgentLoop(input: {
       if (hop === 'continue') continue;
       if (res.blocked) throw new TierBlockedError(`download blocked at ${action.url}`);
       if (!res.ok || res.filePath === undefined) {
-        history.push({ prefix: `download ${action.url} -> FAILED` });
+        history.push({ prefix: `download ${action.url}`, note: action.note, result: ' -> FAILED' });
         continue;
       }
       return {
@@ -399,18 +459,25 @@ export async function runAgentLoop(input: {
       if (hop === 'stop') return { stop: { kind: 'refused', refusals }, steps: step + 1, listings: listings.size };
       if (hop === 'continue') continue;
       if (res.blocked) throw new TierBlockedError(`request blocked at ${action.url}`);
-      if (res.ok) {
-        history.push({
-          prefix: `request ${method} ${action.url} -> OK: `,
-          observation: (res.body ?? '').slice(0, OBSERVATION_CAP),
-        });
-      } else {
-        history.push({ prefix: `request ${method} ${action.url} -> ${httpFailure(res)}` });
-      }
+      history.push({
+        prefix: `request ${method} ${action.url}`,
+        note: action.note,
+        ...(res.ok ? { result: ' -> OK: ', observation: observation(res.body ?? '') } : { result: ` -> ${httpFailure(res)}` }),
+      });
       continue;
     }
 
-    const res = await tier.fetch(action.url);
+    // A search the site serves over POST is still a search: the verb is about what the step
+    // is for, not which HTTP method the site happens to want. `open` stays GET — it visits a
+    // page the model already has a URL for.
+    const post = action.action === 'search' && action.method === 'POST';
+    const verb = post ? 'search POST' : action.action;
+    const res = await tier.fetch(action.url, {
+      ...(post ? { method: 'POST' as const } : {}),
+      ...(post && action.body !== '' ? { body: action.body } : {}),
+      ...(post && action.contentType !== '' ? { contentType: action.contentType } : {}),
+      ...(referer !== undefined ? { referer } : {}),
+    });
     const hop = refuseHop(res);
     if (hop === 'stop') return { stop: { kind: 'refused', refusals }, steps: step + 1, listings: listings.size };
     if (hop === 'continue') continue;
@@ -419,14 +486,11 @@ export async function runAgentLoop(input: {
       lastSearchUrl = action.url;
       listings.add(createHash('sha256').update(pageText(res.body ?? '')).digest('hex'));
     }
-    if (res.ok) {
-      history.push({
-        prefix: `${action.action} ${action.url} -> OK: `,
-        observation: (res.body ?? '').slice(0, OBSERVATION_CAP),
-      });
-    } else {
-      history.push({ prefix: `${action.action} ${action.url} -> ${httpFailure(res)}` });
-    }
+    history.push({
+      prefix: `${verb} ${action.url}`,
+      note: action.note,
+      ...(res.ok ? { result: ' -> OK: ', observation: observation(res.body ?? '') } : { result: ` -> ${httpFailure(res)}` }),
+    });
   }
   return { stop: { kind: 'exhausted' }, steps: maxSteps, listings: listings.size };
 }

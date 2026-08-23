@@ -1192,7 +1192,7 @@ async function searchSiteRounds(
       // unchanged: the job fails and the runner retries. It does NOT raise unusable: the
       // job is about to fail, and this is not the moment to also ask a human to weigh in on
       // the site's fate.
-      await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess: false, today });
+      await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess: false, searchObserved: result.searchObserved, today });
       throw err;
     }
 
@@ -1203,7 +1203,7 @@ async function searchSiteRounds(
     // just proved it could), but the model's own verdict is the thing being reported to a
     // human, not second-guessed here.
     const reflection = worthReflectingOn(fresh, result)
-      ? await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, today })
+      ? await reflect({ ctx, job, site, transcript: result.transcript, verifiedSuccess, searchObserved: result.searchObserved, today })
       : null;
     if (reflection?.verdict === 'unusable') {
       raiseUnusable(ctx, job, site, reflection.reason, result.transcript);
