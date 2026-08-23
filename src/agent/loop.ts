@@ -23,8 +23,11 @@ const ELIDED_OBSERVATION_CAP = 1000;
  * documented on matchLlm.ts's schema. Every field is REQUIRED: dropping one from
  * `required` (via `.optional()` / `.default()`) is rejected by OpenAI strict mode.
  * Sentinels: `url` is '' for give_up; `method` is always GET|POST (GET unless the step
- * needs POST); `body`/`contentType`/`referer` are '' when absent; `because` is only read on
- * give_up. Loop code treats '' as none.
+ * needs POST); `body`/`contentType`/`referer` are '' when absent; `because` is '' on every
+ * action but give_up. Loop code treats '' as none. `because` carries the empty option for
+ * the same reason every other field does: a model that has learned '' means "not
+ * applicable" writes it here too, and an enum without it turned correct replies into
+ * malformed ones until the breaker ended the run.
  */
 export const AgentActionSchema = z.object({
   action: z.enum(['search', 'open', 'download', 'request', 'give_up']).describe('what to do next'),
@@ -36,8 +39,8 @@ export const AgentActionSchema = z.object({
   referer: z.string().describe('Referer header for request/download; empty string when none'),
   reason: z.string().describe('for give_up: one sentence on why; empty string otherwise'),
   because: z
-    .enum(['not-found', 'blocked', 'unsure'])
-    .describe('for give_up: which kind of stop this is (see the give_up bullet); ignored otherwise'),
+    .enum(['', 'not-found', 'blocked', 'unsure'])
+    .describe('empty unless action is give_up; then one of not-found / blocked / unsure'),
 });
 /**
  * What one attempt produced: why it stopped, how many LLM steps it spent, and the file when
@@ -368,7 +371,9 @@ export async function runAgentLoop(input: {
 
     if (action.action === 'give_up') {
       return {
-        stop: { kind: 'gave-up', because: action.because, reason: action.reason.trim() || NO_REASON },
+        // A give-up that left `because` empty said it could not tell — which is what
+        // `unsure` is for, and is truer than picking one of the other two for it.
+        stop: { kind: 'gave-up', because: action.because === '' ? 'unsure' : action.because, reason: action.reason.trim() || NO_REASON },
         steps: step + 1,
         listings: listings.size,
       };

