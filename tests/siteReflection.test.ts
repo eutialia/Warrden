@@ -355,7 +355,6 @@ describe('applyOps', () => {
     expect(dropped[0]!.hostile).toBe(true);
   });
 
-
   // C-01: `applyOps` used to validate `op.text` but store `stamped(op.text, today)` —
   // `withoutStamp` deletes every `(confirmed YYYY-MM-DD)` in the text before storage, so a
   // fake stamp buried in the middle is padding that pushes an op past every length-bounded
@@ -637,7 +636,10 @@ describe('reflectOnRun', () => {
     await reflect(reflectCtx({ llm }));
     const system = llm.calls[0]!.system!;
     expect(system).toContain('write `text` and `target` without it');
-    expect(system).toContain('`text` or `target` carrying a line break, a heading, or a further bullet marker is refused');
+    // Only `text` is checked for forgery — `target` is matched against the file, never
+    // stored — so the prompt must not promise a check the code does not run.
+    expect(system).toContain('`text` carrying a line break, a heading, or a further bullet marker is refused');
+    expect(system).not.toContain('`text` or `target` carrying');
   });
 
   it('tells the model a twice-confirmed how-to-search pitfall belongs in Search as a step', async () => {

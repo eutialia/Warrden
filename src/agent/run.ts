@@ -179,8 +179,8 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
  * all (disabled, in cooldown) is the caller's filter, not this function's: reaching here
  * means an attempt starts. Site-specific protocols live in
  * the site's knowledge file (injected into the loop prompt), not in code adapters. Returns
- * a `SiteRunResult` carrying the download (if any), the full transcript, and an outcome —
- * never throws (a broken site is a health event, not a job failure). The transcript lands
+ * a `SiteRunResult` carrying the download (if any), the full transcript, and the stop that
+ * ended it — never throws (a broken site is a health event, not a job failure). The transcript lands
  * in `subtitle_runs` and streams live as `subtitle.transcript` events, and is also handed
  * back to the caller so it can be replayed into reflection.
  */
@@ -229,10 +229,6 @@ export async function searchSite(
   // Every transcript entry this run produces, in order — handed back to the caller so
   // reflection (Task 6) sees the same steps that landed in subtitle_runs.
   const transcript: TranscriptEntry[] = [];
-  // Steps the last completed attempt spent, carried onto every result shape — including the
-  // failing ones, whose caller still has to tell a two-step give-up from a spent budget.
-  let stepsSpent = 0;
-
   /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
    * steps or by the runner's escalation handling. */
   const onTranscriptEvent = (entry: TranscriptEntry): void => {
@@ -318,8 +314,10 @@ export async function searchSite(
     let steps = 0;
     // Rungs that actually returned or threw — what the site-level events count.
     let rungsTried = 0;
-    // Rungs spent answering a give-up the agent could not back up. One is the allowance.
-    let softEscalations = 0;
+    // Whether the one rung a give-up the agent could not back up is allowed to buy has
+    // been spent. One is the whole allowance: a second would be paying chromium prices to
+    // re-read the same uncertainty.
+    let softRungSpent = false;
 
     // Without escalation the ladder is one rung tall: the site's remembered starting tier.
     const lastIdx = opts.escalate === false ? startIdx : TIER_ORDER.length - 1;
@@ -396,8 +394,8 @@ export async function searchSite(
           // cheap tier that renders nothing looks identical to a site with nothing on it.
           if (run.stop.because === 'blocked') continue;
           if (run.stop.because === 'not-found' && run.listings >= EVIDENCE_LISTINGS) break;
-          if (softEscalations >= 1) break;
-          softEscalations += 1;
+          if (softRungSpent) break;
+          softRungSpent = true;
           continue;
         }
 

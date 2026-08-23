@@ -180,8 +180,9 @@ function isAgentSection(section: string): section is KnowledgeSection {
   return (AGENT_SECTIONS as readonly string[]).includes(section);
 }
 
-/** Protocol sections — the ones a run has to have actually succeeded to write. `Pitfalls`
- * is deliberately not here: a failure is exactly the evidence a pitfall records. */
+/** Protocol sections — the ones a run has to have observed the site working to write: a
+ * download, or at least a search listing it got back. `Pitfalls` is deliberately not here:
+ * a failure is exactly the evidence a pitfall records. */
 const PROTOCOL_SECTIONS: readonly KnowledgeSection[] = ['Access', 'Search', 'Download'];
 
 /** Deep-enough copy for operation application: `sections` is rebuilt so the caller's
@@ -389,7 +390,7 @@ function buildSystemPrompt(input: {
     '- Pitfalls: what goes wrong and what to do about it.',
     '- Operator notes: written by a human, authoritative, and not yours to edit. No operation may target it.',
     '',
-    'Bullets are conditional rules: "IF <observable condition> THEN <action>." A conditional can be proved wrong on the next run; "the search is flaky" cannot. The file above renders each bullet with a leading `- `, which is not part of the rule: write `text` and `target` without it (one leading marker is stripped for you if you include it anyway). One rule per bullet, on a single line: `text` or `target` carrying a line break, a heading, or a further bullet marker is refused. Do not write the date yourself — every bullet you add or update is stamped `(confirmed ' +
+    'Bullets are conditional rules: "IF <observable condition> THEN <action>." A conditional can be proved wrong on the next run; "the search is flaky" cannot. The file above renders each bullet with a leading `- `, which is not part of the rule: write `text` and `target` without it (one leading marker is stripped for you if you include it anyway). One rule per bullet, on a single line: `text` carrying a line break, a heading, or a further bullet marker is refused. Do not write the date yourself — every bullet you add or update is stamped `(confirmed ' +
       today +
       ')` for you.',
     '',

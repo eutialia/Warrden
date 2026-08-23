@@ -1,5 +1,6 @@
 import type { AccessTier } from '../db/siteProfiles.js';
-import { isObjectParseFailure, LlmError } from '../llm/generator.js';
+import { isPermanentError } from '../jobs/errors.js';
+import { isObjectParseFailure } from '../llm/generator.js';
 import { errorMessage } from '../util/errors.js';
 
 /**
@@ -67,16 +68,13 @@ export function describeStop(stop: StopReason): string {
 /**
  * The stop a thrown error stands for. A reply that would not parse is `malformed` however it
  * was wrapped — that is the model answering the wrong thing, not the call failing — and an
- * `LlmError` carries its own permanence through so the job runner can still fail terminally
- * on something that will fail identically on every retry.
+ * error that marked itself permanent carries that through, so the job runner can fail
+ * terminally on something that will fail identically on every retry without asking the
+ * error a second question the stop already answers.
  */
 export function stopFromError(err: unknown): StopReason {
   if (isObjectParseFailure(err)) return { kind: 'malformed', failures: 1 };
-  return {
-    kind: 'error',
-    message: errorMessage(err),
-    permanent: err instanceof LlmError ? err.permanent : false,
-  };
+  return { kind: 'error', message: errorMessage(err), permanent: isPermanentError(err) };
 }
 
 /**

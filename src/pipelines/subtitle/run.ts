@@ -1240,7 +1240,7 @@ function worthReflectingOn(fresh: boolean, result: SiteRunResult): boolean {
 
 /** The stops that are about the site rather than the calendar: a round that broke, went
  * malformed or kept aiming at refused addresses has something to teach however short it was. */
-const BROKEN_STOPS: readonly string[] = ['error', 'malformed', 'refused'];
+const BROKEN_STOPS: readonly StopReason['kind'][] = ['error', 'malformed', 'refused'];
 
 /** Below this many steps a fruitless fresh-gap round is just "the site had nothing listed". */
 const MIN_REFLECTABLE_STEPS = 3;
