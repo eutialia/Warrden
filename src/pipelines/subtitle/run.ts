@@ -525,6 +525,26 @@ function wantedCandidates(ctx: AppContext, job: JobRow, row: ArchiveCacheRow): C
   return wanted;
 }
 
+/**
+ * Drops candidates whose file `quarantine()` already moved out of the extraction dir on an
+ * earlier run against this same cached row (or that vanished for any other reason). Runs
+ * before routing so a file that's already gone never reaches the paid `archive-map` call
+ * only to be dropped by `driftAndPlace`'s own (now redundant) disk check.
+ */
+function onDisk(ctx: AppContext, job: JobRow, row: ArchiveCacheRow, candidates: Candidate[]): Candidate[] {
+  const alive = candidates.filter((f) => existsSync(f.path));
+  const gone = candidates.length - alive.length;
+  if (gone > 0) {
+    ctx.trace.event({
+      jobId: job.id,
+      kind: 'subtitle.filter',
+      summary: `skipped ${gone} file(s) no longer on disk`,
+      payload: () => ({ archive: row.path, gone }),
+    });
+  }
+  return alive;
+}
+
 /** Whether this candidate is worth trying against this episode: its language has to be one
  * the episode still lacks. `wantedCandidates` has already checked it against the configured
  * set; this narrows to what THIS episode lacks (a zh-Hans file is worth nothing to an episode
@@ -555,7 +575,7 @@ async function matchArchiveRow(
   state: RunState,
   site: string | undefined,
 ): Promise<{ resolved: number[]; placedCount: number }> {
-  const candidates = wantedCandidates(ctx, job, row);
+  const candidates = onDisk(ctx, job, row, wantedCandidates(ctx, job, row));
   const entryByPath = new Map(candidates.map((f) => [f.path, f]));
   const resolved: number[] = [];
   let placedCount = 0;
@@ -741,8 +761,9 @@ function reportBlocked(ctx: AppContext, job: JobRow, block: PlaceBlock, sourcePa
  * `undefined` when nothing was placed.
  *
  * The cheap gates run first and in this order, because everything after them costs real
- * time: a language nobody asked for, a candidate that vanished, a destination already
- * spoken for. Only then the drift gate, in the order the design calls for: no reference ->
+ * time: a language nobody asked for, a destination already spoken for (a vanished candidate
+ * is already filtered out by `onDisk` before this is ever called). Only then the drift
+ * gate, in the order the design calls for: no reference ->
  * place unverified; in-sync -> place; drifted -> resyncAlass then re-assess -> place or try
  * resyncFfsubsync -> re-assess -> place or quarantine; unscorable -> quarantine.
  *
@@ -762,10 +783,6 @@ async function driftAndPlace(
   // A file in a language this episode doesn't need is the common case in any pack that
   // carries more than one — no event, not even a trace line of its own.
   if (!wantedFor(entry, t)) return undefined;
-
-  // A candidate that no longer exists (already quarantined by an earlier run, or the cache
-  // row is stale) is not a failure worth reporting — just skip it.
-  if (!existsSync(entry.path)) return undefined;
 
   const targetPath = destinationFor(t.videoPath, entry);
   const blocked = placeBlocked(state.placedFiles, targetPath, entry.path);

@@ -320,6 +320,38 @@ describe('runSubtitleJob', () => {
     });
   });
 
+  it('cache row entry gone from disk (quarantined by an earlier run) -> filtered before routing, no archive-map LLM call', async () => {
+    const fx = subtitleFixture();
+    const extractDir = tmpDir();
+    const keptPath = join(extractDir, '0-Show - S01E05.chs.ass');
+    const quarantinedPath = join(extractDir, '1-Show - S01E06.chs.ass');
+    writeFileSync(keptPath, SRT);
+    writeFileSync(quarantinedPath, SRT);
+    const files = entriesForFiles([keptPath, quarantinedPath], extractDir);
+    rmSync(quarantinedPath); // an earlier run's quarantine() moved it out from under the row
+    new ArchiveCache(fx.ctx.db).upsert({
+      arrInstance: fx.arrInstance,
+      targetKind: 'series',
+      targetId: fx.targetId,
+      sourceUrl: 'https://example.test/pack.zip',
+      path: extractDir,
+      files,
+    });
+    const llm = new FakeGenerator([]);
+    fx.ctx.llm = llm;
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, NO_SITES);
+
+    expect(llm.calls).toHaveLength(0);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(true);
+
+    const rows = new TraceEntries(fx.ctx.db).listByJob(job.id);
+    const filtered = rows.filter((r) => r.kind === 'subtitle.filter' && r.summary.includes('no longer on disk'));
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.summary).toContain('1');
+  });
+
   /** A deps stub that hands back a fresh zip each call under the given url, named the way the
    * agent loop names a download: run-scoped and timestamped, so the SAME url yields a DIFFERENT
    * local basename every run. That difference is the whole point: cache identity has to come
