@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { create as tarCreate } from 'tar';
@@ -46,7 +46,7 @@ describe('isSupportedArchive', () => {
   it.each([
     ['a.zip', true], ['a.ZIP', true],
     ['a.tar', true], ['a.tar.gz', true], ['a.tgz', true],
-    // rar/7z are attempted via 7z/unrar when present
+    // rar/7z are attempted via unrar/7z when present
     ['a.rar', true], ['a.7z', true],
     ['a.ass', false], ['a.mkv', false], ['a.zipx', false],
   ])('%s -> %s', (name, expected) => expect(isSupportedArchive(name)).toBe(expected));
@@ -105,7 +105,7 @@ describe('extractArchive', () => {
     expect(isSevenZipFamily('a.rar')).toBe(true);
     expect(isSevenZipFamily('a.7z')).toBe(true);
     // A non-archive path that only looks like rar: extract still attempts external tool
-    // and surfaces UnsupportedArchiveError when 7z/unrar cannot open it (or are missing).
+    // and surfaces UnsupportedArchiveError when unrar/7z cannot open it (or are missing).
     const bogus = join(tmpDir(), 'empty.rar');
     writeFileSync(bogus, 'not-a-real-rar');
     await expect(extractArchive(bogus, tmpDir())).rejects.toBeInstanceOf(UnsupportedArchiveError);
@@ -196,6 +196,110 @@ describe('extractArchive', () => {
   it('throws UnsupportedArchiveError for missing or unreadable rar/7z', async () => {
     await expect(extractArchive('/x/pack.rar', tmpDir())).rejects.toBeInstanceOf(UnsupportedArchiveError);
     await expect(extractArchive('/x/pack.7z', tmpDir())).rejects.toBeInstanceOf(UnsupportedArchiveError);
+  });
+});
+
+/**
+ * Routing tests for the rar/7z path: one decoder per format, no fallback. Real rar/7z
+ * fixtures would need a real archiver on the machine running the suite, so the binaries
+ * are shell stubs instead — which tool runs (and that no other one is consulted) is
+ * entirely observable through exit codes and what lands in the destination dir.
+ */
+describe('external extractor routing', () => {
+  /** Exits 1 after printing `reason` on stderr, like p7zip's "Unsupported Method". */
+  function failingStub(reason: string): string {
+    return `echo "${reason}" >&2\nexit 1`;
+  }
+
+  /** unrar's shape: `x -o+ <archive> <dest>/`, the destination as the last argument. */
+  function unrarStub(fileName: string): string {
+    return [
+      'for dest in "$@"; do :; done',
+      '[ -n "$dest" ] || exit 2',
+      'mkdir -p "$dest"',
+      `printf 'dialogue' > "$dest/${fileName}"`,
+    ].join('\n');
+  }
+
+  /** 7z's shape: the destination is glued onto `-o`. */
+  function sevenZipStub(fileName: string): string {
+    return [
+      'dest=""',
+      'for arg in "$@"; do',
+      '  case "$arg" in -o*) dest="${arg#-o}";; esac',
+      'done',
+      '[ -n "$dest" ] || exit 2',
+      'mkdir -p "$dest"',
+      `printf 'dialogue' > "$dest/${fileName}"`,
+    ].join('\n');
+  }
+
+  /**
+   * Writes `stubs` as executable shell scripts into a fresh dir and makes that dir the
+   * entire PATH for `fn` — not a prefix, so a real `unrar`/`7z` installed on the machine
+   * running the suite can never stand in for a binary the test means to be absent. Every
+   * stub answers `--help` with exit 0, which is what `binAvailable` probes first.
+   */
+  async function withStubBins(stubs: Record<string, string>, fn: () => Promise<void>): Promise<void> {
+    const dir = tmpDir();
+    for (const [name, body] of Object.entries(stubs)) {
+      const path = join(dir, name);
+      writeFileSync(path, `#!/bin/sh\nif [ "$1" = "--help" ]; then exit 0; fi\n${body}\n`);
+      chmodSync(path, 0o755);
+    }
+    const realPath = process.env.PATH;
+    process.env.PATH = dir;
+    try {
+      await fn();
+    } finally {
+      process.env.PATH = realPath;
+    }
+  }
+
+  /** A file with an archive extension; the stubs never read it, only the chain's routing does. */
+  function fakeArchive(name: string): string {
+    const path = join(tmpDir(), name);
+    writeFileSync(path, 'bytes');
+    return path;
+  }
+
+  it('a .rar goes to unrar, and nothing else is consulted', async () => {
+    // A working 7z sits on PATH writing a different file; only unrar's output may appear.
+    await withStubBins({ unrar: unrarStub('Show - 01.ass'), '7z': sevenZipStub('WRONG.ass') }, async () => {
+      const dest = tmpDir();
+      expect(await extractArchive(fakeArchive('pack.rar'), dest)).toEqual([join(dest, 'Show - 01.ass')]);
+    });
+  });
+
+  it('a .7z goes to 7z, and nothing else is consulted', async () => {
+    await withStubBins({ '7z': sevenZipStub('Show - 02.ass'), unrar: unrarStub('WRONG.ass') }, async () => {
+      const dest = tmpDir();
+      expect(await extractArchive(fakeArchive('pack.7z'), dest)).toEqual([join(dest, 'Show - 02.ass')]);
+    });
+  });
+
+  it.each([
+    ['pack.rar', 'unrar', { '7z': sevenZipStub('WRONG.ass') }],
+    ['pack.7z', '7z', { unrar: unrarStub('WRONG.ass') }],
+  ])("%s's own decoder failing is final — no second opinion from the other tool", async (name, bin, others) => {
+    await withStubBins({ ...others, [bin]: failingStub('Unsupported Method') }, async () => {
+      const dest = tmpDir();
+      const err = await extractArchive(fakeArchive(name), dest).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnsupportedArchiveError);
+      expect((err as Error).message).toContain(`${bin} could not open ${name}: Unsupported Method`);
+      expect(existsSync(join(dest, 'WRONG.ass'))).toBe(false);
+    });
+  });
+
+  it.each([
+    ['pack.rar', 'unrar', { '7z': sevenZipStub('WRONG.ass') }],
+    ['pack.7z', '7z', { unrar: unrarStub('WRONG.ass') }],
+  ])('names the one tool %s needs when it is not installed', async (name, bin, others) => {
+    await withStubBins(others, async () => {
+      const err = await extractArchive(fakeArchive(name), tmpDir()).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnsupportedArchiveError);
+      expect((err as Error).message).toContain(`requires ${bin} on PATH`);
+    });
   });
 });
 

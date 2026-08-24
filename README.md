@@ -178,7 +178,7 @@ Whatever the pipeline can't close (no survivor after every site, or a quarantine
 candidate) raises an Attention item.
 
 The pipeline shells out to `ffprobe`/`ffmpeg` (effectively required), `alass` and
-`ffsubsync` (drift resync, optional), `7z`/`unrar` (rar/7z archives), and a headless
+`ffsubsync` (drift resync, optional), `unrar` (rar archives), `7z` (7z archives), and a headless
 chromium for the browser tier. The container image bundles all of them; a bare checkout
 degrades gracefully when one is missing rather than failing to boot.
 

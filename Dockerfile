@@ -65,8 +65,11 @@ COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 #     `alass-cli` binary is copied to the `alass` name the runtime execs.
 #   - chromium: playwright's `--with-deps` installer pulls the glibc build the runtime
 #     needs along with its system libraries.
-#   - unrar: rarlab's decoder from Debian non-free. p7zip rejects the newer RAR methods
-#     fansub packs ship with, so the pipeline prefers this one for .rar (archives.ts).
+#   - unrar: the .rar decoder (archives.ts routes every rar here, nothing else), from
+#     Debian non-free — the sed below enables that component just for it. It is the only
+#     tool that opens the RAR5 solid archives fansub packs ship as: measured on a real
+#     subhd pack, p7zip stops at "Unsupported Method" and the free unar truncates most
+#     entries, so the non-free component is the price of rars that actually extract.
 RUN sed -i 's/Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \

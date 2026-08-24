@@ -26,7 +26,7 @@ export function isLooseSubtitleFile(filePath: string): boolean {
   return SUBTITLE_EXTENSIONS.includes(extname(filePath).toLowerCase());
 }
 
-/** Whether this path looks like an archive we will *try* to extract (native or via 7z/unrar). */
+/** Whether this path looks like an archive we will *try* to extract (native or via unrar/7z). */
 export function isSupportedArchive(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   return (
@@ -103,38 +103,44 @@ async function binAvailable(bin: string): Promise<boolean> {
   }
 }
 
+/** The one line worth reporting from a failed run: these tools state the reason on the
+ * first line of stderr ("Unsupported Method"), which the exec error buries under its own
+ * "Command failed: <the whole command line>". */
+function failureLine(err: unknown): string {
+  const stderr = err && typeof err === 'object' && typeof (err as { stderr?: unknown }).stderr === 'string'
+    ? (err as { stderr: string }).stderr
+    : '';
+  const fromStderr = stderr.split('\n').map((line) => line.trim()).find((line) => line.length > 0);
+  if (fromStderr !== undefined) return fromStderr;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.split('\n')[0] ?? msg;
+}
+
 /**
- * Extracts a rar/7z archive with whichever external binary is on PATH. For .rar, rarlab's
- * `unrar` goes first: p7zip rejects the newer RAR methods fansub packs ship with, so `7z`
- * is only the fallback there. Everything else goes to `7z`.
- * Throws UnsupportedArchiveError when neither binary is installed, or the one that ran
- * rejected the archive (corrupt, or not actually rar/7z); callers treat that like skip.
+ * One decoder per format, no fallback: rarlab's `unrar` for .rar and `7z` for .7z. For
+ * the RAR5 solid archives fansub groups actually ship, unrar is the only tool that works
+ * — measured on a real subhd pack, p7zip stops at "Unsupported Method" and unar 1.10.8
+ * truncates 81 of 100 entries — so a fallback isn't a second opinion, it's a slower way
+ * to fail (or worse, a pile of half-written .ass files). An archive its own decoder
+ * rejects is corrupt, not mis-routed. Throws UnsupportedArchiveError either way; callers
+ * treat it like skip. unrar needs a UTF-8 locale or CJK entry names collapse into
+ * colliding `?` runs (the Dockerfile sets one).
  */
 async function extractWithExternalTool(archivePath: string, destDir: string): Promise<void> {
-  const lower = archivePath.toLowerCase();
-  const run = async (bin: string, args: string[]): Promise<void> => {
-    try {
-      await execFileAsync(bin, args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new UnsupportedArchiveError(archivePath, `${bin} failed for ${basename(archivePath)}: ${msg}`);
-    }
-  };
-  // rarlab's unrar goes first for .rar: p7zip rejects the newer RAR methods fansub packs
-  // ship with ("Unsupported Method"), so 7z is only the fallback when unrar is absent.
-  const haveUnrar = lower.endsWith('.rar') && (await binAvailable('unrar'));
-  if (haveUnrar) {
-    await run('unrar', ['x', '-o+', archivePath, destDir + '/']);
-    return;
+  const isRar = archivePath.toLowerCase().endsWith('.rar');
+  const bin = isRar ? 'unrar' : '7z';
+  const name = basename(archivePath);
+  if (!(await binAvailable(bin))) {
+    throw new UnsupportedArchiveError(archivePath, `${isRar ? 'rar' : '7z'} archive requires ${bin} on PATH: ${name}`);
   }
-  if (await binAvailable('7z')) {
-    await run('7z', ['x', archivePath, `-o${destDir}`, '-y', '-bd']);
-    return;
+  const args = isRar
+    ? ['x', '-o+', archivePath, `${destDir}/`]
+    : ['x', archivePath, `-o${destDir}`, '-y', '-bd'];
+  try {
+    await execFileAsync(bin, args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+  } catch (err) {
+    throw new UnsupportedArchiveError(archivePath, `${bin} could not open ${name}: ${failureLine(err)}`);
   }
-  throw new UnsupportedArchiveError(
-    archivePath,
-    `rar/7z archive requires 7z or unrar on PATH: ${basename(archivePath)}`,
-  );
 }
 
 /**
