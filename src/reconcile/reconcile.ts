@@ -3,6 +3,7 @@ import { instanceKind } from '../config/instances.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectRow } from '../db/managedObjects.js';
 import { SyncState } from '../db/syncState.js';
+import { eventEnvelope } from '../events/envelope.js';
 import type { TargetKind } from '../jobs/queue.js';
 import { traceTrigger } from '../trace/tracer.js';
 import { foreignProfilesCarryingTag, isWarrdenProfile, isWarrdenTag } from '../managed/ownership.js';
@@ -151,6 +152,19 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
         summary: `reconcile scan (missed webhook add on "${name}")`,
         payload: () => ({ instance: name, kind: r.kind, targetId: r.id, title: r.title }),
       });
+      // A reconcile-triggered job used to start with an empty event log — the run could
+      // not say why it existed, while a webhook-triggered one opened with
+      // `webhook.received`. Every job now opens on the same kind of row.
+      ctx.events.append({
+        kind: 'trigger.reconcile',
+        jobId: result.id ?? undefined,
+        message: `Reconcile scan on "${name}" (missed webhook add)`,
+        data: eventEnvelope({
+          scope: 'trigger',
+          action: 'reconcile',
+          facts: { source: RECONCILE_SOURCE, instance: name, title: r.title, pipeline: 'acquire' },
+        }),
+      });
       enqueuedIds.push(r.id);
     }
     seenIds.add(r.id);
@@ -273,6 +287,16 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
       kind: 'trigger.reconcile',
       summary: `reconcile scan (missed import history on "${name}")`,
       payload: () => ({ instance: name, kind: target.kind, targetId: target.id, historyRecordId: r.id }),
+    });
+    ctx.events.append({
+      kind: 'trigger.reconcile',
+      jobId: result.id ?? undefined,
+      message: `Reconcile scan on "${name}" (missed import history)`,
+      data: eventEnvelope({
+        scope: 'trigger',
+        action: 'reconcile',
+        facts: { source: RECONCILE_SOURCE, instance: name, pipeline: 'ingest' },
+      }),
     });
     enqueuedTargets.push(key);
   }

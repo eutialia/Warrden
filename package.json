@@ -7,8 +7,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "npm run test:server && npm run test:web",
+    "test:server": "vitest run",
+    "test:web": "npm --prefix web run test",
     "typecheck": "tsc -p tsconfig.test.json",
+    "migrate:events": "tsx src/db/migrateEventEnvelopesCli.ts",
     "dev": "tsx watch src/index.ts",
     "dev:web": "npm --prefix web run dev",
     "dev:all": "node scripts/dev.mjs",

@@ -72,7 +72,7 @@ describe('AttentionItems', () => {
           kind: 'ingest.rescue-proposed',
           message: 'first proposal',
           jobId: 10,
-          data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a'], reasoning: 'r1' },
+          data: { instance: 'sonarr', targetKind: 'series', targetId: 42, facts: { reason: 'r1' }, accept: { action: 'bundle-import', instance: 'sonarr', files: ['a'] } },
         });
 
         vi.setSystemTime(2_000);
@@ -80,7 +80,7 @@ describe('AttentionItems', () => {
           kind: 'ingest.rescue-proposed',
           message: 'second proposal',
           jobId: 11, // a different job re-triggered the same rescue
-          data: { action: 'bundle-import', instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a', 'b'], reasoning: 'r2' },
+          data: { instance: 'sonarr', targetKind: 'series', targetId: 42, facts: { reason: 'r2' }, accept: { action: 'bundle-import', instance: 'sonarr', files: ['a', 'b'] } },
         });
 
         expect(second.id).toBe(first.id);
@@ -89,7 +89,13 @@ describe('AttentionItems', () => {
           ts: 2_000,
           message: 'second proposal',
           job_id: 11,
-          data: { instance: 'sonarr', targetKind: 'series', targetId: 42, files: ['a', 'b'], reasoning: 'r2' },
+          data: {
+            instance: 'sonarr',
+            targetKind: 'series',
+            targetId: 42,
+            facts: { reason: 'r2' },
+            accept: { action: 'bundle-import', instance: 'sonarr', files: ['a', 'b'] },
+          },
         });
       });
     });

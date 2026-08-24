@@ -143,6 +143,18 @@ const AcceptFileSchema = z
 // Exported so tests can run a producer's actual emitted `ingest.rescue-proposed` payload
 // straight through this exact schema — a shared fixture guards against DRIFT between the
 // two shapes, but only running the real thing through the real schema catches it for sure.
+/**
+ * Where an attention item keeps the payload its accept re-executes.
+ *
+ * Nested under `accept` rather than spread across `data`'s top level because `data` now
+ * carries the event envelope (`src/events/envelope.ts`), whose own `action` field would
+ * otherwise collide with these payloads' `action` discriminator — and silently, since a
+ * `safeParse` failure reads exactly like "this item proposes nothing".
+ */
+function acceptPayload(data: Record<string, unknown>): unknown {
+  return data.accept;
+}
+
 export const AcceptDataSchema = z.object({
   action: z.literal('bundle-import'),
   instance: z.string(),
@@ -617,7 +629,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       // and failCount, so the site gets a clean retry rather than sitting in cooldown from
       // whatever run raised the verdict.
       if (item.kind === 'subtitle.site-unusable') {
-        const disableSite = DisableSiteSchema.safeParse(item.data);
+        const disableSite = DisableSiteSchema.safeParse(acceptPayload(item.data));
         if (disableSite.success) {
           const profiles = new SiteProfiles(db);
           profiles.upsert({ baseUrl: disableSite.data.baseUrl });
@@ -724,7 +736,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // A site-unusable item's accept is a second shape this same route honours, rather
         // than a second route: "resolve this attention item by doing what it proposes" is
         // one action regardless of which proposal it is.
-        const disableSite = DisableSiteSchema.safeParse(item.data);
+        const disableSite = DisableSiteSchema.safeParse(acceptPayload(item.data));
         if (disableSite.success) {
           const { baseUrl, reason } = disableSite.data;
           const profiles = new SiteProfiles(db);
@@ -741,7 +753,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
         // Accepting a release the pick model vetoed: the operator overrules the veto and
         // grabs the top candidate it was offered.
-        const forceGrab = ForceGrabSchema.safeParse(item.data);
+        const forceGrab = ForceGrabSchema.safeParse(acceptPayload(item.data));
         if (forceGrab.success) {
           const client = requireClients(ctx).get(forceGrab.data.instance);
           if (!client) return c.json({ error: `unknown arr instance "${forceGrab.data.instance}"` }, 400);
@@ -779,7 +791,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // Only ever re-executes exactly the `bundle-import` shape `runIngestJob`'s rescue
         // stage itself proposed — validated before the client is even looked up, so a
         // malformed payload never gets as far as touching the arr.
-        const parsed = AcceptDataSchema.safeParse(item.data);
+        const parsed = AcceptDataSchema.safeParse(acceptPayload(item.data));
         if (!parsed.success) return c.json({ error: 'malformed accept data', issues: parsed.error.issues }, 400);
         const client = requireClients(ctx).get(parsed.data.instance);
         if (!client) return c.json({ error: `unknown arr instance "${parsed.data.instance}"` }, 400);

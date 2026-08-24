@@ -1153,7 +1153,12 @@ describe('runSubtitleJob', () => {
     });
 
     const skip = findEvent(fx.ctx.events.list(), 'agent.stop')!;
-    expect(skip.data).toMatchObject({ site: 'acg.rip', stop: { kind: 'skipped', why } });
+    expect(skip.data).toMatchObject({
+      scope: 'subtitle',
+      action: 'visit',
+      facts: { site: 'acg.rip', stop: 'skipped', outcome: why },
+      verdict: { tone: 'neutral' },
+    });
   });
 
   it('searches a site whose failures were reset even though its last failure is recent', async () => {
@@ -1281,7 +1286,7 @@ describe('runSubtitleJob', () => {
 
     const items = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.site-unusable');
     expect(items).toHaveLength(1);
-    expect(items[0]!.data.reason).toContain('Cloudflare');
+    expect((items[0]!.data.facts as { reason: string }).reason).toContain('Cloudflare');
     expect(JSON.stringify(items[0]!.data)).toContain('403');
   });
 
@@ -1303,7 +1308,7 @@ describe('runSubtitleJob', () => {
 
     const items = new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.site-unusable');
     expect(items).toHaveLength(1);
-    const reason = items[0]!.data.reason as string;
+    const reason = (items[0]!.data.facts as { reason: string }).reason;
     expect(reason.length).toBe(300);
     expect(reason).toBe(longReason.slice(0, 300));
     expect((items[0]!.message as string).length).toBeLessThan(longReason.length);

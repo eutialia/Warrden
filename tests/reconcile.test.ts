@@ -96,6 +96,17 @@ describe('reconcile', () => {
 
     const event = findEvent(ctx.events.list(), 'reconcile.missed-adds')!;
     expect(event.data).toMatchObject({ count: 1, ids: [3], alreadyHandled: 1 });
+
+    // The enqueued job owns a trigger event of its own. Before this, a reconcile-triggered
+    // run opened with an empty log and could not say why it existed, while a
+    // webhook-triggered one opened with `webhook.received`.
+    const enqueued = ctx.queue.list().find((j) => j.target_id === 3)!;
+    const trigger = ctx.events.list().find((e) => e.kind === 'trigger.reconcile' && e.job_id === enqueued.id)!;
+    expect(trigger.data).toMatchObject({
+      scope: 'trigger',
+      action: 'reconcile',
+      facts: { source: 'reconcile', instance: 'sonarr', pipeline: 'acquire' },
+    });
   });
 
   it('a gc() failure that escapes its own per-instance handling is caught as reconcile.gc-failed-global, and reconcile() still resolves', async () => {
@@ -476,6 +487,10 @@ describe('reconcile', () => {
         const event = findEvent(ctx.events.list(), 'reconcile.missed-imports');
         expect(event!.data).toMatchObject({ instance: arrName, targets: [`${kind}:2`, `${kind}:1`] });
         expect(event!.message).toContain('2');
+
+        const triggers = ctx.events.list().filter((e) => e.kind === 'trigger.reconcile');
+        expect(triggers.map((e) => e.job_id).sort()).toEqual(jobs.map((j) => j.id).sort());
+        expect(triggers[0]!.data).toMatchObject({ scope: 'trigger', action: 'reconcile', facts: { source: 'reconcile', pipeline: 'ingest' } });
       },
     );
 

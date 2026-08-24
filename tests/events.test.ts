@@ -204,17 +204,37 @@ describe('EventLog.listByJob', () => {
   it('parses the data column, matching list()', () => {
     const events = new EventLog(freshDb());
     events.append({ kind: 'a.one', jobId: 1, message: 'm', data: { counts: { missing: 0 } } });
-    expect(events.listByJob(1)[0]!.data).toEqual({ counts: { missing: 0 } });
+    // The kind's own `scope.action` split fills the envelope an emitter did not build, and
+    // the counts it already carried are lifted into facts under the same name.
+    expect(events.listByJob(1)[0]!.data).toEqual({
+      counts: { missing: 0 },
+      scope: 'a',
+      action: 'one',
+      facts: { counts: { missing: 0 } },
+    });
   });
 
-  it('caps at 100 by default, oldest first, and honours a smaller limit', () => {
+  it('caps at 500 by default, oldest first, and honours a smaller limit', () => {
     const events = new EventLog(freshDb());
-    for (let i = 0; i < 101; i++) {
+    for (let i = 0; i < 501; i++) {
       events.append({ kind: 'job.tick', jobId: 1, message: String(i) });
     }
 
-    expect(events.listByJob(1).map((r) => r.message)).toEqual(Array.from({ length: 100 }, (_, i) => String(i)));
+    expect(events.listByJob(1).map((r) => r.message)).toEqual(Array.from({ length: 500 }, (_, i) => String(i)));
     expect(events.listByJob(1, { limit: 2 }).map((r) => r.message)).toEqual(['0', '1']);
+  });
+
+  it('says so out loud when it hands back a truncated window rather than a whole run', () => {
+    const events = new EventLog(freshDb());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (let i = 0; i < 3; i++) events.append({ kind: 'job.tick', jobId: 1, message: String(i) });
+
+    events.listByJob(1, { limit: 3 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('truncated job #1 at 3 events'));
+
+    warn.mockClear();
+    events.listByJob(1, { limit: 4 });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -222,7 +242,7 @@ describe('EventLog.listByJobKinds', () => {
   it("returns only the named kinds for that job, oldest first, past listByJob's cap", () => {
     const events = new EventLog(freshDb());
     events.append({ kind: 'subtitle.search-scoped', jobId: 1, message: 'scoped' });
-    for (let i = 0; i < 200; i++) events.append({ kind: 'subtitle.transcript', jobId: 1, message: String(i) });
+    for (let i = 0; i < 600; i++) events.append({ kind: 'subtitle.transcript', jobId: 1, message: String(i) });
     events.append({ kind: 'agent.stop', jobId: 1, message: 'round 1/1' });
     events.append({ kind: 'agent.stop', jobId: 2, message: 'other job' });
 
@@ -242,6 +262,6 @@ describe('EventLog.listByJobKinds', () => {
   it('parses the data column', () => {
     const events = new EventLog(freshDb());
     events.append({ kind: 'agent.stop', jobId: 1, message: 'm', data: { round: 2 } });
-    expect(events.listByJobKinds(1, ['agent.stop'])[0]!.data).toEqual({ round: 2 });
+    expect(events.listByJobKinds(1, ['agent.stop'])[0]!.data).toEqual({ round: 2, scope: 'agent', action: 'stop' });
   });
 });

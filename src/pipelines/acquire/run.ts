@@ -3,6 +3,7 @@ import { traceArrClient } from '../../arr/traced.js';
 import type { AppContext } from '../../context.js';
 import { AcquireRecords, type AcquireStatus } from '../../db/acquireRecords.js';
 import { AttentionItems } from '../../db/attention.js';
+import { eventEnvelope } from '../../events/envelope.js';
 import { targetEventData } from '../../events/target.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { resolvePayloadTitle } from '../targetTitle.js';
@@ -25,6 +26,8 @@ interface AttemptResult {
   reasoning?: string;
   pickedTitle?: string;
   pickedFullSeason?: boolean;
+  /** The picked release as normalized facts, for the `acquire.pick` event. */
+  picked?: { title?: string; indexer?: string; quality?: string; type?: 'pack' | 'multi' | 'single' };
   /** The candidate a human can grab anyway over the model's veto: the top of the eligible
    * set the model was shown. Only ever set on `'none-viable'` for a season whose shape the
    * host claimed (complete/airing); elsewhere a veto is just a veto. */
@@ -39,6 +42,11 @@ interface RecordOutcomeInput {
   releaseGroup?: string | null;
   reasoning?: string;
   candidates: object;
+  /** What this record concludes about, for the `acquire.pick` event that goes with it. */
+  label: string;
+  seasonNumber?: number;
+  /** The release, when one was picked. Absent on every non-grab outcome. */
+  picked?: { title?: string; indexer?: string; quality?: string; type?: 'pack' | 'multi' | 'single' };
 }
 
 /**
@@ -145,7 +153,7 @@ async function runMovieAcquire(
       kind: 'acquire.skip-already-grabbed',
       jobId: job.id,
       message: `Skipped re-grab for "${title}" — a previous run of this job already grabbed a release`,
-      data: targetEventData(job),
+      data: eventEnvelope({ scope: 'acquire', action: 'skip-already-grabbed', facts: { title } }, targetEventData(job)),
     });
     return;
   }
@@ -157,6 +165,7 @@ async function runMovieAcquire(
     recordAlreadySatisfied(ctx, job, {
       message: `Nothing to grab for "${title}": the file is already in place`,
       candidates: { kept: [], dropped: [] },
+      label: title,
     });
     return;
   }
@@ -169,6 +178,7 @@ async function runMovieAcquire(
       status: result.status,
       reasoning: result.reasoning,
       candidates: { kept: result.kept, dropped: result.dropped },
+      label: title,
     });
     appendNonGrabAttentionEvent(ctx, job, title, result);
     return;
@@ -181,14 +191,10 @@ async function runMovieAcquire(
       releaseGroup: result.releaseGroup,
       reasoning: result.reasoning,
       candidates: { kept: result.kept, dropped: result.dropped },
+      label: title,
+      picked: result.picked,
     });
     settleSeasonAttention(ctx, job);
-    ctx.events.append({
-      kind: 'acquire.grabbed',
-      jobId: job.id,
-      message: `Grabbed "${result.pickedTitle}" for "${title}"`,
-      data: targetEventData(job, { guid: result.pickedGuid, releaseGroup: result.releaseGroup }),
-    });
   } catch (err) {
     appendRecordFailedEvent(ctx, job, title, result.pickedTitle, err);
   }
@@ -204,13 +210,16 @@ async function runSeriesAcquire(
   // Season 0 is Sonarr's convention for "Specials" — never auto-acquired.
   const monitoredSeasons = seasons.filter((s) => s.monitored && s.seasonNumber > 0);
   if (monitoredSeasons.length === 0) {
-    recordOutcome(ctx, job, { status: 'no-candidates', candidates: { kept: [], dropped: [] } });
+    recordOutcome(ctx, job, { status: 'no-candidates', candidates: { kept: [], dropped: [] }, label: title });
     ctx.events.append({
       kind: 'acquire.no-candidates',
       level: 'attention',
       jobId: job.id,
       message: `Nothing to grab for "${title}" — no monitored seasons (specials alone don't count)`,
-      data: targetEventData(job, { title }),
+      data: eventEnvelope(
+        { scope: 'acquire', action: 'no-candidates', facts: { title }, verdict: { tone: 'warning' } },
+        targetEventData(job, { title }),
+      ),
     });
     return;
   }
@@ -226,7 +235,10 @@ async function runSeriesAcquire(
         kind: 'acquire.skip-already-grabbed',
         jobId: job.id,
         message: `Skipped re-grab for "${title}" Season ${season.seasonNumber} — a previous run of this job already grabbed a release for it`,
-        data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+        data: eventEnvelope(
+          { scope: 'acquire', action: 'skip-already-grabbed', facts: { title, season: season.seasonNumber } },
+          targetEventData(job),
+        ),
       });
       continue;
     }
@@ -240,7 +252,10 @@ async function runSeriesAcquire(
         kind: 'acquire.skip-unaired',
         jobId: job.id,
         message: `Skipped "${title}" Season ${season.seasonNumber} — no episodes have aired yet`,
-        data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+        data: eventEnvelope(
+          { scope: 'acquire', action: 'skip-unaired', facts: { title, season: season.seasonNumber } },
+          targetEventData(job),
+        ),
       });
       continue;
     }
@@ -253,6 +268,7 @@ async function runSeriesAcquire(
         message: `Nothing to grab for "${seasonLabel}": every aired episode is already on disk`,
         candidates: { seasonNumber: season.seasonNumber, kept: [], dropped: [] },
         seasonNumber: season.seasonNumber,
+        label: seasonLabel,
       });
       anySeasonSettled = true;
       continue;
@@ -294,6 +310,7 @@ async function runSeriesAcquire(
           message: `Nothing to grab for "${seasonLabel}": the arr refused every release because it already holds this`,
           candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
           seasonNumber: season.seasonNumber,
+          label: seasonLabel,
         });
         anySeasonSettled = true;
       } else {
@@ -301,6 +318,8 @@ async function runSeriesAcquire(
           status: result.status,
           reasoning: result.reasoning,
           candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
+          label: seasonLabel,
+          seasonNumber: season.seasonNumber,
         });
         appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
       }
@@ -320,7 +339,15 @@ async function runSeriesAcquire(
           level: 'warn',
           jobId: job.id,
           message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${errorMessage(err)}`,
-          data: targetEventData(job, { releaseGroup: result.releaseGroup }),
+          data: eventEnvelope(
+            {
+              scope: 'acquire',
+              action: 'pin-failed',
+              facts: { title, season: season.seasonNumber, release: { group: result.releaseGroup ?? undefined }, error: errorMessage(err) },
+              verdict: { tone: 'warning' },
+            },
+            targetEventData(job),
+          ),
         });
       }
     }
@@ -334,7 +361,15 @@ async function runSeriesAcquire(
           level: 'warn',
           jobId: job.id,
           message: `Grabbed "${result.pickedTitle}" but failed to kick a season search for "${seasonLabel}": ${errorMessage(err)}`,
-          data: targetEventData(job, { seasonNumber: season.seasonNumber }),
+          data: eventEnvelope(
+            {
+              scope: 'acquire',
+              action: 'season-search-failed',
+              facts: { title, season: season.seasonNumber, error: errorMessage(err) },
+              verdict: { tone: 'warning' },
+            },
+            targetEventData(job),
+          ),
         });
       }
     }
@@ -346,15 +381,12 @@ async function runSeriesAcquire(
         releaseGroup: result.releaseGroup,
         reasoning: result.reasoning,
         candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
+        label: seasonLabel,
+        seasonNumber: season.seasonNumber,
+        picked: result.picked,
       });
       settleSeasonAttention(ctx, job, season.seasonNumber);
       anySeasonSettled = true;
-      ctx.events.append({
-        kind: 'acquire.grabbed',
-        jobId: job.id,
-        message: `Grabbed "${result.pickedTitle}" for "${seasonLabel}"`,
-        data: targetEventData(job, { seasonNumber: season.seasonNumber, guid: result.pickedGuid, releaseGroup: result.releaseGroup }),
-      });
     } catch (err) {
       appendRecordFailedEvent(ctx, job, seasonLabel, result.pickedTitle, err);
     }
@@ -388,6 +420,27 @@ async function attempt(
     missingEpisodeNumbers?: number[];
   },
 ): Promise<AttemptResult> {
+  const label = input.seasonNumber !== undefined ? `${input.title} Season ${input.seasonNumber}` : input.title;
+
+  // The search is its own step in the run's story, at the moment it actually returned.
+  // Before this, the whole search-filter-pick sequence was reconstructed client-side from
+  // one `acquire_records` row written at pick time, with every timestamp interpolated.
+  ctx.events.append({
+    kind: 'acquire.search',
+    jobId: input.jobId,
+    message: `Searched ${indexersOf(raw).length || 'no'} indexer(s) for "${label}": ${raw.length} candidate(s)`,
+    data: eventEnvelope({
+      scope: 'acquire',
+      action: 'search',
+      facts: {
+        title: input.title,
+        season: input.seasonNumber,
+        indexers: indexersOf(raw),
+        counts: { candidates: raw.length },
+      },
+    }),
+  });
+
   const { kept: prefiltered, dropped: prefilterDropped } = prefilter(raw, ctx.config.picking);
   const { kept: deduped, dropped: dedupDropped } = dedupByInfoHash(prefiltered);
   const { kept, dropped: capDropped } = capCandidates(deduped, {
@@ -403,16 +456,34 @@ async function attempt(
     payload: () => ({ kept, dropped }),
   });
 
-  if (capDropped.length > 0) {
-    const label = input.seasonNumber !== undefined ? `${input.title} Season ${input.seasonNumber}` : input.title;
-    ctx.events.append({
-      kind: 'acquire.candidates-capped',
-      level: 'warn',
-      jobId: input.jobId,
-      message: `Capped candidates for "${label}" from ${deduped.length} to ${kept.length} (dropped ${capDropped.length} candidate(s))`,
-      data: { title: input.title, seasonNumber: input.seasonNumber, droppedCount: capDropped.length },
-    });
-  }
+  // One event for the whole deterministic gate — prefilter, dedupe and cap are three
+  // implementations of "what did not reach the model", and splitting them into three rows
+  // would say the same thing three times. The cap keeps its `warn`: dropping viable
+  // candidates for budget is the one part of this an operator may want to tune.
+  ctx.events.append({
+    kind: 'acquire.filter',
+    ...(capDropped.length > 0 ? { level: 'warn' as const } : {}),
+    jobId: input.jobId,
+    message:
+      capDropped.length > 0
+        ? `Filtered "${label}" to ${kept.length} of ${raw.length} candidate(s), ${capDropped.length} of them dropped by the cap`
+        : `Filtered "${label}" to ${kept.length} of ${raw.length} candidate(s)`,
+    data: eventEnvelope({
+      scope: 'acquire',
+      action: 'filter',
+      facts: {
+        title: input.title,
+        season: input.seasonNumber,
+        counts: {
+          candidates: raw.length,
+          kept: kept.length,
+          dropped: dropped.length,
+          capped: capDropped.length,
+        },
+        reasons: topDropReasons(dropped),
+      },
+    }),
+  });
 
   if (kept.length === 0) {
     return { status: 'no-candidates', kept, dropped };
@@ -473,9 +544,35 @@ async function attempt(
     reasoning: pick.reasoning,
     pickedTitle: picked.title,
     pickedFullSeason: picked.fullSeason === true,
+    picked: {
+      title: picked.title,
+      indexer: picked.indexer,
+      quality: picked.quality?.quality?.name,
+      type: picked.fullSeason === true ? 'pack' : (picked.episodeNumbers?.length ?? 0) > 1 ? 'multi' : 'single',
+    },
     kept,
     dropped,
   };
+}
+
+/** Distinct indexers a search actually answered from, in first-seen order. */
+function indexersOf(candidates: ReleaseCandidate[]): string[] {
+  return [...new Set(candidates.map((c) => c.indexer).filter((name) => name !== ''))];
+}
+
+/** The handful of reasons that account for most of a filter pass's drops. A drop reason
+ * carries the arr's own rejection text, which is per-candidate prose — the head before the
+ * first colon is the class, which is what repeats and what a human reads. */
+export function topDropReasons(dropped: DroppedCandidate[], limit = 3): string[] {
+  const tally = new Map<string, number>();
+  for (const d of dropped) {
+    const key = d.reason.split(':')[0]!.trim();
+    tally.set(key, (tally.get(key) ?? 0) + 1);
+  }
+  return [...tally.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([reason]) => reason);
 }
 
 function missingAiredEpisodeNumbers(episodes: EpisodeResource[], seasonNumber: number, now = Date.now()): number[] {
@@ -503,19 +600,32 @@ function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string
       level: 'attention',
       jobId: job.id,
       message: `No usable releases found for "${label}" after filtering (seeders, size)`,
-      data: targetEventData(job, { ...extra, title: label }),
+      data: eventEnvelope(
+        {
+          scope: 'acquire',
+          action: 'no-candidates',
+          facts: { title: label, season: seasonNumber },
+          verdict: { tone: 'warning' },
+        },
+        targetEventData(job, { ...extra, title: label }),
+      ),
     });
     return;
   }
-  // `action: 'force-grab'` is what `POST /api/attention/:id/accept` dispatches on
-  // (`ForceGrabSchema` in src/server/app.ts): the accept re-executes exactly this payload.
+  // `data.accept` is what `POST /api/attention/:id/accept` dispatches on (`ForceGrabSchema`
+  // in src/server/app.ts): the accept re-executes exactly this payload. It sits under its
+  // own key rather than at `data`'s top level because the envelope owns `action` there.
   const forceGrabData = result.forceGrab
     ? {
-        action: 'force-grab',
-        guid: result.forceGrab.guid,
-        indexerId: result.forceGrab.indexerId,
-        pickedTitle: result.forceGrab.title,
-        releaseGroup: result.forceGrab.releaseGroup,
+        accept: {
+          action: 'force-grab',
+          instance: job.arr_instance,
+          guid: result.forceGrab.guid,
+          indexerId: result.forceGrab.indexerId,
+          pickedTitle: result.forceGrab.title,
+          releaseGroup: result.forceGrab.releaseGroup,
+          ...(seasonNumber === undefined ? {} : { seasonNumber }),
+        },
       }
     : {};
   ctx.events.append({
@@ -525,7 +635,17 @@ function appendNonGrabAttentionEvent(ctx: AppContext, job: JobRow, label: string
     message: result.forceGrab
       ? `The model rejected every release for "${label}" (${result.reasoning}) - accept to grab "${result.forceGrab.title}" anyway`
       : `Couldn't pick a release for "${label}": ${result.reasoning}`,
-    data: targetEventData(job, { ...extra, title: label, reasoning: result.reasoning, ...forceGrabData }),
+    // `reasoning` and `accept` stay outside the envelope: the attention mirror stores
+    // `data` as written, and the accept route re-executes `data.accept` verbatim.
+    data: eventEnvelope(
+      {
+        scope: 'acquire',
+        action: 'none-viable',
+        facts: { title: label, season: seasonNumber, reason: result.reasoning },
+        verdict: { tone: 'warning' },
+      },
+      targetEventData(job, { ...extra, title: label, reasoning: result.reasoning, ...forceGrabData }),
+    ),
   });
 }
 
@@ -537,7 +657,15 @@ function appendRecordFailedEvent(ctx: AppContext, job: JobRow, label: string, pi
     level: 'warn',
     jobId: job.id,
     message: `Grabbed "${pickedTitle}" for "${label}" but failed to record the outcome: ${errorMessage(err)}`,
-    data: targetEventData(job),
+    data: eventEnvelope(
+      {
+        scope: 'acquire',
+        action: 'record-failed',
+        facts: { title: label, release: { title: pickedTitle }, error: errorMessage(err) },
+        verdict: { tone: 'warning' },
+      },
+      targetEventData(job),
+    ),
   });
 }
 
@@ -615,18 +743,40 @@ function settleSeasonAttention(ctx: AppContext, job: JobRow, seasonNumber?: numb
 function recordAlreadySatisfied(
   ctx: AppContext,
   job: JobRow,
-  input: { message: string; candidates: object; seasonNumber?: number },
+  input: { message: string; candidates: object; seasonNumber?: number; label: string },
 ): void {
-  recordOutcome(ctx, job, { status: 'already-satisfied', candidates: input.candidates });
+  recordOutcome(ctx, job, {
+    status: 'already-satisfied',
+    candidates: input.candidates,
+    label: input.label,
+    seasonNumber: input.seasonNumber,
+  });
   ctx.events.append({
     kind: 'acquire.already-satisfied',
     jobId: job.id,
     message: input.message,
-    data: targetEventData(job, input.seasonNumber === undefined ? {} : { seasonNumber: input.seasonNumber }),
+    data: eventEnvelope(
+      {
+        scope: 'acquire',
+        action: 'already-satisfied',
+        facts: { title: input.label, season: input.seasonNumber },
+        verdict: { tone: 'success' },
+      },
+      targetEventData(job),
+    ),
   });
   settleSeasonAttention(ctx, job, input.seasonNumber);
 }
 
+/**
+ * Writes the audit row AND the event that says what this scope concluded, at the moment it
+ * concluded it. One call, always both: an `acquire_records` row with no matching event was
+ * exactly the gap that forced the dashboard to interpolate timestamps for the search and
+ * filter steps it never saw.
+ *
+ * This is the whole of the old `acquire.grabbed` kind, generalised — a grab is one of four
+ * things a pick can conclude, not a separate kind of happening.
+ */
 function recordOutcome(ctx: AppContext, job: JobRow, input: RecordOutcomeInput): void {
   new AcquireRecords(ctx.db).insert({
     arrInstance: job.arr_instance,
@@ -638,5 +788,39 @@ function recordOutcome(ctx: AppContext, job: JobRow, input: RecordOutcomeInput):
     releaseGroup: input.releaseGroup,
     reasoning: input.reasoning,
     candidates: input.candidates,
+  });
+  const grabbed = input.status === 'grabbed';
+  ctx.events.append({
+    kind: 'acquire.pick',
+    jobId: job.id,
+    message: grabbed
+      ? `Grabbed "${input.picked?.title}" for "${input.label}"`
+      : `Nothing grabbed for "${input.label}" (${input.status})`,
+    data: eventEnvelope(
+      {
+        scope: 'acquire',
+        action: 'pick',
+        facts: {
+          title: input.label,
+          season: input.seasonNumber,
+          reason: input.reasoning ?? input.status,
+          ...(grabbed
+            ? {
+                release: {
+                  title: input.picked?.title,
+                  indexer: input.picked?.indexer,
+                  quality: input.picked?.quality,
+                  type: input.picked?.type,
+                  guid: input.pickedGuid,
+                  group: input.releaseGroup ?? undefined,
+                },
+                counts: { grabbed: 1 },
+              }
+            : { counts: { grabbed: 0 } }),
+        },
+        verdict: { tone: grabbed || input.status === 'already-satisfied' ? 'success' : 'warning' },
+      },
+      targetEventData(job),
+    ),
   });
 }

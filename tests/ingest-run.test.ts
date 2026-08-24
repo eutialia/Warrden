@@ -984,7 +984,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         reasoning: 'guessing from context',
       }),
     );
-    expect(proposed[0]!.data).toMatchObject({ title: expect.any(String), fileCount: 1 });
+    expect(proposed[0]!.data).toMatchObject({ facts: { title: expect.any(String), counts: { files: 1 } } });
     expect(proposed[0]!.message).toMatch(/Needs your OK/i);
   });
 
@@ -1266,7 +1266,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
         reasoning: expect.any(String),
       }),
     );
-    expect(proposed[0]!.data).toMatchObject({ title: expect.any(String), fileCount: 2 });
+    expect(proposed[0]!.data).toMatchObject({ facts: { title: expect.any(String), counts: { files: 2 } } });
   });
 
   it("the producer's actual ingest.rescue-proposed payload parses through AcceptDataSchema — the two shapes can never silently drift apart", async () => {
@@ -1285,7 +1285,7 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
     await runIngestJob(fx.ctx, job);
 
     const proposed = findEvent(fx.ctx.events.list({ level: 'attention' }), 'ingest.rescue-proposed');
-    const result = AcceptDataSchema.safeParse(proposed!.data);
+    const result = AcceptDataSchema.safeParse((proposed!.data as { accept: unknown }).accept);
     expect(result.success).toBe(true);
   });
 

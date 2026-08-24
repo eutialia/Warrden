@@ -1,6 +1,8 @@
 import { describeStop, stopFromError } from '../agent/stop.js';
 import type { AppContext } from '../context.js';
+import { eventEnvelope } from '../events/envelope.js';
 import { targetEventData } from '../events/target.js';
+import { firstSentence, reportRunFailed, reportRunFinished } from './finished.js';
 import { subtitleDebounceMs } from './debounce.js';
 import { RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
@@ -28,6 +30,10 @@ function pipelineLabel(pipeline: string): string {
  * itself decides retry vs terminal failure: every failure appends a `warn` event, and a
  * terminal (non-retried) one additionally raises an `attention` event so it surfaces on the
  * dashboard instead of silently parking. Returns a stop function that clears the interval.
+ *
+ * Either ending — clean or thrown — closes with exactly one `run.finished` event carrying
+ * the run's verdict and its counts (`src/jobs/finished.ts`). A rescheduled job is not an
+ * ending and gets none.
  */
 export function startRunner(
   ctx: AppContext,
@@ -57,6 +63,7 @@ export function startRunner(
       try {
         await handler(ctx, job);
         ctx.queue.complete(job.id, undefined, requeueOpts(ctx, job));
+        reportRunFinished(ctx, job);
       } catch (err) {
         if (err instanceof RescheduleError) {
           ctx.queue.reschedule(job.id, err.delayMs);
@@ -64,7 +71,23 @@ export function startRunner(
             kind: 'job.rescheduled',
             jobId: job.id,
             message: `Job #${job.id} (${job.pipeline}) rescheduled in ${Math.round(err.delayMs / 1000)}s: ${err.message}`,
-            data: { pipeline: job.pipeline, delayMs: err.delayMs },
+            data: eventEnvelope(
+              {
+                scope: 'run',
+                action: 'rescheduled',
+                // A settle-wait reschedules the same job every two minutes for as long as
+                // the arr keeps importing. The rows stay individually stored (append-only,
+                // and each one is a real thing that happened); a reader folds the burst on
+                // this key into one line saying how many and how long.
+                facts: {
+                  pipeline: job.pipeline,
+                  delayMs: err.delayMs,
+                  reason: err.message,
+                  coalesceKey: `waits:${job.id}`,
+                },
+              },
+              targetEventData(job),
+            ),
           });
           return;
         }
@@ -100,13 +123,7 @@ function failJob(ctx: AppContext, job: JobRow, message: string, permanent: boole
   // 4xx, a prompt the SDK refuses) fails identically on every retry, so the two extra runs
   // would only cost two more full indexer sweeps before landing on the same attention row.
   const { retried } = ctx.queue.fail(job.id, message, { ...(permanent ? { maxAttempts: 1 } : {}), ...requeueOpts(ctx, job) });
-  ctx.events.append({
-    kind: 'job.failed',
-    level: 'warn',
-    jobId: job.id,
-    message: `Job #${job.id} (${job.pipeline}) failed: ${message}`,
-    data: { pipeline: job.pipeline, retried, permanent },
-  });
+  reportRunFailed(ctx, job, message, { retried, permanent });
   if (!retried) {
     // Joins the target-dedupe protocol (`targetEventData`): a `JobRow` always carries the
     // `(arr_instance, target_kind, target_id)` triple, so a target whose job keeps failing
@@ -121,7 +138,18 @@ function failJob(ctx: AppContext, job: JobRow, message: string, permanent: boole
       level: 'attention',
       jobId: job.id,
       message: `${pipelineLabel(job.pipeline)} for this title failed permanently: ${message}`,
-      data: targetEventData(job, { pipeline: job.pipeline, dedupeKey: job.pipeline }),
+      data: eventEnvelope(
+        {
+          scope: 'run',
+          action: 'attention',
+          facts: { pipeline: job.pipeline, error: firstSentence(message) },
+          verdict: { tone: 'danger' },
+        },
+        // `pipeline` stays at the top level too: `POST /api/attention/:id/retry` reads
+        // `item.data.pipeline` to know which pipeline to re-enqueue, and the attention
+        // mirror copies `data` verbatim.
+        targetEventData(job, { pipeline: job.pipeline, dedupeKey: job.pipeline }),
+      ),
     });
   }
 }

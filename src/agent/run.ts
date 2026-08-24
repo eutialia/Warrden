@@ -10,7 +10,8 @@ import { errorMessage } from '../util/errors.js';
 import { AGENT_SECTIONS, defaultSeedsDir, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
 import { scanForThreats } from './threatPatterns.js';
 import { runAgentLoop, SEARCH_CALLSITE, TierBlockedError } from './loop.js';
-import { describeStop, stopFromError, stopIsSiteFault, type StopReason } from './stop.js';
+import { describeStop, stopFromError, stopIsSiteFault, stopTone, type StopReason } from './stop.js';
+import { eventEnvelope } from '../events/envelope.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
@@ -80,15 +81,18 @@ export interface SiteRunResult {
  * Every part of the location is optional because the callers differ — a ladder rung has a
  * round and a tier, a site skipped before anything ran has neither — but the ending itself is
  * always `describeStop`, never a sentence written at the call site.
+ *
+ * `searchSite` calls this exactly once per invocation, and the skip path in the subtitle
+ * pipeline calls it for a visit that never started — so one `agent.stop` IS one site visit's
+ * verdict, which is why it carries a `verdict` tone and the visit's whole shape as facts.
+ * The dashboard's per-visit row reads these rather than re-deriving the same conclusion from
+ * `subtitle_runs`.
  */
 export function reportAgentStop(
   ctx: AppContext,
   job: JobRow,
   stop: StopReason,
-  where: { callsite: string; site?: string; round?: number; maxRounds?: number; tier?: AccessTier; steps: number } & Record<
-    string,
-    unknown
-  >,
+  where: { callsite: string; site?: string; round?: number; maxRounds?: number; tier?: AccessTier; steps: number; url?: string },
 ): void {
   const head = [
     where.site !== undefined ? `[${where.site}]` : '',
@@ -101,7 +105,31 @@ export function reportAgentStop(
     kind: 'agent.stop',
     jobId: job.id,
     message: head === '' ? describeStop(stop) : `${head}: ${describeStop(stop)}`,
-    data: targetEventData(job, { ...where, stop }),
+    data: eventEnvelope(
+      {
+        scope: 'subtitle',
+        action: 'visit',
+        facts: {
+          site: where.site,
+          tier: where.tier,
+          round: where.round,
+          maxRounds: where.maxRounds ?? where.round,
+          steps: where.steps,
+          stop: stop.kind,
+          callsite: where.callsite,
+          url: where.url,
+          // The model's own sentence, where it wrote one — the difference between
+          // "nothing found" and why it thinks so.
+          reason: stop.kind === 'gave-up' ? stop.reason : stop.kind === 'error' ? stop.message : undefined,
+          // The give-up's own classification, and the skip's: `stop` alone would collapse
+          // "searched and found nothing" into "could not get through".
+          outcome: stop.kind === 'gave-up' ? stop.because : stop.kind === 'skipped' ? stop.why : undefined,
+          permanent: stop.kind === 'error' ? stop.permanent : undefined,
+        },
+        verdict: { tone: stopTone(stop) },
+      },
+      targetEventData(job),
+    ),
   });
 }
 
@@ -153,12 +181,15 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
       level: 'attention',
       jobId: job.id,
       message: `Site knowledge for ${siteLabel(baseUrl)} looks tampered with and was not used`,
-      data: targetEventData(job, {
-        site: siteLabel(baseUrl),
-        dedupeKey: siteLabel(baseUrl),
-        patterns: threats.map((t) => t.pattern),
-        excerpt: threats[0]?.excerpt,
-      }),
+      data: eventEnvelope(
+        {
+          scope: 'subtitle',
+          action: 'knowledge-refused',
+          facts: { site: siteLabel(baseUrl), reasons: threats.map((t) => t.pattern), detail: threats[0]?.excerpt },
+          verdict: { tone: 'danger' },
+        },
+        targetEventData(job, { dedupeKey: siteLabel(baseUrl) }),
+      ),
     });
     return '';
   } catch (err) {
@@ -167,7 +198,15 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
       level: 'warn',
       jobId: job.id,
       message: `Site knowledge for ${siteLabel(baseUrl)} could not be read — searching without it: ${errorMessage(err)}`,
-      data: targetEventData(job, { site: siteLabel(baseUrl), dedupeKey: siteLabel(baseUrl) }),
+      data: eventEnvelope(
+        {
+          scope: 'subtitle',
+          action: 'knowledge-unreadable',
+          facts: { site: siteLabel(baseUrl), error: errorMessage(err) },
+          verdict: { tone: 'warning' },
+        },
+        targetEventData(job, { dedupeKey: siteLabel(baseUrl) }),
+      ),
     });
     return '';
   }
@@ -250,11 +289,18 @@ export async function searchSite(
       ...(entry.level !== undefined ? { level: entry.level } : {}),
       jobId: job.id,
       message: `[${siteLabel(site.baseUrl)}] ${entry.action}: ${entry.detail}`,
-      data: targetEventData(job, {
-        site: siteLabel(site.baseUrl),
-        entry,
-        ...(entry.level !== undefined ? { dedupeKey: `refused:${siteLabel(site.baseUrl)}` } : {}),
-      }),
+      data: eventEnvelope(
+        {
+          scope: 'subtitle',
+          // The agent's own verb (`search`, `open`, `download`, `escalate`) — the step's
+          // identity, so a consumer never parses it back out of the message.
+          action: entry.action,
+          facts: { site: siteLabel(site.baseUrl), tier: entry.tier, detail: entry.detail },
+        },
+        targetEventData(job, {
+          ...(entry.level !== undefined ? { dedupeKey: `refused:${siteLabel(site.baseUrl)}` } : {}),
+        }),
+      ),
     });
   };
 
@@ -298,7 +344,15 @@ export async function searchSite(
         level: 'warn',
         jobId: job.id,
         message: failure.message,
-        data: targetEventData(job, { site: siteLabel(site.baseUrl), dedupeKey: siteLabel(site.baseUrl) }),
+        data: eventEnvelope(
+          {
+            scope: 'subtitle',
+            action: failure.kind === 'subtitle.site-failed' ? 'site-failed' : 'site-exhausted',
+            facts: { site: siteLabel(site.baseUrl), tier: lastTier, steps, stop: stop.kind },
+            verdict: { tone: stopTone(stop) },
+          },
+          targetEventData(job, { dedupeKey: siteLabel(site.baseUrl) }),
+        ),
       });
     }
     return { stop, steps, download: null, transcript, searchObserved };

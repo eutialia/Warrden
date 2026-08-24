@@ -12,6 +12,7 @@ import { AttentionItems } from '../../db/attention.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow } from '../../db/siteProfiles.js';
 import type { TranscriptEntry } from '../../db/subtitleRuns.js';
+import { eventEnvelope } from '../../events/envelope.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
 import { mapArrPath, safeUrlTailName } from '../../fs/paths.js';
@@ -1312,17 +1313,24 @@ function raiseUnusable(ctx: AppContext, job: JobRow, site: SubtitleSiteConfig, r
     level: 'attention',
     jobId: job.id,
     message: `${label} looks unusable: ${cappedReason}`,
-    data: {
-      instance: 'subtitle-site',
-      targetKind: 'site',
-      targetId: label,
-      dedupeKey: label,
-      action: 'disable-site',
-      baseUrl: site.baseUrl,
-      reason: cappedReason,
-      tiersAttempted,
-      evidence,
-    },
+    data: eventEnvelope(
+      {
+        scope: 'subtitle',
+        action: 'site-unusable',
+        facts: { site: label, reason: cappedReason, reasons: tiersAttempted },
+        verdict: { tone: 'danger' },
+      },
+      {
+        // Not `targetEventData`: this item is about the SITE, not the job's arr target, so
+        // it carries a site-shaped triple that dedupes across every series that hits it.
+        instance: 'subtitle-site',
+        targetKind: 'site',
+        targetId: label,
+        dedupeKey: label,
+        evidence,
+        accept: { action: 'disable-site', baseUrl: site.baseUrl, reason: cappedReason },
+      },
+    ),
   });
 }
 

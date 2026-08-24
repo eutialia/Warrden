@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { parseFailure } from './llmFixtures.js';
@@ -10,6 +11,52 @@ const target = { pipeline: 'acquire' as const, targetKind: 'series' as const, ta
 describe('startRunner', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('closes a clean run with one terminal event carrying its verdict and counts', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue({ ...target, pipeline: 'subtitle' });
+    const stop = startRunner(ctx, { subtitle: vi.fn().mockResolvedValue(undefined) }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    const finished = ctx.events.list().filter((e) => e.kind === 'run.finished');
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({ job_id: id, level: 'info' });
+    expect(finished[0]!.data).toMatchObject({
+      scope: 'run',
+      action: 'finished',
+      // Nothing placed is not a failure and not a success: a quiet run gets no colour.
+      facts: { pipeline: 'subtitle', counts: { placed: 0 } },
+      verdict: { tone: 'neutral' },
+    });
+  });
+
+  it('counts what an acquire run grabbed, from the rows the run itself wrote', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    const handler = vi.fn(async (c: typeof ctx, job: { created_at: number }) => {
+      new AcquireRecords(c.db).insert({
+        arrInstance: 'sonarr',
+        targetKind: 'series',
+        targetId: 1,
+        source: 'webhook',
+        status: 'grabbed',
+        candidates: {},
+      });
+      expect(job.created_at).toBeTypeOf('number');
+    });
+    const stop = startRunner(ctx, { acquire: handler as never }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(findEvent(ctx.events.list(), 'run.finished')!.data).toMatchObject({
+      facts: { pipeline: 'acquire', counts: { grabbed: 1 }, reason: 'grabbed' },
+      verdict: { tone: 'success' },
+    });
+    expect(ctx.queue.get(id!)!.status).toBe('done');
+  });
 
   it('dispatches a claimed job to its pipeline handler and completes it on success', async () => {
     const ctx = makeCtx();
@@ -129,7 +176,12 @@ describe('startRunner', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     const attentionEvents = ctx.events.list({ level: 'attention' });
     expect(attentionEvents).toHaveLength(1);
-    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: true });
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'run.finished')!.data).toMatchObject({
+      scope: 'run',
+      action: 'finished',
+      facts: { permanent: true, retried: false, error: 'invalid request' },
+      verdict: { tone: 'danger' },
+    });
   });
 
   // The single-shot call-sites (archive-map, sidecar-match, bundle-map, release-pick) throw
@@ -144,7 +196,7 @@ describe('startRunner', () => {
     await vi.advanceTimersByTimeAsync(10);
     stop();
 
-    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.message).toBe(
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'run.finished')!.message).toBe(
       `Job #${id} (acquire) failed: 1 reply was not valid JSON`,
     );
     expect(ctx.queue.get(id!)!.error).toBe('1 reply was not valid JSON');
@@ -160,7 +212,9 @@ describe('startRunner', () => {
     stop();
 
     expect(ctx.queue.get(id!)!.status).toBe('pending');
-    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: false });
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'run.finished')!.data).toMatchObject({
+      facts: { permanent: false, retried: true },
+    });
   });
 
   it('fails a job immediately, with an attention-worthy message, when no handler is registered for its pipeline', async () => {
@@ -200,7 +254,13 @@ describe('startRunner', () => {
     expect(infoEvents[0]!.level).toBe('info');
     expect(infoEvents[0]!.message).toContain('waiting for settle');
     expect(infoEvents[0]!.message).toContain('5s');
-    expect(infoEvents[0]!.data).toMatchObject({ pipeline: 'acquire', delayMs: 5_000 });
+    expect(infoEvents[0]!.data).toMatchObject({
+      scope: 'run',
+      action: 'rescheduled',
+      facts: { pipeline: 'acquire', delayMs: 5_000, reason: 'waiting for settle', coalesceKey: `waits:${id}` },
+    });
+    // A reschedule is not an ending: the run has not concluded anything yet.
+    expect(ctx.events.list().filter((e) => e.kind === 'run.finished')).toHaveLength(0);
   });
 
   it('a handler throwing a plain Error still takes the existing fail path, not reschedule', async () => {

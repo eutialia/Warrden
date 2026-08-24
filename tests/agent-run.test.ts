@@ -495,14 +495,19 @@ describe('searchSite — per-round reporting', () => {
     expect(event.message).toBe('[acg.rip] round 2/3 (curl): downloaded');
     expect(event.level).toBe('info');
     expect(event.data).toMatchObject({
-      callsite: 'site-search',
-      site: 'acg.rip',
-      round: 2,
-      maxRounds: 3,
-      tier: 'curl',
-      steps: 1,
-      url: 'https://acg.rip/dl/123.zip',
-      stop: { kind: 'done' },
+      scope: 'subtitle',
+      action: 'visit',
+      facts: {
+        callsite: 'site-search',
+        site: 'acg.rip',
+        round: 2,
+        maxRounds: 3,
+        tier: 'curl',
+        steps: 1,
+        url: 'https://acg.rip/dl/123.zip',
+        stop: 'done',
+      },
+      verdict: { tone: 'success' },
     });
   });
 
@@ -517,8 +522,8 @@ describe('searchSite — per-round reporting', () => {
     const event = roundEvent(ctx)!;
     expect(event.message).toBe('[acg.rip] round 1/1 (curl): gave up (could not tell): nothing is listed for this season yet');
     expect(event.data).toMatchObject({
-      steps: 1,
-      stop: { kind: 'gave-up', because: 'unsure', reason: 'nothing is listed for this season yet' },
+      facts: { steps: 1, stop: 'gave-up', outcome: 'unsure', reason: 'nothing is listed for this season yet' },
+      verdict: { tone: 'warning' },
     });
   });
 
@@ -533,7 +538,7 @@ describe('searchSite — per-round reporting', () => {
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML, OK_HTML]), seedsDir: NO_SEEDS, escalate: false });
 
     expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): step budget exhausted');
-    expect(roundEvent(ctx)!.data).toMatchObject({ steps: 2, stop: { kind: 'exhausted' } });
+    expect(roundEvent(ctx)!.data).toMatchObject({ facts: { steps: 2, stop: 'exhausted' }, verdict: { tone: 'danger' } });
   });
 
   it('refused destinations report how many ended the run', async () => {
@@ -554,7 +559,7 @@ describe('searchSite — per-round reporting', () => {
     await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML]), seedsDir: NO_SEEDS });
 
     expect(roundEvent(ctx)!.message).toBe('[acg.rip] round 1/1 (curl): bad llm output');
-    expect(roundEvent(ctx)!.data).toMatchObject({ stop: { kind: 'error', permanent: false } });
+    expect(roundEvent(ctx)!.data).toMatchObject({ facts: { stop: 'error', permanent: false, reason: 'bad llm output' } });
   });
 
   // A wall on the only rung an escalate:false run is allowed says nothing about the site

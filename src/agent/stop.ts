@@ -1,4 +1,5 @@
 import type { AccessTier } from '../db/siteProfiles.js';
+import type { EventTone } from '../events/envelope.js';
 import { isPermanentError } from '../jobs/errors.js';
 import { isObjectParseFailure } from '../llm/generator.js';
 import { errorMessage } from '../util/errors.js';
@@ -87,4 +88,22 @@ export function stopFromError(err: unknown): StopReason {
  */
 export function stopIsSiteFault(stop: StopReason): boolean {
   return ['exhausted', 'malformed', 'refused', 'blocked', 'error'].includes(stop.kind);
+}
+
+/**
+ * How an ending should read in colour, in the same one place its English lives. A give-up
+ * is amber, not red: the agent looked and reported honestly, which is a dead end rather
+ * than a fault. A skip is colourless — nothing happened, so nothing concluded.
+ */
+export function stopTone(stop: StopReason): EventTone {
+  switch (stop.kind) {
+    case 'done':
+      return 'success';
+    case 'skipped':
+      return 'neutral';
+    case 'gave-up':
+      return 'warning';
+    default:
+      return 'danger';
+  }
 }

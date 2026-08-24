@@ -32,7 +32,7 @@ const jsonHeaders = { 'content-type': 'application/json' };
 /** What `appendNonGrabAttentionEvent` puts in a shape-owned none-viable item's `data`, as
  * the accept endpoint sees it: the season-one series case, overridable per test. */
 function forceGrabPayload(overrides?: Record<string, unknown>): Record<string, unknown> {
-  return {
+  const accept = {
     action: 'force-grab',
     instance: 'sonarr',
     guid: 'g-top',
@@ -42,6 +42,10 @@ function forceGrabPayload(overrides?: Record<string, unknown>): Record<string, u
     seasonNumber: 1,
     ...overrides,
   };
+  // `seasonNumber: undefined` in an override means "a movie item", which the real emitter
+  // expresses by leaving the key out entirely rather than writing an undefined.
+  if (accept.seasonNumber === undefined) delete (accept as { seasonNumber?: number }).seasonNumber;
+  return { instance: accept.instance, scope: 'acquire', action: 'none-viable', accept };
 }
 
 describe('app', () => {
@@ -960,7 +964,7 @@ describe('app', () => {
         kind: 'subtitle.site-unusable',
         level: 'attention',
         message: 'x.test cannot be automated',
-        data: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' },
+        data: { accept: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' } },
       });
       const id = new AttentionItems(ctx.db).list({ status: 'open' })[0]!.id;
 
@@ -976,7 +980,7 @@ describe('app', () => {
         kind: 'subtitle.site-unusable',
         level: 'attention',
         message: 'x.test cannot be automated',
-        data: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' },
+        data: { accept: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' } },
       });
       const attentionItems = new AttentionItems(ctx.db);
       const item = attentionItems.list({ status: 'open' })[0]!;
@@ -998,7 +1002,7 @@ describe('app', () => {
         kind: 'subtitle.site-unusable',
         level: 'attention',
         message: 'x.test cannot be automated',
-        data: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' },
+        data: { accept: { action: 'disable-site', baseUrl: 'https://x.test', reason: 'bot wall' } },
       });
       const item = new AttentionItems(ctx.db).list({ status: 'open' })[0]!;
 

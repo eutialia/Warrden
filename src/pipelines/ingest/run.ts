@@ -11,6 +11,7 @@ import type {
 } from '../../arr/types.js';
 import type { AppContext } from '../../context.js';
 import { PlacedFiles, type PlacedFileRow } from '../../db/placedFiles.js';
+import { eventEnvelope } from '../../events/envelope.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy, walkFiles } from '../../fs/files.js';
 import { mapArrPath, type PathMapping } from '../../fs/paths.js';
@@ -839,13 +840,17 @@ async function rescueSeries(
     level: 'attention',
     jobId: job.id,
     message: `Needs your OK before importing ${n} leftover episode file(s) for "${target.seriesTitle}" — match is uncertain. ${plan.reasoning}`,
-    data: targetEventData(job, {
-      action: 'bundle-import',
-      files: plan.files,
-      reasoning: plan.reasoning,
-      title: target.seriesTitle,
-      fileCount: n,
-    }),
+    data: eventEnvelope(
+      {
+        scope: 'ingest',
+        action: 'rescue-proposed',
+        facts: { title: target.seriesTitle, reason: plan.reasoning, counts: { files: n } },
+        verdict: { tone: 'warning' },
+      },
+      // `accept` is the payload `POST /api/attention/:id/accept` re-executes verbatim
+      // (`AcceptDataSchema`); it sits under its own key because the envelope owns `action`.
+      targetEventData(job, { accept: { action: 'bundle-import', instance: job.arr_instance, files: plan.files } }),
+    ),
   });
 }
 
@@ -935,13 +940,19 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       level: 'attention',
       jobId: job.id,
       message: `Needs your OK for "${movieTitle}": ${items.length} leftover files all claim this one movie — pick which (if any) to import`,
-      data: targetEventData(job, {
-        action: 'bundle-import',
-        files,
-        reasoning: `${items.length} files survived filtering with no way to tell which one is the real movie file — that choice is yours`,
-        title: movieTitle,
-        fileCount: items.length,
-      }),
+      data: eventEnvelope(
+        {
+          scope: 'ingest',
+          action: 'rescue-proposed',
+          facts: {
+            title: movieTitle,
+            reason: `${items.length} files survived filtering with no way to tell which one is the real movie file — that choice is yours`,
+            counts: { files: items.length },
+          },
+          verdict: { tone: 'warning' },
+        },
+        targetEventData(job, { accept: { action: 'bundle-import', instance: job.arr_instance, files } }),
+      ),
     });
     return;
   }

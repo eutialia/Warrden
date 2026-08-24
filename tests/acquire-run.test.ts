@@ -367,6 +367,72 @@ describe('runAcquireJob — ctx.config.picking actually reaches prefilter (I6b)'
   });
 });
 
+describe('runAcquireJob — the run narrates its own search, filter and pick', () => {
+  // Every step used to be reconstructed client-side from one `acquire_records` row written
+  // at pick time, with the search and filter timestamps interpolated. These are the real
+  // ones, written when each step actually happened.
+  it('writes a search, a filter and a pick event, in that order, with the facts each step knew', async () => {
+    const client = fakeArrClient({
+      series: [seriesResource({ id: 42, title: 'Frieren', seasons: [{ seasonNumber: 1, monitored: true }] })],
+      releases: [
+        candidate({ guid: 'g1', indexer: 'Nyaa', seeders: 90, title: '[Trix] Frieren S01 1080p', fullSeason: true, releaseGroup: 'Trix' }),
+        candidate({ guid: 'g2', indexer: 'AB', seeders: 1, title: '[Bad] Frieren S01' }),
+      ],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'Trix', confidence: 'high', reasoning: 'the only pack' })]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
+
+    await runAcquireJob(ctx, job);
+
+    const kinds = ctx.events.list().map((e) => e.kind).reverse();
+    expect(kinds.filter((k) => k.startsWith('acquire.'))).toEqual(['acquire.search', 'acquire.filter', 'acquire.pick']);
+
+    expect(findEvent(ctx.events.list(), 'acquire.search')!.data).toMatchObject({
+      scope: 'acquire',
+      action: 'search',
+      facts: { title: 'Frieren', season: 1, indexers: ['Nyaa', 'AB'], counts: { candidates: 2 } },
+    });
+    expect(findEvent(ctx.events.list(), 'acquire.filter')!.data).toMatchObject({
+      scope: 'acquire',
+      action: 'filter',
+      // The seeder floor took the second candidate; its class is what repeats, not the
+      // per-candidate sentence.
+      facts: { counts: { candidates: 2, kept: 1, dropped: 1 }, reasons: ['seeders 1 below floor 3'] },
+    });
+    expect(findEvent(ctx.events.list(), 'acquire.pick')!.data).toMatchObject({
+      scope: 'acquire',
+      action: 'pick',
+      facts: {
+        season: 1,
+        counts: { grabbed: 1 },
+        release: { title: '[Trix] Frieren S01 1080p', indexer: 'Nyaa', type: 'pack', group: 'Trix' },
+        reason: 'the only pack',
+      },
+      verdict: { tone: 'success' },
+    });
+  });
+
+  it('still concludes with a pick event when nothing was grabbed', async () => {
+    const client = fakeArrClient({
+      series: [seriesResource({ id: 42, title: 'Frieren', seasons: [{ seasonNumber: 1, monitored: true }] })],
+      releases: [candidate({ guid: 'g1' })],
+    });
+    const ctx = ctxWithClient('sonarr', client, {
+      llm: new FakeGenerator([pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'all CAM rips' })]),
+    });
+    const job = enqueueAndClaim(ctx, { pipeline: 'acquire', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: { title: 'Frieren' } });
+
+    await runAcquireJob(ctx, job);
+
+    expect(findEvent(ctx.events.list(), 'acquire.pick')!.data).toMatchObject({
+      facts: { counts: { grabbed: 0 }, reason: 'all CAM rips' },
+      verdict: { tone: 'warning' },
+    });
+  });
+});
+
 describe('runAcquireJob — candidate cap (I11)', () => {
   it('caps the candidate list sent to the LLM (and persisted) to the top 30 by seeders, dropping the rest with a warn event', async () => {
     // Seeders start well above the default seederFloor (3) so every one of the 35 survives
@@ -387,9 +453,13 @@ describe('runAcquireJob — candidate cap (I11)', () => {
     expect(stored.kept).toHaveLength(30);
     expect(stored.dropped.filter((d: any) => d.reason.startsWith('capped:'))).toHaveLength(5);
 
-    const capEvents = ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'acquire.candidates-capped');
+    const capEvents = ctx.events.list({ level: 'warn' }).filter((e) => e.kind === 'acquire.filter');
     expect(capEvents).toHaveLength(1);
-    expect(capEvents[0]!.message).toContain('dropped 5');
+    expect(capEvents[0]!.data).toMatchObject({
+      scope: 'acquire',
+      action: 'filter',
+      facts: { counts: { kept: 30, capped: 5 } },
+    });
   });
 });
 
@@ -621,16 +691,18 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     expect(attentionEvents).toHaveLength(1);
     expect(attentionEvents[0]!.kind).toBe('acquire.none-viable');
     expect(attentionEvents[0]!.data).toMatchObject({
-      action: 'force-grab',
-      guid: 'g-top', // highest-seeded pack, not the first one Sonarr listed
-      indexerId: candidate({}).indexerId,
-      pickedTitle: '[Trix] S01 Batch',
-      releaseGroup: 'Trix', // resolved from the title: Sonarr left releaseGroup unset
-      reasoning: 'every pack is the censored broadcast cut',
+      facts: { reason: 'every pack is the censored broadcast cut' },
+      accept: {
+        action: 'force-grab',
+        guid: 'g-top', // highest-seeded pack, not the first one Sonarr listed
+        indexerId: candidate({}).indexerId,
+        pickedTitle: '[Trix] S01 Batch',
+        releaseGroup: 'Trix', // resolved from the title: Sonarr left releaseGroup unset
+      },
     });
     // Drift fixture: the accept endpoint has to re-execute this exact payload, so run the
     // real emitted data through the real schema rather than a hand-copied lookalike.
-    expect(ForceGrabSchema.safeParse(attentionEvents[0]!.data).success).toBe(true);
+    expect(ForceGrabSchema.safeParse((attentionEvents[0]!.data as { accept: unknown }).accept).success).toBe(true);
   });
 
   it('a veto on an airing season offers the top single, not a pack: the force-grab follows the mode\'s own shape', async () => {
@@ -673,13 +745,15 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     const attentionEvents = ctx.events.list({ level: 'attention' });
     expect(attentionEvents).toHaveLength(1);
     expect(attentionEvents[0]!.data).toMatchObject({
-      action: 'force-grab',
-      guid: 'g-ep5', // highest-seeded SINGLE; the pack out-seeds it but airing ranks singles first
-      pickedTitle: '[Trix] S01E05',
-      releaseGroup: 'Trix',
-      seasonNumber: 1,
+      accept: {
+        action: 'force-grab',
+        guid: 'g-ep5', // highest-seeded SINGLE; the pack out-seeds it but airing ranks singles first
+        pickedTitle: '[Trix] S01E05',
+        releaseGroup: 'Trix',
+        seasonNumber: 1,
+      },
     });
-    expect(ForceGrabSchema.safeParse(attentionEvents[0]!.data).success).toBe(true);
+    expect(ForceGrabSchema.safeParse((attentionEvents[0]!.data as { accept: unknown }).accept).success).toBe(true);
   });
 
   it('a movie veto keeps the plain none-viable payload: with no shape claimed there is nothing to force-grab', async () => {
@@ -699,8 +773,7 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
     expect(client.grabbed).toHaveLength(0);
     const attentionEvents = ctx.events.list({ level: 'attention' });
     expect(attentionEvents).toHaveLength(1);
-    expect(attentionEvents[0]!.data).not.toHaveProperty('action');
-    expect(attentionEvents[0]!.data).not.toHaveProperty('guid');
+    expect(attentionEvents[0]!.data).not.toHaveProperty('accept');
   });
 
   it('does not kick a season search after grabbing a pack on a complete season', async () => {
@@ -1044,7 +1117,7 @@ describe('runAcquireJob under startRunner: a permanent LLM error', () => {
     expect(job.status).toBe('failed');
     expect(job.attempts).toBe(1); // no second sweep of every indexer for an error that cannot succeed
     expect(client.searchReleases).toHaveBeenCalledTimes(1);
-    expect(findEvent(ctx.events.list({ level: 'warn' }), 'job.failed')!.data).toMatchObject({ permanent: true });
+    expect(findEvent(ctx.events.list({ level: 'warn' }), 'run.finished')!.data).toMatchObject({ facts: { permanent: true } });
     expect(ctx.events.list({ level: 'attention' }).filter((e) => e.kind === 'job.attention')).toHaveLength(1);
     // Terminal failure skips clearJob, so the entries survive until the TTL sweep: the
     // reason SearchCache cannot rely on clearJob alone to reclaim them.

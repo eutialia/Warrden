@@ -1,11 +1,19 @@
 import type Database from 'better-sqlite3';
 import { AttentionItems } from '../db/attention.js';
+import { ensureEnvelope } from './envelope.js';
 
 type EventLevel = 'info' | 'warn' | 'attention';
 
-// Same ceiling GET /api/events uses as its default. Generous for one job: retries cap
-// at 3 and a webhook storm is one job, so hitting this means something else is wrong.
-const DEFAULT_LIST_BY_JOB_LIMIT = 100;
+/**
+ * One job's event window. Raised from 100 once every pipeline started narrating itself
+ * through the envelope: a pack import writes a row per file and a subtitle run writes one
+ * per agent step, so 100 silently truncated the middle of a real run's story.
+ *
+ * Still bounded — an uncapped SELECT is a hole, not a feature — but hitting 500 now means
+ * something is genuinely wrong, so `listByJob` says so out loud instead of quietly handing
+ * back a prefix.
+ */
+const DEFAULT_LIST_BY_JOB_LIMIT = 500;
 
 interface AppendInput {
   kind: string;
@@ -57,7 +65,17 @@ export class EventLog {
          VALUES (?, ?, ?, ?, ?, ?)
          RETURNING *`,
       )
-      .get(Date.now(), e.kind, e.level ?? 'info', e.jobId ?? null, e.message, JSON.stringify(e.data ?? {})) as EventRowRaw;
+      .get(
+        Date.now(),
+        e.kind,
+        e.level ?? 'info',
+        e.jobId ?? null,
+        e.message,
+        // Every persisted row carries the envelope, whether or not its emitter built one:
+        // the dashboard reads `data` and nothing else, so an envelope-less row would render
+        // as a bare kind. See `ensureEnvelope`.
+        JSON.stringify(ensureEnvelope(e.kind, e.data)),
+      ) as EventRowRaw;
 
     const parsed = parseRow(row);
 
@@ -87,7 +105,7 @@ export class EventLog {
       level: e.level ?? 'info',
       job_id: e.jobId ?? null,
       message: e.message,
-      data: (e.data ?? {}) as Record<string, unknown>,
+      data: ensureEnvelope(e.kind, e.data) as Record<string, unknown>,
     });
   }
 
@@ -139,14 +157,18 @@ export class EventLog {
    * `list()` is newest-first because it feeds a live feed; a single run reads as a story.
    *
    * Always bounded: an uncapped SELECT is the same class of hole GET /api/events used
-   * to have. Payloads stay small in practice (retries cap at 3, webhook storms collapse
-   * to one job), so the default is defence in depth.
+   * to have. A full window is reported, because the caller is then reading a prefix of a
+   * run rather than the run — silently returning one is how a truncated story reads as a
+   * complete one.
    */
   listByJob(jobId: number, opts?: { limit?: number }): EventRow[] {
     const limit = opts?.limit ?? DEFAULT_LIST_BY_JOB_LIMIT;
     const rows = this.db
       .prepare('SELECT * FROM events WHERE job_id = ? ORDER BY id ASC LIMIT ?')
       .all(jobId, limit) as EventRowRaw[];
+    if (rows.length === limit) {
+      console.warn(`EventLog.listByJob truncated job #${jobId} at ${limit} events; older events are being read, newer ones dropped`);
+    }
     return rows.map(parseRow);
   }
 

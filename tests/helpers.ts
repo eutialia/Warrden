@@ -758,7 +758,7 @@ export function bundleResponse(
 }
 
 /**
- * A `bundle-import` attention payload — the exact `data` shape both `runIngestJob`'s
+ * A rescue-proposal attention item's whole `data` — the exact shape both `runIngestJob`'s
  * rescue stage (an `ingest.rescue-proposed` event) and `POST /api/attention/:id/accept`'s
  * `AcceptDataSchema` (`src/server/app.ts`) need to agree on. Shared by ingest-run.test.ts
  * (asserting what the producer actually emits) and app.test.ts (seeding attention items
@@ -766,22 +766,24 @@ export function bundleResponse(
  */
 export function bundleImportPayload(
   overrides?: Partial<{
-    action: 'bundle-import';
     instance: string;
     targetKind: TargetKind;
     targetId: number;
     files: Record<string, unknown>[];
-    reasoning: string;
+    reasoning: unknown;
   }>,
 ): Record<string, unknown> {
+  const instance = overrides?.instance ?? 'sonarr';
+  const files = overrides?.files ?? [{ path: '/downloads/Show/ep1.mkv', movieId: 7 }];
   return {
-    action: 'bundle-import',
-    instance: 'sonarr',
-    targetKind: 'movie',
-    targetId: 7,
-    files: [{ path: '/downloads/Show/ep1.mkv', movieId: 7 }],
-    reasoning: 'needs review',
-    ...overrides,
+    instance,
+    targetKind: overrides?.targetKind ?? 'movie',
+    targetId: overrides?.targetId ?? 7,
+    scope: 'ingest',
+    action: 'rescue-proposed',
+    facts: { reason: overrides?.reasoning ?? 'needs review', counts: { files: files.length } },
+    // The envelope owns `data.action`, so the re-executable payload lives under its own key.
+    accept: { action: 'bundle-import', instance, files },
   };
 }
 
