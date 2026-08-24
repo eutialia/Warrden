@@ -57,8 +57,9 @@ export function ReleasePick({ record }: { record: AcquireRecordDetail }) {
         {record.reasoning || 'No reasoning recorded.'}
       </p>
       {/* The candidate set is the *filter's* evidence, not the pick's, so it belongs under a
-          filter row in the feed. Acquire writes no filter event yet; until it does the list
-          rides inside the pick block, where the record that holds it already is. */}
+          filter row in the feed. `acquire.filter` carries only aggregate counts and reasons —
+          no event carries the candidates themselves — so the list rides inside the pick block,
+          where the record that holds it already is. */}
       <CandidateList record={record} />
     </div>
   );

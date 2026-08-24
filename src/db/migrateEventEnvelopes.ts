@@ -343,7 +343,7 @@ const RULES: Record<string, Rule> = {
   'subtitle.quarantined': {
     scope: 'subtitle',
     action: 'quarantined',
-    facts: (d) => ({ file: pathFile(d, 'quarantinedPath'), sourcePath: str(d, 'sourceFile') }),
+    facts: (d) => ({ file: pathFile(d, 'quarantinedPath'), sourcePath: str(d, 'sourcePath') ?? str(d, 'sourceFile') }),
     verdict: WARN,
   },
   'subtitle.skipped-collision': {

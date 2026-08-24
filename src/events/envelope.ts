@@ -248,9 +248,13 @@ export function ensureEnvelope(kind: string, data: object | undefined): Readonly
 /**
  * The facts a loosely-shaped `data` already carries, under the names the vocabulary uses.
  *
- * Shared deliberately with the one-time migration (`src/db/migrateEventEnvelopes.ts` calls
- * the same reader helpers): a stored row and a freshly appended one of the same kind should
- * be indistinguishable, and two independent mappers would drift the day someone touched one.
+ * This is the second of two mappers over the same legacy payloads: the one-time migration
+ * (`src/db/migrateEventEnvelopes.ts`) has its own per-kind rule table and its own readers,
+ * because it can key off the row's `kind` and this can't. Nothing is shared between them —
+ * `lift` and `pick` are module-private. What keeps them honest is the drift guard in
+ * `tests/migrateEventEnvelopes.test.ts`, which runs both over the same legacy rows and
+ * compares the facts they extract. A stored row and a freshly appended one of the same kind
+ * should be indistinguishable; change one mapper and that test says so.
  */
 function lift(data: Record<string, unknown>): EventFacts {
   // The file the event is ABOUT: where it landed, or where it was set aside to, or the

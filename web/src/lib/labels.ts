@@ -177,31 +177,6 @@ export function tierLabel(tier: AccessTier | null | undefined): string {
   }
 }
 
-/** A subtitle site run's own status. Its vocabulary is the agent's, not the job
- * queue's, so it gets its own mapping rather than reusing `jobStatusLabel`. */
-export function subtitleRunLabel(status: string): string {
-  switch (status) {
-    case 'done':
-      return 'Finished';
-    case 'failed':
-      return 'Failed';
-    case 'running':
-      return 'Searching';
-    default:
-      return status;
-  }
-}
-
-export function subtitleRunTone(status: string): Tone {
-  switch (status) {
-    case 'done':
-      return 'success';
-    case 'failed':
-      return 'danger';
-    default:
-      return 'info';
-  }
-}
 
 /** How a placed subtitle's timing turned out, as one chip. */
 export function subtitleDriftLabel(drift: string, offsetMs: number | null): string {

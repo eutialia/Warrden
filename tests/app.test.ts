@@ -9,7 +9,6 @@ import { AttentionItems } from '../src/db/attention.js';
 import { ManagedObjects } from '../src/db/managedObjects.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
 import { SiteProfiles } from '../src/db/siteProfiles.js';
-import { SubtitleRuns } from '../src/db/subtitleRuns.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
 import { WARRDEN_PROFILE_PREFIX, WARRDEN_TAG_PREFIX } from '../src/pipelines/acquire/pin.js';
@@ -1306,22 +1305,7 @@ describe('app', () => {
     });
   });
 
-  describe('GET /api/jobs/:id subtitleRuns', () => {
-    it('includes subtitleRuns for a job that has runs, empty array otherwise', async () => {
-      const ctx = makeCtx();
-      const jobId = ctx.queue.enqueue({ pipeline: 'subtitle', targetKind: 'series', targetId: 42, arrInstance: 'sonarr' }).id!;
-      const runs = new SubtitleRuns(ctx.db);
-      const runId = runs.start(jobId, 'acg.rip');
-      runs.appendTranscript(runId, [{ ts: 1, tier: 'curl', action: 'search', detail: 'page' }]);
-      runs.finish(runId, 'done');
-      const app = createApp(ctx);
-
-      const detail: any = await (await app.request(`/api/jobs/${jobId}`)).json();
-      expect(detail.subtitleRuns).toHaveLength(1);
-      expect(detail.subtitleRuns[0]).toMatchObject({ site: 'acg.rip', status: 'done' });
-      expect(detail.subtitleRuns[0].transcript).toEqual([{ ts: 1, tier: 'curl', action: 'search', detail: 'page' }]);
-    });
-
+  describe('GET /api/jobs/:id events', () => {
     // The run body's whole narration lives in these two kinds, and a long run's transcript
     // spam had already filled the default window before the first of them was written.
     it('carries the search narration past the transcript spam that outnumbers it', async () => {

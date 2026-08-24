@@ -32,7 +32,6 @@ import { ManagedObjects } from '../db/managedObjects.js';
 import { Overview } from '../db/overview.js';
 import { PlacedFiles } from '../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow, type UpdateSiteProfileInput } from '../db/siteProfiles.js';
-import { SubtitleRuns } from '../db/subtitleRuns.js';
 import { TraceEntries } from '../db/traceEntries.js';
 import type { EventLog, EventRow } from '../events/log.js';
 import { targetEventData } from '../events/target.js';
@@ -458,9 +457,6 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         // This handler is mounted on queue+db, not the events block, so `events` is not in
         // scope here; `ctx.events` is optional on Partial<AppContext>.
         events: jobEvents(ctx.events, job.id),
-        // This job's own subtitle site-search runs, transcript included. The activity
-        // drawer's RunDetail renders them inline as a chronological step list.
-        subtitleRuns: new SubtitleRuns(db).listByJob(job.id),
       });
     });
 

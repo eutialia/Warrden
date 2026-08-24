@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MIGRATABLE_KINDS, migrateEventEnvelopes, parseComposedMessage } from '../src/db/migrateEventEnvelopes.js';
-import { readEnvelope } from '../src/events/envelope.js';
+import { ensureEnvelope, readEnvelope } from '../src/events/envelope.js';
 import { freshDb } from './helpers.js';
 
 /**
@@ -123,6 +123,10 @@ const FIXTURES: Legacy[] = [
 function seed(db: Database.Database, rows: Legacy[]): void {
   const insert = db.prepare('INSERT INTO events (ts, kind, level, job_id, message, data) VALUES (?, ?, ?, ?, ?, ?)');
   rows.forEach((row, i) => insert.run(1000 + i, row.kind, 'info', 1, row.message, JSON.stringify(row.data)));
+}
+
+function pathOf(file: unknown): unknown {
+  return typeof file === 'object' && file !== null ? (file as { path?: unknown }).path : file;
 }
 
 function dataById(db: Database.Database): Map<string, Record<string, unknown>> {
@@ -342,6 +346,76 @@ describe('migrateEventEnvelopes', () => {
       const derived = dot === -1 ? `system:${kind}` : `${kind.slice(0, dot)}:${kind.slice(dot + 1)}`;
       if (landed !== (RENAMED[kind] ?? derived)) drifted.push(`${kind} -> ${landed}`);
     }
+    expect(drifted).toEqual([]);
+  });
+
+  /** The legacy key names either mapper reads, minus the file paths — a rule only reads the
+   * few it cares about, so handing all of them to every kind is the cheapest way to make
+   * each rule state its opinion about the names `lift` also knows.
+   *
+   * The message is the same sentence as `data.reason` on purpose: several rules recover the
+   * reason FROM the message where `lift` can only read the key, and a message that said
+   * something else would report that difference as drift. */
+  const SINK_REASON = 'the download page blocked every request';
+  const SINK: Record<string, unknown> = {
+    site: 'subhd.tv',
+    title: 'Sword Art Online',
+    instance: 'Sonarr',
+    url: 'https://subhd.tv/a',
+    archive: 'pack.rar',
+    pipeline: 'subtitle',
+    seasonNumber: 4,
+    reason: SINK_REASON,
+    sourcePath: '/data/subs/from.ass',
+    sourceFile: '/data/subs/legacy-name.ass',
+    releaseGroup: 'TARDiS',
+  };
+
+  /** One at a time: `lift` picks the first of these it finds and each rule picks the one its
+   * kind actually writes, so a row carrying all four would report that ordering as drift. */
+  const PATH_KEYS = ['path', 'placedPath', 'quarantinedPath', 'targetPath'];
+
+  it('extracts the same facts a live append would, for every fact name both mappers know', () => {
+    // The migration and `lift` (src/events/envelope.ts) are two independent mappers over the
+    // same legacy payloads — nothing is shared, because only the migration can key off the
+    // row's `kind`. Comparing the scope+action alone let the facts drift silently, which is
+    // how `subtitle.quarantined` came to read `sourceFile` while `lift` read `sourcePath`
+    // first.
+    //
+    // Scoped to the fact names BOTH mappers filled: a per-kind rule legitimately knows facts
+    // `lift` cannot guess (a release, an outcome, a tier) and legitimately drops ones `lift`
+    // would guess wrong for that kind. Where both spoke, they have to say the same thing.
+    const batches: Legacy[][] = [
+      FIXTURES,
+      ...PATH_KEYS.map((key) =>
+        MIGRATABLE_KINDS.map((kind) => ({ kind, message: SINK_REASON, data: { ...SINK, [key]: `/data/${key}.ass` } })),
+      ),
+    ];
+    const drifted: string[] = [];
+
+    for (const batch of batches) {
+      const db = freshDb();
+      seed(db, batch);
+      migrateEventEnvelopes(db);
+      const migratedByKind = dataById(db);
+
+      for (const row of batch) {
+        const migrated = (migratedByKind.get(row.kind)!.facts ?? {}) as Record<string, unknown>;
+        const appended = (readEnvelope(ensureEnvelope(row.kind, row.data))?.facts ?? {}) as Record<string, unknown>;
+
+        for (const [key, lifted] of Object.entries(appended)) {
+          const mine = migrated[key];
+          if (lifted === undefined || mine === undefined) continue;
+          // `pathFile` deliberately keeps only the path, where `lift` also guesses a group
+          // from `releaseGroup` — that is the RELEASE's group, not the file's, for most kinds.
+          const [a, b] = key === 'file' ? [pathOf(mine), pathOf(lifted)] : [mine, lifted];
+          if (JSON.stringify(a) !== JSON.stringify(b)) {
+            drifted.push(`${row.kind}.${key}: migration ${JSON.stringify(a)} vs append ${JSON.stringify(b)}`);
+          }
+        }
+      }
+    }
+
     expect(drifted).toEqual([]);
   });
 

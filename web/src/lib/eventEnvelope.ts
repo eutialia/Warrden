@@ -80,14 +80,20 @@ export interface EventEnvelope {
   verdict?: { tone: Tone };
 }
 
+/** Anything carrying an event `data` blob: an `EventRow`, or the attention item that
+ * mirrors one (`AttentionItem` stores the event's `data` verbatim). */
+export interface EnvelopeCarrier {
+  data: Record<string, unknown>;
+}
+
 /** The envelope on a row, or `null` for a row written before the migration. */
-export function envelopeOf(event: EventRow): EventEnvelope | null {
+export function envelopeOf(event: EnvelopeCarrier): EventEnvelope | null {
   const { scope, action, facts, verdict } = event.data as Partial<EventEnvelope>;
   if (typeof scope !== 'string' || typeof action !== 'string') return null;
   return { scope, action, ...(facts ? { facts } : {}), ...(verdict ? { verdict } : {}) };
 }
 
-export function factsOf(event: EventRow): EventFacts {
+export function factsOf(event: EnvelopeCarrier): EventFacts {
   return envelopeOf(event)?.facts ?? {};
 }
 

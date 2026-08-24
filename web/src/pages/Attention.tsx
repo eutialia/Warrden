@@ -36,6 +36,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
+import { bundleImportData, disableSiteData, isForceGrab } from '@/lib/attentionAccept';
 import { attentionKindLabel, attentionKindTone, attentionRetryCopy, attentionTitle, canRerunAttention } from '@/lib/labels';
 import { cn, formatElapsed, formatRelativeTime } from '@/lib/utils';
 
@@ -55,50 +56,6 @@ const EMPTY_COPY: Record<AttentionStatus, { title: string; description: string }
 };
 
 const HINT_MAX_LENGTH = 2000;
-
-interface BundleImportData {
-  reasoning?: string;
-  files: { path: string }[];
-  fileCount?: number;
-}
-
-function bundleImportData(item: AttentionItem): BundleImportData | null {
-  const data = item.data;
-  if (data.action !== 'bundle-import' || !Array.isArray(data.files)) return null;
-  const files = (data.files as { path?: unknown }[]).filter((f): f is { path: string } => typeof f?.path === 'string');
-  if (files.length === 0) return null;
-  return {
-    reasoning: typeof data.reasoning === 'string' ? data.reasoning : undefined,
-    files,
-    fileCount: typeof data.fileCount === 'number' ? data.fileCount : files.length,
-  };
-}
-
-interface DisableSiteData {
-  baseUrl: string;
-  reason: string;
-  tiersAttempted: string[];
-  evidence: string[];
-}
-
-function disableSiteData(item: AttentionItem): DisableSiteData | null {
-  const data = item.data;
-  if (data.action !== 'disable-site' || typeof data.baseUrl !== 'string' || typeof data.reason !== 'string') return null;
-  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
-  return {
-    baseUrl: data.baseUrl,
-    reason: data.reason,
-    tiersAttempted: strings(data.tiersAttempted),
-    evidence: strings(data.evidence),
-  };
-}
-
-/** True for a none-viable item whose accept means "grab the release the model vetoed"
- * (`ForceGrabSchema` in src/server/app.ts). The item's own message already names the
- * release, so the button is all this branch needs. */
-function isForceGrab(item: AttentionItem): boolean {
-  return item.data.action === 'force-grab' && typeof item.data.guid === 'string';
-}
 
 function basename(path: string): string {
   return path.split('/').pop() || path;
@@ -274,7 +231,7 @@ export default function Attention() {
           const forceGrab = isForceGrab(item);
           const tone = attentionKindTone(item.kind);
           const title = attentionTitle(item);
-          const fileCount = bundleImport?.fileCount ?? bundleImport?.files.length ?? 0;
+          const fileCount = bundleImport?.fileCount ?? 0;
           const groups = bundleImport ? groupFilesByFolder(bundleImport.files) : [];
 
           return (

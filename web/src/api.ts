@@ -98,11 +98,6 @@ export interface JobDetailResponse {
   /** This run's own events, oldest first. The only record of what a run that placed
    * nothing actually did. */
   events: EventRow[];
-  // Per-site agent-run records for a subtitle job, empty for non-subtitle pipelines.
-  // Fetched alongside the rest of the job detail; `subtitle.transcript` SSE events
-  // trigger a wholesale refetch via `useSseRefetch` (see RunDetail.tsx), so the array
-  // stays live as each site's transcript grows.
-  subtitleRuns?: SubtitleRunRow[];
 }
 
 /** Access ladder tiers, cheapest first. Mirrors `AccessTier` in `src/db/siteProfiles.ts` —
@@ -126,28 +121,6 @@ export interface SiteProfileRow {
   disabled_at: number | null;
   disabled_reason: string;
   created_at: number;
-}
-
-/** One step of a site-search run's transcript, in chronological order. Hand-copied from
- * `TranscriptEntry` in `src/db/subtitleRuns.ts`. */
-export interface TranscriptEntry {
-  ts: number;
-  tier: AccessTier;
-  action: string;
-  detail: string;
-  /** Set only on the few steps a human has to see — a refused private/loopback
-   * destination. Unset on every ordinary step. */
-  level?: 'attention';
-}
-
-export interface SubtitleRunRow {
-  id: number;
-  job_id: number;
-  site: string;
-  transcript: TranscriptEntry[];
-  status: string;
-  created_at: number;
-  updated_at: number;
 }
 
 /** Body for `PUT /api/site-profiles/:name` — every field optional (a PATCH-shaped PUT).

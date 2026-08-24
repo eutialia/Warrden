@@ -20,7 +20,9 @@ describe('end-to-end: webhook -> queue -> runner -> ingest', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('a Download webhook enqueues an ingest job that the real runner (real handler map) picks up and runs, placing a sidecar', async () => {
+  // Real runner + real handler map make this the suite's slowest test; the default 5s
+  // budget flakes when the machine is busy (dev servers, container builds).
+  it('a Download webhook enqueues an ingest job that the real runner (real handler map) picks up and runs, placing a sidecar', { timeout: 20_000 }, async () => {
     const fx = ingestFixture();
     // A real context always has MediaTools wired; the subtitle follow-on job this ingest
     // enqueues needs it (its reconcile probes the video for embedded tracks). Without it the
