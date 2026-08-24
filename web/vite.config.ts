@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 // The dashboard ships inside the server's image, so the version worth showing is
 // the product's, not this workspace's own placeholder.
@@ -21,5 +21,11 @@ export default defineConfig({
   },
   server: {
     proxy: { '/api': 'http://localhost:9797' },
+  },
+  // The suite covers the adapter layer — the pure functions that turn a job detail into
+  // feed rows. No jsdom: rendering is verified against the running app, not simulated.
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.{ts,tsx}'],
   },
 });

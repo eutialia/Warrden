@@ -1,31 +1,32 @@
 import { useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import type { AttentionItem, EventRow, PlacedFile as PlacedFileRow, SubtitleRunRow } from '@/api';
-import { AttentionLink, PlacedFile, TranscriptTimeline } from '@/components/activity/runParts';
+import type { AttentionItem, EventRow, PlacedFile as PlacedFileRow } from '@/api';
+import { AttentionLink, PlacedFile } from '@/components/activity/runParts';
 import { ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
-import { siteLabel, subtitleDriftLabel, subtitleRunLabel, subtitleRunTone } from '@/lib/labels';
+import { subtitleDriftLabel } from '@/lib/labels';
 import { compareEpisodeCodes, formatEpisodeCode, parseEpisodeCode, type EpisodeCode } from '@/lib/episodes';
 import { TONE_SOFT, TONE_TEXT, type Tone } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
 /**
- * A subtitle run's body. A season pack places hundreds of files and sets aside hundreds
- * more, so nothing here is a flat list: the run opens with its own scoreboard, then one
- * row per episode in episode order, and everything with a full path in it stays folded
- * away until asked for.
+ * What a subtitle run *produced*, above its timeline. A season pack places hundreds of
+ * files and sets aside hundreds more, so nothing here is a flat list: it opens with the
+ * run's own scoreboard, then one row per episode in episode order, and everything with a
+ * full path in it stays folded away until asked for.
+ *
+ * What the run *did* is not here — the agent's narration is the timeline's job, one row per
+ * step with the per-site verdicts folded in.
  */
-export function SubtitleRunBody({
+export function SubtitleSummary({
   placedFiles,
   attention,
   events,
-  runs,
 }: {
   placedFiles: PlacedFileRow[];
   attention: AttentionItem[];
   events: EventRow[];
-  runs: SubtitleRunRow[];
 }) {
   const groups = groupByEpisode(placedFiles);
   const unresolved = attention.filter((a) => a.kind === 'subtitle.unresolved');
@@ -56,10 +57,6 @@ export function SubtitleRunBody({
           </div>
         </div>
       )}
-      <SearchNotes events={events} />
-      {runs.map((run) => (
-        <SiteRun key={run.id} run={run} />
-      ))}
     </div>
   );
 }
@@ -158,64 +155,6 @@ function EpisodeRow({ group }: { group: EpisodeGroup }) {
       {group.files.map((file) => (
         <PlacedFile key={file.id} file={file} />
       ))}
-    </Disclosure>
-  );
-}
-
-/** Event kinds that narrate the search itself rather than its result: why the pass was
- * scoped down, and what ended each round. */
-const SEARCH_NOTE_KINDS = ['subtitle.search-scoped', 'agent.stop'];
-
-/**
- * The search's own running commentary, above the per-site transcripts: one line per round
- * saying which tier it ran on and what ended it, plus the note when a gap of freshly aired
- * episodes scoped the whole pass down. A run that found nothing is otherwise a silent list
- * of collapsed transcripts, and the reason each round stopped is the one thing an operator
- * wants from it.
- */
-function SearchNotes({ events }: { events: EventRow[] }) {
-  const notes = events.filter((e) => SEARCH_NOTE_KINDS.includes(e.kind));
-  if (notes.length === 0) return null;
-
-  return (
-    <div className="space-y-1">
-      <p className="text-[0.7rem] text-muted-foreground">Search</p>
-      <ul className="space-y-0.5">
-        {notes.map((note) => (
-          <li key={note.id} className="text-xs text-muted-foreground">
-            {note.message}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-/** The agent's own narration of a site visit, folded away: it is the story of the run,
- * not its result, and it can run to dozens of steps. */
-function SiteRun({ run }: { run: SubtitleRunRow }) {
-  const [open, setOpen] = useState(false);
-  const tone = subtitleRunTone(run.status);
-
-  return (
-    <Disclosure
-      open={open}
-      onToggle={() => setOpen((v) => !v)}
-      head={
-        <>
-          <span className="font-medium">{siteLabel(run.site)}</span>
-          <span className="text-muted-foreground">
-            {run.transcript.length} step{run.transcript.length === 1 ? '' : 's'}
-          </span>
-          <ToneBadge tone={tone} dot pulse={tone === 'info'}>
-            {subtitleRunLabel(run.status)}
-          </ToneBadge>
-        </>
-      }
-    >
-      <div className="py-1">
-        <TranscriptTimeline entries={run.transcript} />
-      </div>
     </Disclosure>
   );
 }
@@ -368,7 +307,10 @@ function countSetAside(attention: AttentionItem[], events: EventRow[]): number {
   let unkeyed = 0;
   for (const row of [...attention, ...events]) {
     if (row.kind !== 'subtitle.quarantined') continue;
-    const key = stringField(row.data, 'dedupeKey') ?? stringField(row.data, 'sourceFile');
+    // `facts.sourcePath` is where the envelope keeps it; `sourceFile` is what an
+    // un-migrated attention item (that table is not rewritten) still calls the same thing.
+    const facts = (row.data as { facts?: { sourcePath?: string } }).facts;
+    const key = stringField(row.data, 'dedupeKey') ?? facts?.sourcePath ?? stringField(row.data, 'sourceFile');
     if (key === null) {
       unkeyed += 1;
       continue;

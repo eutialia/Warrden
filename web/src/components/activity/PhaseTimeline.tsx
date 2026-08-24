@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { Job } from '@/api';
+import { ElapsedTime } from '@/components/activity/ElapsedTime';
 import { RelativeTime } from '@/components/activity/RelativeTime';
 import { RunDetail } from '@/components/activity/RunDetail';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { BrailleSpinner } from '@/components/ui/spinner';
 import { jobDuration } from '@/lib/jobs';
 import { runOutcome } from '@/lib/labels';
 import { TONE_SOLID, TONE_TEXT } from '@/lib/tone';
@@ -44,9 +46,20 @@ export function PhaseTimeline({ runs, expandRunId }: { runs: Job[]; expandRunId?
       {runs.map((job) => {
         const { label, tone } = runOutcome(job);
         const isOpen = open.has(job.id);
+        const running = job.status === 'running';
+        // A queued run's detail streams like a live one, so its node has to look alive too.
+        // The dot pulses for both; the braille spinner stays with `running` alone — it says
+        // an agent is turning, and a pending job is deliberately doing nothing yet.
+        const live = running || job.status === 'pending';
         return (
           <li key={job.id} className="relative">
-            <span className={cn('absolute top-3.5 -left-[1.7rem] size-2 rounded-full ring-4 ring-popover', TONE_SOLID[tone])} />
+            <span
+              className={cn(
+                'absolute top-3.5 -left-[1.7rem] size-2 rounded-full ring-4 ring-popover',
+                TONE_SOLID[tone],
+                live && 'animate-pulse',
+              )}
+            />
             <Collapsible open={isOpen} onOpenChange={() => toggle(job.id)}>
               <CollapsibleTrigger className="flex w-full items-center gap-2 py-2 text-left">
                 <ChevronRight
@@ -56,10 +69,25 @@ export function PhaseTimeline({ runs, expandRunId }: { runs: Job[]; expandRunId?
                   )}
                 />
                 <span className={cn('text-sm', tone === 'success' ? '' : TONE_TEXT[tone])}>{label}</span>
+                {running && (
+                  <>
+                    <BrailleSpinner />
+                    <span className="sr-only">Working</span>
+                  </>
+                )}
+                {/* A live run shows one number. Duration and "started X ago" are the same
+                    value until the run ends, so pairing them reads as a stutter; the pair
+                    returns once there is a finish to measure against. */}
                 <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-                  <span className="font-mono tabular-nums">{jobDuration(job) ?? '—'}</span>
-                  <span>·</span>
-                  <RelativeTime ts={job.created_at} />
+                  {live ? (
+                    <ElapsedTime ts={job.created_at} />
+                  ) : (
+                    <>
+                      <span className="font-mono tabular-nums">{jobDuration(job) ?? '—'}</span>
+                      <span>·</span>
+                      <RelativeTime ts={job.created_at} />
+                    </>
+                  )}
                 </span>
               </CollapsibleTrigger>
               <CollapsibleContent className="overflow-hidden data-closed:animate-conceal data-open:animate-reveal">
