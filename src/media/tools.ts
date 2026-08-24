@@ -4,6 +4,19 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const TIMEOUT_MS = 30_000;
 
+type ExecFileAsync = typeof execFileAsync;
+type ProbedBinary = 'ffprobe' | 'alass' | 'ffsubsync';
+
+/** The flag each binary actually accepts for a version check. `ffprobe -version` exits 0,
+ * but `alass`/`ffsubsync` only accept the long form — `-version` on either exits non-zero
+ * (clap/argparse reject it as an unknown flag), which used to make `available()` report
+ * both as missing even when installed. */
+const VERSION_PROBE_ARGS: Record<ProbedBinary, string[]> = {
+  ffprobe: ['-version'],
+  alass: ['--version'],
+  ffsubsync: ['--version'],
+};
+
 export interface MediaStream {
   index: number;
   codecType: 'subtitle' | 'audio' | 'video' | 'other';
@@ -44,7 +57,12 @@ interface FfprobeStream {
 /** `MediaTools` over real CLI binaries. Binaries are located lazily by name (PATH), so a
  * container missing `alass` degrades to the ffsubsync fallback instead of failing to boot. */
 export class CliMediaTools implements MediaTools {
+  private readonly exec: ExecFileAsync;
   private availability: { ffprobe: boolean; alass: boolean; ffsubsync: boolean } | null = null;
+
+  constructor(opts: { exec?: ExecFileAsync } = {}) {
+    this.exec = opts.exec ?? execFileAsync;
+  }
 
   async available(): Promise<{ ffprobe: boolean; alass: boolean; ffsubsync: boolean }> {
     if (this.availability === null) {
@@ -58,9 +76,9 @@ export class CliMediaTools implements MediaTools {
     return this.availability;
   }
 
-  private async resolves(bin: string): Promise<boolean> {
+  private async resolves(bin: ProbedBinary): Promise<boolean> {
     try {
-      await execFileAsync(bin, ['-version'], { timeout: TIMEOUT_MS });
+      await this.exec(bin, VERSION_PROBE_ARGS[bin], { timeout: TIMEOUT_MS });
       return true;
     } catch {
       return false; // not installed, or installed-but-broken — same operational answer
