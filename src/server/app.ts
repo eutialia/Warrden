@@ -36,7 +36,7 @@ import { SubtitleRuns } from '../db/subtitleRuns.js';
 import { TraceEntries } from '../db/traceEntries.js';
 import type { EventLog, EventRow } from '../events/log.js';
 import { targetEventData } from '../events/target.js';
-import type { JobRow, TargetKind } from '../jobs/queue.js';
+import type { JobRow, PipelineName, TargetKind } from '../jobs/queue.js';
 import { ModelCatalog } from '../llm/catalog.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 import { pinReleaseGroup } from '../pipelines/acquire/pin.js';
@@ -267,6 +267,31 @@ function requireConfig(ctx: Partial<AppContext>): Config {
 function requireClients(ctx: Partial<AppContext>): Map<string, ArrApi> {
   if (!ctx.clients) throw new Error('clients unexpectedly unset after being gated on at startup');
   return ctx.clients;
+}
+
+const RERUNNABLE_PIPELINES = new Set<string>(['acquire', 'ingest', 'subtitle']);
+
+/**
+ * What an attention item can be re-run as on its own, without a job row to read it off.
+ * Two items need this: one raised outside any job (no `job_id` at all) and one whose job
+ * row has since been trimmed away — both used to be a dead 400 even though the item still
+ * says everything a re-run needs. `kind`'s prefix names the pipeline and `data` carries the
+ * `(instance, targetKind, targetId)` triple every `targetEventData` emitter writes.
+ *
+ * Returns null rather than guessing for anything that isn't a pipeline's work on a series
+ * or a movie: `webhook.register-failed` targets a notification, `subtitle.site-unusable`
+ * targets a SITE whose id is a URL — enqueuing either writes a job the queue can't run.
+ */
+function derivedRerun(item: AttentionRow): { pipeline: PipelineName; targetKind: TargetKind; targetId: number; arrInstance: string } | null {
+  // `job.attention` is the runner's one kind for every pipeline's permanent failure, so its
+  // prefix names none; the emitter carries the pipeline in `data.pipeline` (jobs/runner.ts).
+  const named = item.kind === 'job.attention' ? item.data.pipeline : item.kind.split('.')[0];
+  if (typeof named !== 'string' || !RERUNNABLE_PIPELINES.has(named)) return null;
+  const { instance, targetKind, targetId } = item.data;
+  if (typeof instance !== 'string') return null;
+  if (targetKind !== 'series' && targetKind !== 'movie') return null;
+  if (typeof targetId !== 'number') return null;
+  return { pipeline: named as PipelineName, targetKind, targetId, arrInstance: instance };
 }
 
 export function createApp(ctx: Partial<AppContext>): Hono {
@@ -608,35 +633,41 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       const item = Number.isInteger(id) ? attentionItems.get(id) : null;
       if (!item) return c.json({ error: 'attention item not found' }, 404);
       if (item.status !== 'open') return c.json({ error: 'attention item is not open' }, 409);
-      if (item.job_id === null) return c.json({ error: 'attention item has no linked job' }, 400);
-      const job = queue.get(item.job_id);
-      if (!job) return c.json({ error: 'the linked job no longer exists' }, 400);
+      // Re-enqueues the JOB'S OWN pipeline (ingest or acquire, whichever it actually
+      // was) — unlike repick below, a retry isn't necessarily an acquire re-pick, so it
+      // must not hardcode one. With no job row to read that off, the item answers for
+      // itself; only when it can't either is there nothing to run.
+      const job = item.job_id === null ? null : (queue.get(item.job_id) ?? null);
+      const target = job
+        ? { pipeline: job.pipeline, targetKind: job.target_kind, targetId: job.target_id, arrInstance: job.arr_instance }
+        : derivedRerun(item);
+      if (!target) return c.json({ error: 'this attention item has no pipeline to re-run' }, 400);
+      const rerun = { ...target, payload: { ...job?.payload, source: 'retry' } as Record<string, unknown> };
       // Same "known client" check `/api/acquire` makes — checked against `ctx.clients`
       // (the runner's actual resolution source), not `config.arrs`; see that route's
       // matching comment.
-      if (!requireClients(ctx).has(job.arr_instance)) return c.json({ error: `unknown arr instance "${job.arr_instance}"` }, 400);
+      if (!requireClients(ctx).has(rerun.arrInstance)) return c.json({ error: `unknown arr instance "${rerun.arrInstance}"` }, 400);
 
-      // Re-enqueues the JOB'S OWN pipeline (ingest or acquire, whichever it actually
-      // was) — unlike repick below, a retry isn't necessarily an acquire re-pick, so it
-      // must not hardcode one.
       const retried = queue.enqueue({
-        pipeline: job.pipeline,
-        targetKind: job.target_kind,
-        targetId: job.target_id,
-        arrInstance: job.arr_instance,
-        payload: { ...job.payload, source: 'retry' },
+        pipeline: rerun.pipeline,
+        targetKind: rerun.targetKind,
+        targetId: rerun.targetId,
+        arrInstance: rerun.arrInstance,
+        payload: rerun.payload,
       });
       traceTrigger(ctx.trace, retried, {
         kind: 'trigger.manual',
         summary: 'attention retry',
-        payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job.id, pipeline: job.pipeline }),
+        payload: () => ({ attentionId: id, attentionKind: item.kind, fromJobId: job?.id ?? null, pipeline: rerun.pipeline }),
       });
       // Marked resolved only once the re-enqueue above actually happened.
       attentionItems.setStatus(id, 'resolved');
       events.append({
         kind: 'attention.retried',
-        message: `Retried attention item #${id} (${item.kind}) — re-enqueued job #${job.id}'s "${job.pipeline}" pipeline`,
-        data: { id, kind: item.kind, jobId: job.id, pipeline: job.pipeline },
+        message: job
+          ? `Retried attention item #${id} (${item.kind}) — re-enqueued job #${job.id}'s "${job.pipeline}" pipeline`
+          : `Retried attention item #${id} (${item.kind}) — re-ran its "${rerun.pipeline}" pipeline for the same target`,
+        data: { id, kind: item.kind, jobId: job?.id ?? null, pipeline: rerun.pipeline },
       });
       return c.json({ ok: true });
     });

@@ -297,6 +297,8 @@ export function attentionKindLabel(kind: string): string {
       return 'Job failed';
     case 'subtitle.site-unusable':
       return 'Site unusable';
+    case 'webhook.register-failed':
+      return 'Webhook registration failed';
     case 'subtitle.knowledge-refused':
       return 'Knowledge refused';
     case 'subtitle.knowledge-dropped':
@@ -324,18 +326,44 @@ export function siteLabel(baseUrl: string): string {
 }
 
 /** A stopped pipeline (unreachable storage, videos nowhere near their mapped paths, a
- * missing binary) and outright job failures are errors; everything else in the queue is a
- * decision waiting on a human. */
+ * missing binary), an arr that can no longer reach us, and outright job failures are
+ * errors; everything else in the queue is a decision waiting on a human. */
 export function attentionKindTone(kind: string): Tone {
   if (
     kind.endsWith('.mount-missing') ||
     kind === 'subtitle.videos-unreachable' ||
     kind === 'subtitle.tool-missing' ||
+    kind === 'webhook.register-failed' ||
     kind === 'job.attention'
   ) {
     return 'danger';
   }
   return 'warning';
+}
+
+const RERUNNABLE_PIPELINES = new Set(['acquire', 'ingest', 'subtitle']);
+
+/** Whether the item alone says enough to re-run a pipeline for its target, no linked job
+ * needed. Mirrors `derivedRerun` in `src/server/app.ts` — this decides whether the button
+ * is offered, that decides whether the request succeeds, and a mismatch shows the operator
+ * a button that only 400s. */
+export function canRerunAttention(item: { kind: string; data: Record<string, unknown> }): boolean {
+  const named = item.kind === 'job.attention' ? item.data.pipeline : item.kind.split('.')[0];
+  if (typeof named !== 'string' || !RERUNNABLE_PIPELINES.has(named)) return false;
+  const { instance, targetKind, targetId } = item.data;
+  return typeof instance === 'string' && (targetKind === 'series' || targetKind === 'movie') && typeof targetId === 'number';
+}
+
+const RECHECK_SUFFIXES = ['.unresolved', '.videos-unreachable', '.mount-missing', '.settle-timeout'];
+
+/** Button copy for re-running an attention item. Some items report a state that may have
+ * fixed itself since (storage back, video finally where it was mapped, a subtitle now
+ * published) — re-running those verifies rather than repeats, and "Try again" would
+ * undersell that. */
+export function attentionRetryCopy(kind: string): { label: string; success: string; failure: string } {
+  return RECHECK_SUFFIXES.some((suffix) => kind.endsWith(suffix))
+    ? { label: 'Re-check now', success: 'Re-check queued', failure: 'Failed to queue re-check' }
+    : { label: 'Try again', success: 'Retry queued', failure: 'Failed to retry' };
 }
 
 export function attentionTitle(item: { kind: string; message: string; data: Record<string, unknown> }): string {

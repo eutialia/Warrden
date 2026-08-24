@@ -7,6 +7,7 @@ import {
   apiErrorMessage,
   dismissAttention,
   fetchAttention,
+  registerArrWebhooks,
   repickAttention,
   retryAttention,
   type AttentionItem,
@@ -35,7 +36,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useOverview } from '@/hooks/useOverview';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { attentionKindLabel, attentionKindTone, attentionTitle } from '@/lib/labels';
+import { attentionKindLabel, attentionKindTone, attentionRetryCopy, attentionTitle, canRerunAttention } from '@/lib/labels';
 import { cn, formatElapsed, formatRelativeTime } from '@/lib/utils';
 
 const STATUS_TABS: { value: AttentionStatus; label: string }[] = [
@@ -195,6 +196,23 @@ export default function Attention() {
     }
   }
 
+  async function handleWebhookRecheck(item: AttentionItem): Promise<void> {
+    const instance = typeof item.data.instance === 'string' ? item.data.instance : null;
+    await runAction(
+      item.id,
+      async () => {
+        const { results } = await registerArrWebhooks();
+        // The route answers 200 carrying per-instance results, so this item's arr failing
+        // again is not an HTTP error — raise it as one rather than toasting success at
+        // someone whose webhook is still broken. A success resolves the item server-side.
+        const failed = results.find((r) => r.status === 'failed' && (instance === null || r.instance === instance));
+        if (failed) throw new Error(failed.error ?? failed.instance);
+      },
+      'Webhooks re-registered',
+      'The webhook still could not be registered',
+    );
+  }
+
   const openCount = overview?.attention.open ?? 0;
 
   return (
@@ -245,7 +263,11 @@ export default function Attention() {
 
         {items.map((item) => {
           const pending = pendingIds.has(item.id);
-          const canRetry = item.job_id !== null;
+          // A linked job is the usual way back to a pipeline, but not the only one: an item
+          // that names a pipeline and a real target can be re-run from itself.
+          const canRetry = item.job_id !== null || canRerunAttention(item);
+          const canReregisterWebhook = item.kind === 'webhook.register-failed';
+          const retryCopy = attentionRetryCopy(item.kind);
           const canRepick = item.job_id !== null && item.kind.startsWith('acquire.');
           const bundleImport = bundleImportData(item);
           const disableSite = disableSiteData(item);
@@ -398,14 +420,19 @@ export default function Attention() {
                         Pick a different release…
                       </Button>
                     )}
+                    {canReregisterWebhook && (
+                      <Button variant="outline" size="sm" disabled={pending} onClick={() => void handleWebhookRecheck(item)}>
+                        Re-check now
+                      </Button>
+                    )}
                     {canRetry && (
                       <Button
                         variant="outline"
                         size="sm"
                         disabled={pending}
-                        onClick={() => void runAction(item.id, () => retryAttention(item.id), 'Retry queued', 'Failed to retry')}
+                        onClick={() => void runAction(item.id, () => retryAttention(item.id), retryCopy.success, retryCopy.failure)}
                       >
-                        Try again
+                        {retryCopy.label}
                       </Button>
                     )}
                     <Button

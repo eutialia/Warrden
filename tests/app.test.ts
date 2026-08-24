@@ -381,6 +381,94 @@ describe('app', () => {
       expect(attentionItems.get(item.id)!.status).toBe('open');
     });
 
+    it('POST /api/attention/:id/retry: falls back to the item\'s own kind + target when the linked job row is gone', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+
+      const enqueueResult = ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 42, arrInstance: 'sonarr', payload: {} });
+      const item = attentionItems.open({
+        kind: 'ingest.unmatched',
+        message: 'job row vanished',
+        jobId: enqueueResult.id!,
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 42 },
+      });
+      ctx.db.prepare('DELETE FROM jobs WHERE id = ?').run(enqueueResult.id);
+
+      const res = await app.request(`/api/attention/${item.id}/retry`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+
+      const requeued = ctx.queue.claim()!;
+      expect(requeued.pipeline).toBe('ingest');
+      expect(requeued.target_kind).toBe('series');
+      expect(requeued.target_id).toBe(42);
+      expect(requeued.arr_instance).toBe('sonarr');
+      expect(requeued.payload).toEqual({ source: 'retry' });
+    });
+
+    it('POST /api/attention/:id/retry: re-runs the kind\'s pipeline for an item that never had a linked job', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+
+      const item = attentionItems.open({
+        kind: 'subtitle.unresolved',
+        message: 'no subtitle found',
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 7, dedupeKey: 'unresolved' },
+      });
+
+      const res = await app.request(`/api/attention/${item.id}/retry`, { method: 'POST', headers: jsonHeaders });
+      expect(res.status).toBe(200);
+      expect(attentionItems.get(item.id)!.status).toBe('resolved');
+
+      const requeued = ctx.queue.claim()!;
+      expect(requeued.pipeline).toBe('subtitle');
+      expect(requeued.target_id).toBe(7);
+      expect(requeued.payload).toEqual({ source: 'retry' });
+    });
+
+    it('POST /api/attention/:id/retry: reads the pipeline off data.pipeline for the pipeline-agnostic "job.attention" kind', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+
+      const item = attentionItems.open({
+        kind: 'job.attention',
+        message: 'acquire failed permanently',
+        data: { instance: 'sonarr', targetKind: 'series', targetId: 9, pipeline: 'acquire', dedupeKey: 'acquire' },
+      });
+
+      expect((await app.request(`/api/attention/${item.id}/retry`, { method: 'POST', headers: jsonHeaders })).status).toBe(200);
+      expect(ctx.queue.claim()!.pipeline).toBe('acquire');
+    });
+
+    it('POST /api/attention/:id/retry: 400 for an item with no pipeline to re-run (webhook registration, an unusable site)', async () => {
+      const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
+      const attentionItems = new AttentionItems(ctx.db);
+      const app = createApp(ctx);
+
+      const webhook = attentionItems.open({
+        kind: 'webhook.register-failed',
+        message: 'could not register',
+        data: { instance: 'sonarr', targetKind: 'notification', targetId: 'Warrden', dedupeKey: 'sonarr' },
+      });
+      expect((await app.request(`/api/attention/${webhook.id}/retry`, { method: 'POST', headers: jsonHeaders })).status).toBe(400);
+      expect(attentionItems.get(webhook.id)!.status).toBe('open');
+
+      // A site is not a target the queue can run against — enqueuing this would write a
+      // job whose target_id is a string.
+      const site = attentionItems.open({
+        kind: 'subtitle.site-unusable',
+        message: 'site keeps failing',
+        data: { instance: 'sonarr', targetKind: 'site', targetId: 'example.org', baseUrl: 'https://example.org' },
+      });
+      expect((await app.request(`/api/attention/${site.id}/retry`, { method: 'POST', headers: jsonHeaders })).status).toBe(400);
+      expect(attentionItems.get(site.id)!.status).toBe('open');
+
+      expect(ctx.queue.claim()).toBeNull();
+    });
+
     it('POST /api/attention/:id/repick: enqueues pipeline "acquire" even when the linked job\'s own pipeline was "ingest" (repick is always a re-pick, never the original pipeline)', async () => {
       const ctx = ctxWithClient('sonarr', fakeArrClient(), { config: configWithArrs('sonarr') });
       const { app, item } = openAttentionForJob(ctx, {
