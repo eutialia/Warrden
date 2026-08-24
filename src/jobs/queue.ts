@@ -182,7 +182,7 @@ export class JobQueue {
       if (!job) throw new Error(`complete: job ${id} not found`);
 
       const info = this.db
-        .prepare(`UPDATE jobs SET status = 'done', dirty = 0, result = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
+        .prepare(`UPDATE jobs SET status = 'done', dirty = 0, result = ?, error = NULL, updated_at = ? WHERE id = ? AND status = 'running'`)
         .run(result === undefined ? null : JSON.stringify(result), now, id);
       if (info.changes === 0) {
         throw new Error(`complete: job ${id} is not running (status=${job.status})`);

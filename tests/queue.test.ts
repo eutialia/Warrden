@@ -142,6 +142,19 @@ describe('JobQueue', () => {
     expect(q.claim()).toBeNull(); // and no extra pending row was created
   });
 
+  it('completing on a later attempt clears the error from the earlier failure, leaving attempts at the failure count (1: it never counted the successful completion)', () => {
+    q.enqueue(target);
+    const job = q.claim()!;
+    expect(q.fail(job.id, 'rate limited').retried).toBe(true);
+
+    const retried = q.claim(Number.MAX_SAFE_INTEGER)!;
+    q.complete(retried.id);
+
+    const done = q.get(retried.id)!;
+    expect(done.error).toBeNull();
+    expect(done.attempts).toBe(1);
+  });
+
   describe('fail() backoff delay (fake timers for exact not_before values)', () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
