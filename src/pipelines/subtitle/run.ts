@@ -8,6 +8,7 @@ import type { AppContext } from '../../context.js';
 import { siteKey, siteLabel } from '../../config/siteLabel.js';
 import type { SubtitleSiteConfig } from '../../config/schema.js';
 import { ArchiveCache, type ArchiveCacheEntry, type ArchiveCacheRow } from '../../db/archiveCache.js';
+import { AttentionItems } from '../../db/attention.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow } from '../../db/siteProfiles.js';
 import type { TranscriptEntry } from '../../db/subtitleRuns.js';
@@ -266,6 +267,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     // Only an uncovered episode is worth a site search, and nothing the cache pass does can
     // uncover one — so a run that opened with everything covered ends here.
     if (withoutSubs.length === 0) {
+      resolveUnresolved(ctx, job);
       ctx.events.append({
         kind: 'subtitle.complete',
         jobId: job.id,
@@ -279,6 +281,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
 
     const stillMissing = uncovered(gaps);
     if (stillMissing.length > 0) raiseUnresolved(ctx, job, title, stillMissing, state.quarantined);
+    else resolveUnresolved(ctx, job);
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }
@@ -402,6 +405,22 @@ function raiseUnresolved(
     jobId: job.id,
     message,
     data: targetEventData(job, { dedupeKey: 'unresolved', episodes }),
+  });
+}
+
+/** Retracts the target's standing `subtitle.unresolved` item once a run confirms every
+ * video is covered. Subtitles can land without Warrden placing them (an operator dropping
+ * sidecars in by hand, another tool writing into the library), and `raiseUnresolved`'s
+ * dedupe only ever REFRESHES the open row — without this, the review item outlives the
+ * problem forever. Called only where coverage was actually reconciled this run: the
+ * no-videos / unreachable / settle-timeout exits confirm nothing and retract nothing. */
+function resolveUnresolved(ctx: AppContext, job: JobRow): void {
+  new AttentionItems(ctx.db).resolveForTarget({
+    kinds: ['subtitle.unresolved'],
+    instance: job.arr_instance,
+    targetKind: job.target_kind,
+    targetId: job.target_id,
+    dedupeKey: 'unresolved',
   });
 }
 

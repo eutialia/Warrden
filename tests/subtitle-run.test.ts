@@ -541,6 +541,39 @@ describe('runSubtitleJob', () => {
     expect(new AttentionItems(fx.ctx.db).list({ status: 'open' }).filter((i) => i.kind === 'subtitle.unresolved')).toHaveLength(1);
   });
 
+  it('a later run that opens with everything covered resolves the open unresolved item', async () => {
+    const fx = subtitleFixture({ sites: [] });
+    const first = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, first);
+    fx.ctx.queue.complete(first.id);
+    const attention = new AttentionItems(fx.ctx.db);
+    expect(attention.list({ status: 'open' }).filter((i) => i.kind === 'subtitle.unresolved')).toHaveLength(1);
+
+    // The sidecar lands between runs without Warrden's involvement — an operator dropping
+    // it in by hand. Nothing but the next run can retract the standing review item.
+    writeFileSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'), SRT);
+
+    await runSubtitleJob(fx.ctx, claimSubtitleJob(fx));
+    expect(attention.list({ status: 'open' }).filter((i) => i.kind === 'subtitle.unresolved')).toHaveLength(0);
+  });
+
+  it('a run whose own placements finish the job resolves the open unresolved item', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    const attention = new AttentionItems(fx.ctx.db);
+    attention.open({
+      kind: 'subtitle.unresolved',
+      message: 'stale from an earlier run',
+      data: { instance: fx.arrInstance, targetKind: fx.targetKind, targetId: fx.targetId, dedupeKey: 'unresolved' },
+    });
+
+    await runSubtitleJob(fx.ctx, claimSubtitleJob(fx), siteStub(PACK));
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.placed')).toBe(true);
+    expect(attention.list({ status: 'open' }).filter((i) => i.kind === 'subtitle.unresolved')).toHaveLength(0);
+  });
+
   it('movie target: the unresolved item counts the candidates set aside instead of episodes', async () => {
     const fx = subtitleFixture({ targetKind: 'movie', targetId: 7 });
     fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
