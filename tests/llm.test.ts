@@ -1,16 +1,17 @@
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { APICallError, InvalidPromptError, NoObjectGeneratedError } from 'ai';
-import { describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { z } from 'zod';
 import type { Config, Effort } from '../src/config/schema.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { EventLog } from '../src/events/log.js';
-import { isPermanentError } from '../src/jobs/errors.js';
+import { isPermanentError, isRateLimitedError } from '../src/jobs/errors.js';
 import type { ModelCapabilities, StructuredOutputTier } from '../src/llm/catalog.js';
 import {
   AiSdkGenerator,
   LlmError,
   modelSettings,
+  RATE_LIMIT_RETRY_MS,
   repairObjectText,
   resolveModel,
   withRetry,
@@ -29,6 +30,17 @@ vi.mock('ai', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ai')>();
   return { ...actual, generateObject: (...args: unknown[]) => generateObjectMock(...args) };
 });
+
+/** The shape the AI SDK actually throws for a non-2xx provider response. */
+function apiCallError(statusCode: number, responseHeaders?: Record<string, string>): APICallError {
+  return new APICallError({
+    message: `provider returned ${statusCode}`,
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    requestBodyValues: {},
+    statusCode,
+    responseHeaders,
+  });
+}
 
 describe('resolveModel', () => {
   it('resolves the one configured model', () => {
@@ -60,6 +72,16 @@ describe('LlmError permanence marker', () => {
 
   it('does not satisfy it by default', () => {
     expect(isPermanentError(new LlmError('socket hang up', 'release-pick'))).toBe(false);
+  });
+});
+
+describe('LlmError rate-limit marker', () => {
+  it('satisfies isRateLimitedError when built with rateLimited: true', () => {
+    expect(isRateLimitedError(new LlmError('slow down', 'release-pick', { rateLimited: true }))).toBe(true);
+  });
+
+  it('does not satisfy it by default', () => {
+    expect(isRateLimitedError(new LlmError('socket hang up', 'release-pick'))).toBe(false);
   });
 });
 
@@ -105,6 +127,52 @@ describe('withRetry', () => {
     const attempt = vi.fn().mockRejectedValueOnce(new Error('first')).mockRejectedValueOnce(lastError);
     await expect(withRetry(attempt)).rejects.toBe(lastError);
     expect(lastError.cause).toBe(ownCause);
+  });
+});
+
+// A 429 answered by firing the second attempt half a second later is not a retry, it's a
+// second helping of the same rate limit (job #78 burned six calls in fifteen minutes that
+// way). Every case here drives an injected sleep, so nothing actually waits.
+describe('withRetry rate-limit backoff', () => {
+  const NOW = Date.parse('2026-08-22T21:40:00.000Z');
+  const CAP_MS = 60_000;
+
+  /** The delays `withRetry` asked for before its second attempt. */
+  async function delaysBefore(firstError: unknown): Promise<number[]> {
+    const slept: number[] = [];
+    const attempt = vi.fn().mockRejectedValueOnce(firstError).mockResolvedValue('ok');
+    const sleep = async (ms: number): Promise<void> => {
+      slept.push(ms);
+    };
+    expect(await withRetry(attempt, { sleep, now: () => NOW })).toBe('ok');
+    expect(attempt).toHaveBeenCalledTimes(2);
+    return slept;
+  }
+
+  const httpDate = (offsetMs: number): Record<string, string> => ({ 'Retry-After': new Date(NOW + offsetMs).toUTCString() });
+
+  it.each([
+    ['no Retry-After at all', undefined, RATE_LIMIT_RETRY_MS],
+    ['Retry-After in whole seconds', { 'retry-after': '7' }, 7_000],
+    ['Retry-After as an HTTP-date', httpDate(30_000), 30_000],
+    ['a Retry-After longer than the cap', { 'retry-after': '600' }, CAP_MS],
+    ['an HTTP-date past the cap', httpDate(600_000), CAP_MS],
+    ['an HTTP-date already in the past', httpDate(-5_000), RATE_LIMIT_RETRY_MS],
+    ['an unparsable Retry-After', { 'retry-after': 'shortly' }, RATE_LIMIT_RETRY_MS],
+  ])('waits out a 429 with %s', async (_case, headers, expected) => {
+    expect(await delaysBefore(apiCallError(429, headers))).toEqual([expected]);
+  });
+
+  it('finds the 429 the provider wrapped one level down', async () => {
+    expect(await delaysBefore(new Error('request failed', { cause: apiCallError(429) }))).toEqual([RATE_LIMIT_RETRY_MS]);
+  });
+
+  it.each([
+    ['a 500', apiCallError(500)],
+    ['a 400', apiCallError(400)],
+    ['an ordinary transport error', new Error('socket hang up')],
+  ])('retries %s immediately, without sleeping', async (_case, err) => {
+    expect(await delaysBefore(err)).toEqual([]);
   });
 });
 
@@ -229,28 +297,29 @@ function recordedCall(index = 0): {
 describe('AiSdkGenerator provider-error classification', () => {
   const schema = z.object({ ok: z.boolean() });
 
-  /** The shape the AI SDK actually throws for a non-2xx provider response. */
-  function apiCallError(statusCode: number): APICallError {
-    return new APICallError({
-      message: `provider returned ${statusCode}`,
-      url: 'https://openrouter.ai/api/v1/chat/completions',
-      requestBodyValues: {},
-      statusCode,
-    });
-  }
+  // Fake timers because a 429 case now parks on the rate-limit backoff between attempts;
+  // advancing past the cap below is what lets `generate` reach its second attempt at once.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
 
-  async function permanenceOf(thrown: unknown): Promise<boolean> {
+  async function failureFrom(thrown: unknown): Promise<unknown> {
     generateObjectMock.mockReset();
     generateObjectMock.mockRejectedValue(thrown);
     const cfg = keyedConfig();
     cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
-    try {
-      await new AiSdkGenerator(() => cfg).generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' });
-    } catch (err) {
-      return isPermanentError(err);
-    }
-    throw new Error('permanenceOf: generate() unexpectedly resolved');
+    const settled = new AiSdkGenerator(() => cfg)
+      .generate({ callsite: 'release-pick', schema, system: 's', prompt: 'p' })
+      .then(
+        () => {
+          throw new Error('failureFrom: generate() unexpectedly resolved');
+        },
+        (err: unknown) => err,
+      );
+    await vi.advanceTimersByTimeAsync(60_000);
+    return await settled;
   }
+
+  const permanenceOf = async (thrown: unknown): Promise<boolean> => isPermanentError(await failureFrom(thrown));
 
   it.each([400, 401, 403, 404, 422])('marks a %i from the provider permanent', async (status) => {
     expect(await permanenceOf(apiCallError(status))).toBe(true);
@@ -258,6 +327,14 @@ describe('AiSdkGenerator provider-error classification', () => {
 
   it.each([408, 429, 500, 503])('leaves a %i retryable', async (status) => {
     expect(await permanenceOf(apiCallError(status))).toBe(false);
+  });
+
+  it.each([
+    [429, true],
+    [408, false],
+    [500, false],
+  ])('marks a %i rate-limited=%s, so the runner can push its retry out', async (status, rateLimited) => {
+    expect(isRateLimitedError(await failureFrom(apiCallError(status)))).toBe(rateLimited);
   });
 
   it('marks a prompt the SDK refuses to send permanent', async () => {
@@ -867,6 +944,24 @@ describe('AiSdkGenerator tracing', () => {
     const attempt = new TraceEntries(db).listByJob(11).find((r) => r.kind === 'llm.attempt');
     const payload = JSON.parse(attempt?.payload ?? '') as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual(['error', 'model', 'provider']);
+  });
+
+  // Job #78's trace recorded the provider's words and not its status code, so nothing in it
+  // said "429" and the backoff bug stayed invisible.
+  it('records the provider status code on the failed llm.attempt payload', async () => {
+    generateObjectMock.mockReset();
+    const db = freshDb();
+    const cfg = keyedConfig();
+    cfg.llm.model = { provider: 'openrouter', model: 'primary-model' };
+    const gen = new AiSdkGenerator(() => cfg, new SqlTracer(db, new EventLog(db), () => true));
+    generateObjectMock.mockRejectedValue(apiCallError(502));
+
+    await expect(
+      gen.generate({ callsite: 'release-pick', schema: z.object({ pick: z.string() }), system: 's', prompt: 'p', trace: { jobId: 13 } }),
+    ).rejects.toThrow();
+
+    const attempt = new TraceEntries(db).listByJob(13).find((r) => r.kind === 'llm.attempt');
+    expect(JSON.parse(attempt?.payload ?? '')).toMatchObject({ provider: 'openrouter', model: 'primary-model', statusCode: 502 });
   });
 });
 

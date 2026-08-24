@@ -6,7 +6,20 @@
  * `LlmError` is the main producer.
  */
 export function isPermanentError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { permanent?: unknown }).permanent === true;
+  return hasMarker(err, 'permanent');
+}
+
+/**
+ * Whether `err` is the provider telling us to slow down (a 429). Retrying a whole pipeline
+ * a minute later lands in the same limit, so the runner pushes its retry much further out.
+ * Duck-typed like `isPermanentError`, and `LlmError` is likewise the main producer.
+ */
+export function isRateLimitedError(err: unknown): boolean {
+  return hasMarker(err, 'rateLimited');
+}
+
+function hasMarker(err: unknown, marker: 'permanent' | 'rateLimited'): boolean {
+  return typeof err === 'object' && err !== null && (err as Record<string, unknown>)[marker] === true;
 }
 
 /** Thrown by a job handler to say "not an error — run me again after `delayMs`", e.g. the

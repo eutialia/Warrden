@@ -13,6 +13,12 @@ export interface EnqueueInput {
   notBefore?: number;
 }
 
+export interface FailResult {
+  retried: boolean;
+  /** Which attempt this failure was, counting from 1. */
+  attempts: number;
+}
+
 interface EnqueueResult {
   id: number | null;
   outcome: 'enqueued' | 'coalesced' | 'marked-dirty';
@@ -201,10 +207,12 @@ export class JobQueue {
     return tx();
   }
 
-  fail(id: number, err: string, opts?: { retryInMs?: number; maxAttempts?: number; requeueNotBefore?: number }): { retried: boolean } {
+  /** Records a failed run, returning whether the job goes back to pending and which attempt
+   * this was — the runner words its terminal message with the count. */
+  fail(id: number, err: string, opts?: { retryInMs?: number; maxAttempts?: number; requeueNotBefore?: number }): FailResult {
     const maxAttempts = opts?.maxAttempts ?? 3;
     const now = Date.now();
-    const tx = this.db.transaction((): { retried: boolean } => {
+    const tx = this.db.transaction((): FailResult => {
       const job = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id) as JobRowRaw | undefined;
       if (!job) throw new Error(`fail: job ${id} not found`);
 
@@ -221,7 +229,7 @@ export class JobQueue {
         if (info.changes === 0) {
           throw new Error(`fail: job ${id} is not running (status=${job.status})`);
         }
-        return { retried: true };
+        return { retried: true, attempts };
       }
 
       const info = this.db
@@ -245,7 +253,7 @@ export class JobQueue {
           )
           .run(job.pipeline, job.target_kind, job.target_id, job.arr_instance, job.payload, opts?.requeueNotBefore ?? 0, now, now);
       }
-      return { retried: false };
+      return { retried: false, attempts };
     });
     return tx();
   }

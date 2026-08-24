@@ -3,7 +3,7 @@ import { AcquireRecords } from '../src/db/acquireRecords.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { parseFailure } from './llmFixtures.js';
-import { startRunner } from '../src/jobs/runner.js';
+import { RATE_LIMIT_JOB_RETRY_MS, startRunner } from '../src/jobs/runner.js';
 import { makeCtx, findEvent, hasEvent } from './helpers.js';
 
 const target = { pipeline: 'acquire' as const, targetKind: 'series' as const, targetId: 1, arrInstance: 'sonarr' };
@@ -182,6 +182,67 @@ describe('startRunner', () => {
       facts: { permanent: true, retried: false, error: 'invalid request' },
       verdict: { tone: 'danger' },
     });
+  });
+
+  // Job #78: OpenRouter rate-limited the model, and the queue re-ran the whole job (a full
+  // indexer sweep) sixty seconds later, straight into the same 429.
+  it.each([
+    { seeded: 0, attempt: 1 },
+    { seeded: 1, attempt: 2 },
+  ])('pushes a rate-limited retry out $attempt x 5 minutes instead of the default backoff', async ({ seeded, attempt }) => {
+    vi.setSystemTime(0);
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    ctx.db.prepare('UPDATE jobs SET attempts = ? WHERE id = ?').run(seeded, id);
+    // Duck-typed exactly as `LlmError` carries it, same as the permanent marker.
+    const handler = vi.fn().mockRejectedValue(Object.assign(new Error('rate-limited upstream'), { rateLimited: true }));
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    const job = ctx.queue.get(id!)!;
+    expect(job.status).toBe('pending');
+    expect(job.not_before).toBe(10 + RATE_LIMIT_JOB_RETRY_MS * attempt);
+  });
+
+  it('keeps the default backoff for a failure that is not rate-limited', async () => {
+    vi.setSystemTime(0);
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    const stop = startRunner(ctx, { acquire: vi.fn().mockRejectedValue(new Error('kaboom')) }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(ctx.queue.get(id!)!.not_before).toBe(10 + 60_000);
+  });
+
+  // "failed permanently" on a job that simply ran out of retries is a lie the attention row
+  // told for every exhausted job; only a permanent error earns those words.
+  it('words a terminal permanent failure "failed permanently"', async () => {
+    const ctx = makeCtx();
+    ctx.queue.enqueue(target);
+    const handler = vi.fn().mockRejectedValue(Object.assign(new Error('invalid request'), { permanent: true }));
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(ctx.events.list({ level: 'attention' })[0]!.message).toBe('Release search for this title failed permanently: invalid request');
+  });
+
+  it('words a terminal retry exhaustion "gave up after N attempts"', async () => {
+    const ctx = makeCtx();
+    const { id } = ctx.queue.enqueue(target);
+    ctx.db.prepare('UPDATE jobs SET attempts = 2 WHERE id = ?').run(id); // default maxAttempts 3 → this run is the last
+    const handler = vi.fn().mockRejectedValue(new Error('kaboom'));
+    const stop = startRunner(ctx, { acquire: handler }, { intervalMs: 10 });
+
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(ctx.events.list({ level: 'attention' })[0]!.message).toBe('Release search for this title gave up after 3 attempts: kaboom');
   });
 
   // The single-shot call-sites (archive-map, sidecar-match, bundle-map, release-pick) throw

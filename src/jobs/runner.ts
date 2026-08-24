@@ -4,12 +4,17 @@ import { eventEnvelope } from '../events/envelope.js';
 import { targetEventData } from '../events/target.js';
 import { firstSentence, reportRunFailed, reportRunFinished } from './finished.js';
 import { subtitleDebounceMs } from './debounce.js';
-import { RescheduleError } from './errors.js';
+import { isRateLimitedError, RescheduleError } from './errors.js';
 import type { JobRow, PipelineName } from './queue.js';
 
 type JobHandler = (ctx: AppContext, job: JobRow) => Promise<void>;
 
 const DEFAULT_INTERVAL_MS = 1000;
+
+/** Per attempt, for a job the provider rate-limited. The default 60s backoff re-runs the
+ * whole pipeline (for acquire, another sweep of every indexer) straight into the same
+ * limit; a rate limit needs minutes, not seconds. */
+export const RATE_LIMIT_JOB_RETRY_MS = 5 * 60_000;
 
 /** Human pipeline name for permanent-failure attention (never the raw enum). */
 function pipelineLabel(pipeline: string): string {
@@ -56,7 +61,7 @@ export function startRunner(
 
       const handler = handlers[job.pipeline];
       if (!handler) {
-        failJob(ctx, job, `No handler registered for pipeline "${job.pipeline}"`, false);
+        failJob(ctx, job, `No handler registered for pipeline "${job.pipeline}"`, { permanent: false, rateLimited: false });
         return;
       }
 
@@ -92,7 +97,12 @@ export function startRunner(
           return;
         }
         const stop = stopFromError(err);
-        failJob(ctx, job, describeStop(stop), stop.kind === 'error' && stop.permanent);
+        // Permanence comes off the stop (the vocabulary layer already classified it); the
+        // rate limit off the thrown error, which is where the provider's 429 is marked.
+        failJob(ctx, job, describeStop(stop), {
+          permanent: stop.kind === 'error' && stop.permanent,
+          rateLimited: isRateLimitedError(err),
+        });
       }
     } finally {
       ticking = false;
@@ -118,11 +128,17 @@ function requeueOpts(ctx: AppContext, job: JobRow): { requeueNotBefore: number }
   return { requeueNotBefore: Date.now() + subtitleDebounceMs(ctx.config) };
 }
 
-function failJob(ctx: AppContext, job: JobRow, message: string, permanent: boolean): void {
+function failJob(ctx: AppContext, job: JobRow, message: string, outcome: { permanent: boolean; rateLimited: boolean }): void {
+  const { permanent } = outcome;
   // `maxAttempts: 1` makes this very attempt the last one: a permanent error (a provider
   // 4xx, a prompt the SDK refuses) fails identically on every retry, so the two extra runs
   // would only cost two more full indexer sweeps before landing on the same attention row.
-  const { retried } = ctx.queue.fail(job.id, message, { ...(permanent ? { maxAttempts: 1 } : {}), ...requeueOpts(ctx, job) });
+  // `job.attempts + 1` is the count `fail` is about to record and hand back below.
+  const { retried, attempts } = ctx.queue.fail(job.id, message, {
+    ...(permanent ? { maxAttempts: 1 } : {}),
+    ...(outcome.rateLimited ? { retryInMs: RATE_LIMIT_JOB_RETRY_MS * (job.attempts + 1) } : {}),
+    ...requeueOpts(ctx, job),
+  });
   reportRunFailed(ctx, job, message, { retried, permanent });
   if (!retried) {
     // Joins the target-dedupe protocol (`targetEventData`): a `JobRow` always carries the
@@ -137,7 +153,9 @@ function failJob(ctx: AppContext, job: JobRow, message: string, permanent: boole
       kind: 'job.attention',
       level: 'attention',
       jobId: job.id,
-      message: `${pipelineLabel(job.pipeline)} for this title failed permanently: ${message}`,
+      message: permanent
+        ? `${pipelineLabel(job.pipeline)} for this title failed permanently: ${message}`
+        : `${pipelineLabel(job.pipeline)} for this title gave up after ${attempts} attempts: ${message}`,
       data: eventEnvelope(
         {
           scope: 'run',

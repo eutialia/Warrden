@@ -30,15 +30,19 @@ export class LlmError extends Error {
   /** Read by the job runner (`isPermanentError`) to fail a job terminally instead of
    * retrying an error that can only fail the same way again. */
   public readonly permanent: boolean;
+  /** Read by the job runner (`isRateLimitedError`) to push the job's retry well past the
+   * default backoff, instead of re-running a whole pipeline into the same 429. */
+  public readonly rateLimited: boolean;
 
   constructor(
     msg: string,
     public callsite: string,
-    options?: ErrorOptions & { permanent?: boolean },
+    options?: ErrorOptions & { permanent?: boolean; rateLimited?: boolean },
   ) {
     super(msg, options);
     this.name = 'LlmError';
     this.permanent = options?.permanent ?? false;
+    this.rateLimited = options?.rateLimited ?? false;
   }
 }
 
@@ -76,20 +80,49 @@ export function isObjectParseFailure(err: unknown): boolean {
   return someErrorInChain(err, (e) => NoObjectGeneratedError.isInstance(e));
 }
 
+/** Whether the provider answered a 429: the one failure worth waiting out rather than
+ * retrying straight away. */
+function isRateLimitedProviderError(err: unknown): boolean {
+  return rateLimitResponse(err) !== undefined;
+}
+
+function rateLimitResponse(err: unknown): APICallError | undefined {
+  return apiCallErrorInChain(err, (e) => e.statusCode === 429);
+}
+
 /** Bounded walk over `cause` links and `AggregateError` members (see
  * `isPermanentProviderError` for why both, and why the bound counts error nodes only). */
-function someErrorInChain(err: unknown, pred: (e: object) => boolean): boolean {
+function* errorChain(err: unknown): Generator<object> {
   const pending: unknown[] = [err];
   let seen = 0;
   while (seen < 5 && pending.length > 0) {
     const e = pending.shift();
     if (typeof e !== 'object' || e === null) continue;
     seen++;
-    if (pred(e)) return true;
+    yield e;
     if (e instanceof AggregateError) pending.push(...e.errors);
     pending.push((e as Error).cause);
   }
+}
+
+function someErrorInChain(err: unknown, pred: (e: object) => boolean): boolean {
+  for (const e of errorChain(err)) {
+    if (pred(e)) return true;
+  }
   return false;
+}
+
+function apiCallErrorInChain(err: unknown, pred: (e: APICallError) => boolean): APICallError | undefined {
+  for (const e of errorChain(err)) {
+    if (APICallError.isInstance(e) && pred(e)) return e;
+  }
+  return undefined;
+}
+
+/** The provider's HTTP status, for the trace payload: without it an incident report says
+ * what the provider wrote but not what it answered with. */
+function statusCodeOf(err: unknown): number | undefined {
+  return apiCallErrorInChain(err, (e) => e.statusCode !== undefined)?.statusCode;
 }
 
 function isPermanentStatus(status: number | undefined): boolean {
@@ -119,10 +152,57 @@ export function resolveModel(cfg: Config): ModelRef {
   return { ...entry };
 }
 
+/** How long to hold off before the second attempt when the provider rate-limited the first
+ * and said nothing about when to come back. */
+export const RATE_LIMIT_RETRY_MS = 15_000;
+
+/** No `Retry-After` buys more than this in-process: past a minute the job's own retry (which
+ * gets a fresh claim and a fresh trace) is the better place to wait. */
+const RATE_LIMIT_RETRY_CAP_MS = 60_000;
+
+export interface RetryOpts {
+  /** Injectable so tests never actually wait. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How long to wait before retrying `err`, `undefined` when it wasn't a rate limit and the
+ * retry can go straight out. A 429 answered immediately is just a second helping of the same
+ * limit, so the provider's `Retry-After` wins when it sent one (seconds, or an HTTP-date),
+ * and a default stands in when it didn't, sent something unreadable, or pointed at a moment
+ * that has already passed.
+ */
+function rateLimitDelayMs(err: unknown, now: () => number): number | undefined {
+  const limited = rateLimitResponse(err);
+  if (!limited) return undefined;
+  return Math.min(retryAfterMs(limited.responseHeaders, now) ?? RATE_LIMIT_RETRY_MS, RATE_LIMIT_RETRY_CAP_MS);
+}
+
+function retryAfterMs(headers: Record<string, string> | undefined, now: () => number): number | undefined {
+  const raw = headerValue(headers, 'retry-after')?.trim();
+  if (raw === undefined) return undefined;
+  if (/^\d+$/.test(raw)) return Number(raw) * 1000;
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return undefined;
+  const delta = at - now();
+  return delta >= 0 ? delta : undefined;
+}
+
+/** Header names are case-insensitive and the AI SDK hands them over exactly as the provider
+ * cased them. */
+function headerValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  return Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
+}
+
 /**
  * Runs `attempt`, retrying it once on failure. Throws the last error once both attempts
- * are exhausted. AI-SDK-free so the retry is unit-testable on its own. Not pure, though:
- * on total failure it mutates the thrown error's `cause` (see below).
+ * are exhausted. Not pure: on total failure it mutates the thrown error's `cause` (see
+ * below). A first attempt that failed with a 429 waits out `rateLimitDelayMs` before the
+ * second; every other failure retries immediately, as before.
  *
  * The first attempt's error is collected and, when the last one is an `Error` without a
  * `cause` of its own, attached as an `AggregateError` on its `cause`, so a second failure
@@ -132,13 +212,16 @@ export function resolveModel(cfg: Config): ModelRef {
  * `AggregateError`: it's already the thrown value, so including it too would make it
  * reference itself via `cause`.
  */
-export async function withRetry<T>(attempt: () => Promise<T>): Promise<T> {
+export async function withRetry<T>(attempt: () => Promise<T>, opts?: RetryOpts): Promise<T> {
   let firstError: unknown;
   try {
     return await attempt();
   } catch (err) {
     firstError = err;
   }
+
+  const wait = rateLimitDelayMs(firstError, opts?.now ?? Date.now);
+  if (wait !== undefined) await (opts?.sleep ?? sleepMs)(wait);
 
   try {
     return await attempt();
@@ -363,6 +446,14 @@ function parseFailureDetail(err: unknown): Record<string, unknown> {
   return { text: err.text, finishReason: err.finishReason, usage: err.usage };
 }
 
+/** The provider's HTTP status for the trace payload, absent when the failure never reached
+ * one (a transport fault, a prompt the SDK refused). Job #78's trace had the rate-limit
+ * *wording* and no code, which is why nothing in it said 429. */
+function statusCodeDetail(err: unknown): Record<string, unknown> {
+  const statusCode = statusCodeOf(err);
+  return statusCode === undefined ? {} : { statusCode };
+}
+
 /** The routed upstream provider out of one `generateObject` result's provider metadata. */
 function routeOf(providerMetadata: unknown): string | undefined {
   const openrouter = (providerMetadata as { openrouter?: { provider?: unknown } } | undefined)?.openrouter;
@@ -410,6 +501,7 @@ export class AiSdkGenerator implements StructuredGenerator {
       throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite, {
         cause: err,
         permanent: isPermanentProviderError(err),
+        rateLimited: isRateLimitedProviderError(err),
       });
     }
   }
@@ -472,7 +564,13 @@ export class AiSdkGenerator implements StructuredGenerator {
       }
       return result.object;
     } catch (err) {
-      attempt.end('error', () => ({ provider: ref.provider, model: ref.model, error: errorMessage(err), ...parseFailureDetail(err) }));
+      attempt.end('error', () => ({
+        provider: ref.provider,
+        model: ref.model,
+        error: errorMessage(err),
+        ...statusCodeDetail(err),
+        ...parseFailureDetail(err),
+      }));
       throw err;
     }
   }

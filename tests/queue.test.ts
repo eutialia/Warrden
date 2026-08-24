@@ -103,12 +103,14 @@ describe('JobQueue', () => {
     { attempts: 3, retried: false }, // maxAttempts default 3 → failed
   ])('retry/backoff: attempt $attempts → retried=$retried', ({ attempts, retried }) => {
     q.enqueue(target);
-    let res!: { retried: boolean };
+    let res!: ReturnType<typeof q.fail>;
     for (let i = 0; i < attempts; i++) {
       const job = q.claim(Number.MAX_SAFE_INTEGER)!;
       res = q.fail(job.id, 'boom');
     }
-    expect(res.retried).toBe(retried);
+    // The attempt count comes back with the verdict: the runner scales its rate-limit
+    // backoff by it and words the terminal message with it.
+    expect(res).toEqual({ retried, attempts });
   });
 
   it('a terminal failure (max attempts exhausted) with a dirty flag inserts a fresh pending twin, same as complete() does — a trigger that arrived mid-run must not be lost just because that run ultimately failed for good', () => {
