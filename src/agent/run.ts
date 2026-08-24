@@ -9,16 +9,16 @@ import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/querie
 import { errorMessage } from '../util/errors.js';
 import { AGENT_SECTIONS, defaultSeedsDir, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
 import { scanForThreats } from './threatPatterns.js';
-import { runAgentLoop, SEARCH_CALLSITE, TierBlockedError } from './loop.js';
+import { AgentActionSchema, runAgentLoop, SEARCH_CALLSITE, TierBlockedError } from './loop.js';
 import { describeStop, stopFromError, stopIsSiteFault, stopTone, type StopReason } from './stop.js';
 import { LlmError } from '../llm/generator.js';
 import { eventEnvelope } from '../events/envelope.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
 
-/** Transcript actions that cost the loop a step: every action the model chose, plus a reply
- * that would not parse (the loop spends a step telling it so). A refusal or an escalation
- * note rides on a step already counted. */
-const STEP_ACTIONS = new Set(['search', 'open', 'download', 'request', 'give_up', 'malformed']);
+/** Transcript actions that cost the loop a step: every action the model can choose, plus a
+ * reply that would not parse (the loop spends a step telling it so). A refusal or an
+ * escalation note rides on a step already counted. */
+const STEP_ACTIONS = new Set<string>([...AgentActionSchema.shape.action.options, 'malformed']);
 
 /** How many steps a rung spent, read back off the transcript it wrote — the only account
  * left when the loop threw instead of returning its own `steps`. */
@@ -231,9 +231,11 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
  * means an attempt starts. Site-specific protocols live in
  * the site's knowledge file (injected into the loop prompt), not in code adapters. Returns
  * a `SiteRunResult` carrying the download (if any), the full transcript, and the stop that
- * ended it — never throws (a broken site is a health event, not a job failure). The transcript lands
- * in `subtitle_runs` and streams live as `subtitle.transcript` events, and is also handed
- * back to the caller so it can be replayed into reflection.
+ * ended it. A broken site is a health event, not a job failure, so site faults come back as
+ * a stop; a provider error (`LlmError`) is not the site's fault and throws out of here to
+ * fail the job. The transcript lands in `subtitle_runs` and streams live as
+ * `subtitle.transcript` events, and is also handed back to the caller so it can be replayed
+ * into reflection.
  */
 export async function searchSite(
   ctx: AppContext,
@@ -395,8 +397,8 @@ export async function searchSite(
       // Where this rung's transcript starts, so a throw can be told what this rung spent
       // rather than what the whole ladder did.
       const rungStart = transcript.length;
-      // make() lives inside the try so a factory throw cannot escape searchSite's
-      // never-throws contract — it is handled like any other tier failure.
+      // make() lives inside the try so a factory throw comes back as a site-level stop
+      // instead of escaping — it is handled like any other tier failure.
       try {
         const tier = tiers.make(tierName);
         activeTiers.push(tier);
