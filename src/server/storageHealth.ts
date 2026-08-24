@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, statfsSync } from 'node:fs';
+import { accessSync, constants, statSync, statfsSync } from 'node:fs';
 import type { Config } from '../config/schema.js';
 import { storageRoles, type StorageRoleId } from '../config/storage.js';
 import { containingMount, isEmptyDir, type StatDev } from '../fs/mountPoint.js';
@@ -54,7 +54,15 @@ export function probeStorage(config: Config, stat?: StatDev): StorageCheck[] {
         detail: `No path set. Warrden skips ${role.label} entirely.`,
       };
     }
-    const access = probeAccess(role.path, role.label, stat);
+    // One unhappy mount degrades its own row and nothing else. This probe is the first
+    // thing the dashboard asks for, so a syscall we failed to anticipate must not take
+    // the whole page down with it.
+    let access: Pick<StorageCheck, 'status' | 'detail'>;
+    try {
+      access = probeAccess(role.path, role.label, stat);
+    } catch (err) {
+      access = { status: 'unreadable', detail: `${role.path} could not be probed: ${errnoLabel(err)}` };
+    }
     return {
       id: role.id,
       label: role.label,
@@ -95,10 +103,16 @@ function diskUsage(p: string): StorageCheck['usage'] {
  * Anything on another filesystem passes, which is the NFS and SMB case: `/mnt/media/Series`
  * is a directory inside the share, not the share itself. A directory on the root filesystem
  * with files in it passes too, which is media on a laptop's own disk.
+ *
+ * The first question is `stat`, not `exists`: a dead SMB share answers `existsSync` and
+ * `access` with yes and then fails every real syscall, so an existence check would wave it
+ * through to a `stat` that throws.
  */
-function probeAccess(path: string, label: string, stat?: StatDev): Pick<StorageCheck, 'status' | 'detail'> {
-  if (!existsSync(path)) {
-    return { status: 'missing', detail: `${label} not found at ${path}` };
+function probeAccess(path: string, label: string, stat: StatDev = statSync): Pick<StorageCheck, 'status' | 'detail'> {
+  try {
+    stat(path);
+  } catch (err) {
+    return statFailure(path, label, err);
   }
 
   try {
@@ -115,4 +129,30 @@ function probeAccess(path: string, label: string, stat?: StatDev): Pick<StorageC
   }
 
   return { status: 'ok', detail: `Reachable at ${path}` };
+}
+
+/** ESTALE, the errno a mount returns once the server behind it went away. libuv has no name
+ * for it on Linux, so it arrives as `code: 'Unknown system error -116'`. */
+const ESTALE = 116;
+
+/** Why a `stat` on a configured path failed, in words an operator can act on. Only a truly
+ * absent path is `missing`; everything else is a mount that is present but not answering,
+ * which is a different fix (remount the share) than a different fix (correct the path). */
+function statFailure(path: string, label: string, err: unknown): Pick<StorageCheck, 'status' | 'detail'> {
+  const e = err as NodeJS.ErrnoException;
+  if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') {
+    return { status: 'missing', detail: `${label} not found at ${path}` };
+  }
+  if (e?.code === 'ESTALE' || Math.abs(e?.errno ?? 0) === ESTALE) {
+    return { status: 'unreadable', detail: `${path} is a stale mount — the share dropped and has to be remounted` };
+  }
+  return { status: 'unreadable', detail: `${path} exists but Warrden cannot read it (${errnoLabel(err)})` };
+}
+
+/** Prefers the symbolic code, falls back to the raw number for the errnos libuv cannot name. */
+function errnoLabel(err: unknown): string {
+  const e = err as NodeJS.ErrnoException;
+  if (e?.code && !e.code.startsWith('Unknown')) return e.code;
+  if (typeof e?.errno === 'number') return `errno ${e.errno}`;
+  return e instanceof Error ? e.message : String(err);
 }

@@ -20,6 +20,14 @@ function mountedAt(path: string): StatDev {
   return (p) => ({ dev: p === path ? 2 : 1 });
 }
 
+/** A mount that fails every syscall with `code`/`errno`, the way a dropped SMB share does. */
+function statFailsWith(path: string, code: string, errno: number): StatDev {
+  return (p) => {
+    if (p !== path) return { dev: 1 };
+    throw Object.assign(new Error(`${code}: stat '${p}'`), { code, errno, syscall: 'stat', path: p });
+  };
+}
+
 function statusOf(storage: Record<string, string>, id: string, stat?: StatDev): string {
   return probeStorage(cfgWith(storage), stat).find((c) => c.id === id)!.status;
 }
@@ -52,6 +60,47 @@ describe('probeStorage', () => {
     const dir = join(tmpDir(), 'tv');
     mkdirSync(dir);
     expect(statusOf({ series: dir }, 'series', mountedAt(dir))).toBe('ok');
+  });
+
+  // A dead SMB share answers `existsSync` and `access` with yes and then throws ESTALE from
+  // every real syscall. Probing it used to escape the map and 500 the whole overview route.
+  it('reports a stale mount as unreadable instead of throwing', () => {
+    const dir = join(tmpDir(), 'movies');
+    mkdirSync(dir);
+    const stat = statFailsWith(dir, 'Unknown system error -116', -116);
+    const check = probeStorage(cfgWith({ movies: dir }), stat).find((c) => c.id === 'movies')!;
+    expect(check.status).toBe('unreadable');
+    expect(check.detail).toContain('stale mount');
+    expect(check.usage).toBeUndefined();
+  });
+
+  it('names the errno when a mount fails for a reason it cannot diagnose', () => {
+    const dir = join(tmpDir(), 'movies');
+    mkdirSync(dir);
+    const check = probeStorage(cfgWith({ movies: dir }), statFailsWith(dir, 'EIO', -5)).find(
+      (c) => c.id === 'movies',
+    )!;
+    expect(check.status).toBe('unreadable');
+    expect(check.detail).toContain('EIO');
+  });
+
+  it('still calls an absent path missing when the stat itself reports ENOENT', () => {
+    const dir = join(tmpDir(), 'movies');
+    expect(statusOf({ movies: dir }, 'movies', statFailsWith(dir, 'ENOENT', -2))).toBe('missing');
+  });
+
+  it('keeps probing the other roles after one of them fails', () => {
+    const bad = join(tmpDir(), 'movies');
+    const good = join(tmpDir(), 'tv');
+    mkdirSync(bad);
+    mkdirSync(good);
+    const stat: StatDev = (p) => {
+      if (p === bad) throw Object.assign(new Error('boom'), { code: 'ESTALE', errno: -116 });
+      return { dev: p === good ? 2 : 1 };
+    };
+    const checks = probeStorage(cfgWith({ movies: bad, series: good }), stat);
+    expect(checks.find((c) => c.id === 'movies')!.status).toBe('unreadable');
+    expect(checks.find((c) => c.id === 'series')!.status).toBe('ok');
   });
 
   it('keeps the four roles in order', () => {
