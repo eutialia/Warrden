@@ -11,8 +11,20 @@ import { AGENT_SECTIONS, defaultSeedsDir, knowledgeForPrompt, loadKnowledge } fr
 import { scanForThreats } from './threatPatterns.js';
 import { runAgentLoop, SEARCH_CALLSITE, TierBlockedError } from './loop.js';
 import { describeStop, stopFromError, stopIsSiteFault, stopTone, type StopReason } from './stop.js';
+import { LlmError } from '../llm/generator.js';
 import { eventEnvelope } from '../events/envelope.js';
 import { CookieJar, makeTier, TIER_ORDER, type FetchTier, type MakeTierOpts } from './tiers.js';
+
+/** Transcript actions that cost the loop a step: every action the model chose, plus a reply
+ * that would not parse (the loop spends a step telling it so). A refusal or an escalation
+ * note rides on a step already counted. */
+const STEP_ACTIONS = new Set(['search', 'open', 'download', 'request', 'give_up', 'malformed']);
+
+/** How many steps a rung spent, read back off the transcript it wrote — the only account
+ * left when the loop threw instead of returning its own `steps`. */
+function stepsTaken(entries: TranscriptEntry[]): number {
+  return entries.filter((e) => STEP_ACTIONS.has(e.action)).length;
+}
 
 const MAX_BACKOFF_MS = 6 * 3_600_000;
 /** After this long on a higher tier without probing cheaper ones, start one rung down so
@@ -364,7 +376,8 @@ export async function searchSite(
     // Whether any rung got as far as returning a stop. False after the loop means every
     // rung hit a wall, which is a different story from a ladder that ran and found nothing.
     let attempted = false;
-    // Steps the last attempt spent. A throw reports none: the loop never returned.
+    // Steps the last attempt spent. A throw has no return value to read it off, so the
+    // rung's own transcript entries are counted instead (`stepsTaken`).
     let steps = 0;
     // Rungs that actually returned or threw — what the site-level events count.
     let rungsTried = 0;
@@ -379,6 +392,9 @@ export async function searchSite(
       const tierName = TIER_ORDER[i]!;
       lastTier = tierName;
       rungsTried += 1;
+      // Where this rung's transcript starts, so a throw can be told what this rung spent
+      // rather than what the whole ladder did.
+      const rungStart = transcript.length;
       // make() lives inside the try so a factory throw cannot escape searchSite's
       // never-throws contract — it is handled like any other tier failure.
       try {
@@ -465,10 +481,21 @@ export async function searchSite(
         // exhausted/gave-up: fall through to the next rung.
       } catch (err) {
         if (!(err instanceof TierBlockedError)) {
+          const stop = stopFromError(err);
+          // The provider failing is not the site failing. Blaming the site for it books a
+          // `fail_count` bump and a cooldown on a run that never searched, and hands the
+          // pipeline a "no download" it reports as "nothing found". Let it out instead: the
+          // job fails, and the runner retries it with the backoff the error asks for — the
+          // same thing `archive-map` has always done. A reply that would not parse stays
+          // `malformed`; that is the model answering wrong, not the call failing.
+          if (stop.kind !== 'malformed' && err instanceof LlmError) {
+            runs.finish(runId, 'failed');
+            siteStep.end('error');
+            throw err;
+          }
           // A genuine error (a dead route, an FS failure, a factory throw, ...) is a
           // site-level failure, not an escalation signal.
-          const stop = stopFromError(err);
-          return endRun(stop, 0, {
+          return endRun(stop, stepsTaken(transcript.slice(rungStart)), {
             kind: 'subtitle.site-failed',
             message: `Site ${siteLabel(site.baseUrl)} failed: ${describeStop(stop)}`,
           });

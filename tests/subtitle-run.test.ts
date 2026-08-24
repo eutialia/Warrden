@@ -8,6 +8,7 @@ import { PlacedFiles } from '../src/db/placedFiles.js';
 import { SiteProfiles } from '../src/db/siteProfiles.js';
 import { TraceEntries } from '../src/db/traceEntries.js';
 import { knowledgePath } from '../src/agent/siteKnowledge.js';
+import { LlmError } from '../src/llm/generator.js';
 import type { SearchSiteOptions } from '../src/agent/run.js';
 import { entriesForFiles } from '../src/pipelines/subtitle/archives.js';
 import { MAX_CANDIDATES_PER_EPISODE, MAX_SEARCH_ROUNDS, runSubtitleJob } from '../src/pipelines/subtitle/run.js';
@@ -522,6 +523,24 @@ describe('runSubtitleJob', () => {
     expect(capped[0]!.data).toMatchObject({ instance: fx.arrInstance, targetId: fx.targetId, episodeId: 1, tried: 4 });
     const unresolved = findEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved');
     expect(unresolved!.data).toMatchObject({ episodes: [{ episodeId: 1, quarantined: 4 }] });
+  });
+
+  it('an LLM outage during site search fails the job instead of reporting nothing found', async () => {
+    const fx = subtitleFixture();
+    const outage = new LlmError('provider returned 429', 'site-search', { rateLimited: true });
+    const job = claimSubtitleJob(fx);
+
+    await expect(
+      runSubtitleJob(fx.ctx, job, {
+        searchSite: async () => {
+          throw outage;
+        },
+      }),
+    ).rejects.toBe(outage);
+
+    expect(hasEvent(fx.ctx.events.list({ level: 'attention' }), 'subtitle.unresolved')).toBe(false);
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.site-failed')).toBe(false);
+    expect(new SiteProfiles(fx.ctx.db).get('https://acg.rip')?.fail_count ?? 0).toBe(0);
   });
 
   it('no sites configured -> one subtitle.unresolved attention item naming the episode', async () => {

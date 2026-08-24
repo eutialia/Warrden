@@ -4,6 +4,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { searchSite, failBackoffMs, tierStartIndex, createRunTiers } from '../src/agent/run.js';
+import { SEARCH_CALLSITE } from '../src/agent/loop.js';
+import { LlmError } from '../src/llm/generator.js';
 import { defaultSeedsDir } from '../src/agent/siteKnowledge.js';
 import { emptyKnowledge, renderKnowledge, saveKnowledge } from '../src/agent/siteKnowledge.js';
 import { SubtitleRuns } from '../src/db/subtitleRuns.js';
@@ -630,6 +632,40 @@ describe('searchSite — per-round reporting', () => {
     expect(findEvent(ctx.events.list(), 'subtitle.site-failed')!.message).toContain('3 replies were not valid JSON');
     // One rung only: another rung would put the same prompt to the same model.
     expect((ctx.llm as FakeGenerator).calls).toHaveLength(3);
+  });
+
+  it('a provider failure propagates instead of blaming the site', async () => {
+    const { ctx, job } = setup();
+    const outage = new LlmError('provider returned 429', SEARCH_CALLSITE, { rateLimited: true });
+    ctx.llm = new FakeGenerator([outage]);
+
+    await expect(
+      searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML]), seedsDir: NO_SEEDS }),
+    ).rejects.toBe(outage);
+
+    const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
+    expect(profile.fail_count).toBe(0);
+    expect(profile.last_failure_at).toBeNull();
+    expect(hasEvent(ctx.events.list(), 'subtitle.site-failed')).toBe(false);
+    expect(hasEvent(ctx.events.list(), 'agent.stop')).toBe(false);
+    const row = new SubtitleRuns(ctx.db).listByJob(job.id).find((r) => r.site === 'acg.rip')!;
+    expect(row.status).toBe('failed');
+  });
+
+  it('a non-LLM failure reports the steps the rung spent and still fails the site', async () => {
+    const { ctx, job } = setup();
+    ctx.llm = new FakeGenerator([
+      act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
+      act({ action: 'open', url: 'https://acg.rip/t/1', note: 'o' }),
+      new Error('route is dead'),
+    ]);
+
+    const out = await searchSite(ctx, job, SITE, 'F', tmpDir(), { tiers: stubTiers([OK_HTML, OK_HTML]), seedsDir: NO_SEEDS });
+
+    expect(out.steps).toBe(2);
+    expect(roundEvent(ctx)!.data).toMatchObject({ facts: { steps: 2, stop: 'error' } });
+    expect(findEvent(ctx.events.list(), 'subtitle.site-failed')!.data).toMatchObject({ facts: { steps: 2 } });
+    expect(new SiteProfiles(ctx.db).get('https://acg.rip')!.fail_count).toBe(1);
   });
 
   it('escalation is on by default', async () => {
