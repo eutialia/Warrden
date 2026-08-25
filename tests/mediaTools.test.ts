@@ -57,31 +57,29 @@ const RESYNC_TIMEOUT_MS = 10 * 60_000;
 
 describe('CliMediaTools exec timeouts', () => {
   it.each([
-    ['probeStreams', (tools: CliMediaTools) => tools.probeStreams('video.mkv'), TIMEOUT_MS, '{"streams":[]}'],
-    ['extractSubtitle', (tools: CliMediaTools) => tools.extractSubtitle('video.mkv', 2, 'out.srt'), TIMEOUT_MS, ''],
+    ['probeStreams', 'ffprobe', TIMEOUT_MS, (tools: CliMediaTools) => tools.probeStreams('video.mkv'), '{"streams":[]}'],
+    ['extractSubtitle', 'ffmpeg', TIMEOUT_MS, (tools: CliMediaTools) => tools.extractSubtitle('video.mkv', 2, 'out.srt'), ''],
     [
       'resyncAlass',
-      (tools: CliMediaTools) => tools.resyncAlass({ reference: 'ref.srt', subtitle: 'sub.srt', outPath: 'out.srt' }),
+      'alass',
       RESYNC_TIMEOUT_MS,
+      (tools: CliMediaTools) => tools.resyncAlass({ reference: 'ref.srt', subtitle: 'sub.srt', outPath: 'out.srt' }),
       '',
     ],
     [
       'resyncFfsubsync',
+      'ffsubsync',
+      RESYNC_TIMEOUT_MS,
       (tools: CliMediaTools) =>
         tools.resyncFfsubsync({ videoPath: 'video.mkv', subtitlePath: 'sub.srt', outPath: 'out.srt' }),
-      RESYNC_TIMEOUT_MS,
       '',
     ],
-  ] as const)('%s runs its exec through the injected seam with a %ims timeout', async (_name, invoke, expectedTimeout, stdout) => {
+  ] as const)('%s runs %s through the injected seam with a %ims timeout', async (_name, binary, expectedTimeout, invoke, stdout) => {
     const exec = vi.fn().mockResolvedValue({ stdout, stderr: '' });
     const tools = new CliMediaTools({ exec });
 
     await invoke(tools);
 
-    expect(exec).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.any(Array),
-      expect.objectContaining({ timeout: expectedTimeout }),
-    );
+    expect(exec).toHaveBeenCalledWith(binary, expect.any(Array), expect.objectContaining({ timeout: expectedTimeout }));
   });
 });
