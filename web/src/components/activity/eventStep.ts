@@ -40,7 +40,6 @@ const ACTION_COPY: Record<string, string> = {
   'trigger:webhook': 'Webhook',
   'trigger:reconcile': 'Reconcile scan',
   'trigger:manual': 'Manual trigger',
-  'run:finished': 'Run finished',
   'run:attention': 'Needs a human',
   'run:rescheduled': 'Waiting',
   'acquire:search': 'Searched',
@@ -57,7 +56,17 @@ const ACTION_COPY: Record<string, string> = {
   'ingest:unmatched': 'Could not match',
 };
 
-function actionLabel(scope: string, action: string): string {
+/** `run:finished` covers both endings `reportRunFinished`/`reportRunFailed` write
+ * (`src/jobs/finished.ts`), told apart by `facts.error`: absent means the run completed,
+ * present means it threw. A retried throw goes around again — that is an attempt failing,
+ * not the run concluding — so it earns its own copy instead of `run:finished`'s. */
+function runFinishedLabel(facts: EventFacts): string {
+  if (facts.error === undefined) return 'Run finished';
+  return facts.retried === true ? 'Attempt failed, retrying' : 'Run failed';
+}
+
+function actionLabel(scope: string, action: string, facts: EventFacts): string {
+  if (scope === 'run' && action === 'finished') return runFinishedLabel(facts);
   return ACTION_COPY[`${scope}:${action}`] ?? action;
 }
 
@@ -112,7 +121,7 @@ export function stepParts(event: EventRow): { label: string; detail: string } {
   if (envelope === null) return { label: event.kind, detail: event.kind };
 
   const facts = envelope.facts ?? {};
-  const head = [facts.site, actionLabel(envelope.scope, envelope.action), ...highlights(facts)].filter(isPresent);
+  const head = [facts.site, actionLabel(envelope.scope, envelope.action, facts), ...highlights(facts)].filter(isPresent);
   const label = head.length > 0 ? head.join(' · ') : event.kind;
   const detail = facts.detail ?? facts.reason ?? facts.error ?? label;
   return { label, detail };

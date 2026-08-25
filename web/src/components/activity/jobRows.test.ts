@@ -119,6 +119,24 @@ describe('stepParts', () => {
       detail: 'Run finished',
     },
     {
+      name: 'a retried failure is an attempt, not a finished run',
+      event: event({
+        level: 'warn',
+        data: { scope: 'run', action: 'finished', facts: { pipeline: 'subtitle', error: 'ECONNRESET', retried: true, permanent: false } },
+      }),
+      label: 'Attempt failed, retrying',
+      detail: 'ECONNRESET',
+    },
+    {
+      name: 'a failure with no more retries left says the run failed',
+      event: event({
+        level: 'warn',
+        data: { scope: 'run', action: 'finished', facts: { pipeline: 'subtitle', error: 'EACCES', retried: false, permanent: true } },
+      }),
+      label: 'Run failed',
+      detail: 'EACCES',
+    },
+    {
       name: 'episodes collapse to a range per season',
       event: event({
         kind: 'subtitle.unresolved',
