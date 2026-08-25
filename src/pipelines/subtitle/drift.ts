@@ -17,7 +17,7 @@ const DRIFT_CONFIG = {
   /** Below this the two tracks share no alignment structure — resync would hallucinate. */
   qualityThreshold: 0.4,
   /** At/above this the candidate is placed as-is. */
-  acceptRatio: 0.85,
+  acceptRatio: 0.8,
 } as const;
 
 interface OffsetScore {
