@@ -422,6 +422,20 @@ describe('runSubtitleJob', () => {
     });
   });
 
+  it('a reference track too sparse to score (a forced-signs track) counts as no reference: the candidate places unverified', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, srtTable(cueStarts(6, 10), 2000));
+    fx.ctx.llm = new FakeGenerator([]);
+
+    await runSubtitleJob(fx.ctx, claimSubtitleJob(fx), siteStub(PACK));
+
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.quarantined')).toBe(false);
+    const rows = new PlacedFiles(fx.ctx.db).listByTarget(fx.arrInstance, 'series', fx.targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ data: { drift: 'unverified' } });
+  });
+
   it('traces the arr calls and one side-effecting entry per placement', async () => {
     const fx = subtitleFixture();
     fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);

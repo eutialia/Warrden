@@ -85,6 +85,13 @@ export function bestOffsetScore(a: Span[], b: Span[], opts?: Partial<typeof DRIF
   return best;
 }
 
+/** Whether a cue table is big enough to be evidence at all (`minScorableCues`). A reference
+ * that fails this is "no reference", which the caller treats differently from a candidate
+ * that fails against a real one. */
+export function isScorable(cues: readonly Span[]): boolean {
+  return cues.length >= DRIFT_CONFIG.minScorableCues;
+}
+
 /** Buckets a candidate against the reference: place as-is, resync then re-check, or reject. */
 export function assessDrift(a: Span[], b: Span[], opts?: Partial<typeof DRIFT_CONFIG>): DriftAssessment {
   const cfg = { ...DRIFT_CONFIG, ...opts };

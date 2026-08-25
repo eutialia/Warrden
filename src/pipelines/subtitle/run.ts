@@ -34,7 +34,7 @@ import {
   isIngestibleSubtitlePayload,
   UnsupportedArchiveError,
 } from './archives.js';
-import { assessDrift } from './drift.js';
+import { assessDrift, isScorable } from './drift.js';
 import { describeEpisodeRanges } from './episodeRanges.js';
 import { mapArchiveWithLlm } from './mapArchive.js';
 import { buildSearchHints, FRESH_DAYS, isFreshGap, type FetchedPack, type MissingSeason } from './queries.js';
@@ -868,10 +868,10 @@ async function decideCandidate(entry: Candidate, t: EpisodeTarget, state: RunSta
 }
 
 /** Extracts the episode video's first embedded subtitle track to a per-run temp path once
- * (cached per video), then parses it. `null` when there's no embedded reference at all, or
- * the extraction produced nothing parseable — the caller treats `null` as "no usable
- * reference", placing the candidate unverified rather than failing the whole gate on one
- * broken video. */
+ * (cached per video), then parses it. `null` when there's no embedded reference at all, the
+ * extraction produced nothing parseable, or the track is too sparse to score (a forced-signs
+ * track) — the caller treats `null` as "no usable reference", placing the candidate
+ * unverified rather than failing the whole gate on one broken video. */
 async function referenceCues(t: EpisodeTarget, state: RunState): Promise<SubtitleCue[] | null> {
   const { media, refCache, refDir } = state;
   if (t.embeddedRefs.length === 0) return null;
@@ -892,7 +892,7 @@ async function referenceCues(t: EpisodeTarget, state: RunState): Promise<Subtitl
     }
   }
   const cues = cuesToScore(refPath);
-  return cues.length > 0 ? cues : null;
+  return isScorable(cues) ? cues : null;
 }
 
 
