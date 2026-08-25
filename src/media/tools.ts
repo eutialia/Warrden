@@ -3,6 +3,10 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const TIMEOUT_MS = 30_000;
+/** alass and ffsubsync run minutes-scale on a full episode (ffsubsync runs VAD over the whole
+ * audio track; alass decodes the reference through ffmpeg) — the 30s probe/extract timeout
+ * would kill a resync mid-run. */
+const RESYNC_TIMEOUT_MS = 10 * 60_000;
 
 type ExecFileAsync = typeof execFileAsync;
 type ProbedBinary = 'ffprobe' | 'alass' | 'ffsubsync';
@@ -86,7 +90,7 @@ export class CliMediaTools implements MediaTools {
   }
 
   async probeStreams(videoPath: string): Promise<MediaStream[]> {
-    const { stdout } = await execFileAsync(
+    const { stdout } = await this.exec(
       'ffprobe',
       ['-v', 'quiet', '-print_format', 'json', '-show_streams', videoPath],
       { timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
@@ -104,22 +108,22 @@ export class CliMediaTools implements MediaTools {
   }
 
   async extractSubtitle(videoPath: string, streamIndex: number, destPath: string): Promise<void> {
-    await execFileAsync('ffmpeg', ['-y', '-v', 'error', '-i', videoPath, '-map', `0:${streamIndex}`, destPath], {
+    await this.exec('ffmpeg', ['-y', '-v', 'error', '-i', videoPath, '-map', `0:${streamIndex}`, destPath], {
       timeout: TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
     });
   }
 
   async resyncAlass(input: { reference: string; subtitle: string; outPath: string }): Promise<void> {
-    await execFileAsync('alass', [input.reference, input.subtitle, input.outPath], {
-      timeout: TIMEOUT_MS,
+    await this.exec('alass', [input.reference, input.subtitle, input.outPath], {
+      timeout: RESYNC_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
     });
   }
 
   async resyncFfsubsync(input: { videoPath: string; subtitlePath: string; outPath: string }): Promise<void> {
-    await execFileAsync('ffsubsync', [input.videoPath, '-i', input.subtitlePath, '-o', input.outPath], {
-      timeout: TIMEOUT_MS,
+    await this.exec('ffsubsync', [input.videoPath, '-i', input.subtitlePath, '-o', input.outPath], {
+      timeout: RESYNC_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
     });
   }
