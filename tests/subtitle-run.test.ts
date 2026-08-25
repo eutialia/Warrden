@@ -350,7 +350,7 @@ describe('runSubtitleJob', () => {
     const rows = new TraceEntries(fx.ctx.db).listByJob(job.id);
     const filtered = rows.filter((r) => r.kind === 'subtitle.filter' && r.summary.includes('no longer on disk'));
     expect(filtered).toHaveLength(1);
-    expect(filtered[0]!.summary).toContain('1');
+    expect(filtered[0]!.summary).toContain('skipped 1 file');
   });
 
   /** A deps stub that hands back a fresh zip each call under the given url, named the way the

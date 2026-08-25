@@ -488,9 +488,8 @@ export async function searchSite(
           // `fail_count` bump and a cooldown on a run that never searched, and hands the
           // pipeline a "no download" it reports as "nothing found". Let it out instead: the
           // job fails, and the runner retries it with the backoff the error asks for — the
-          // same thing `archive-map` has always done. A reply that would not parse stays
-          // `malformed`; that is the model answering wrong, not the call failing.
-          if (stop.kind !== 'malformed' && err instanceof LlmError) {
+          // same thing `archive-map` has always done.
+          if (err instanceof LlmError) {
             runs.finish(runId, 'failed');
             siteStep.end('error');
             throw err;
