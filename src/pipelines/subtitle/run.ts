@@ -909,36 +909,34 @@ async function tryResyncPipeline(
   const avail = await media.available();
   if (!avail.alass && !avail.ffsubsync) return null; // no resync tool at all -> quarantine
 
-  // Attempt 1: alass, reference = the video. Skipped when alass isn't on PATH; a throw
-  // (missing binary, or a failed run) also falls through to the ffsubsync attempt.
+  // Attempt 1: alass, reference = the video. Skipped when alass isn't on PATH. Any failure —
+  // the binary throwing, or exiting 0 but leaving no readable/decodable output — falls
+  // through to the ffsubsync attempt rather than failing the job.
   if (avail.alass) {
     const alassOut = join(resyncDir, `${base}-alass${ext}`);
-    let alassOk = false;
     try {
       await media.resyncAlass({ reference: t.videoPath, subtitle: entryPath, outPath: alassOut });
-      alassOk = true;
-    } catch {
-      // alass failed (not installed despite availability, or errored) -> try ffsubsync.
-    }
-    if (alassOk) {
       const afterAlass = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(alassOut))));
       if (afterAlass.state === 'in-sync') {
         return { kind: 'place', path: alassOut, lang, offsetMs: afterAlass.offsetMs, drift: 'resynced' };
       }
+    } catch {
+      // alass failed or produced nothing usable -> try ffsubsync.
     }
   }
 
-  // Attempt 2: ffsubsync (aligns to the video's audio), then re-assess.
+  // Attempt 2: ffsubsync (aligns to the video's audio), then re-assess. Same failure
+  // contract as alass: a throw anywhere in this block quarantines instead of failing the job.
   if (!avail.ffsubsync) return null;
   const ffOut = join(resyncDir, `${base}-ffsubsync${ext}`);
   try {
     await media.resyncFfsubsync({ videoPath: t.videoPath, subtitlePath: entryPath, outPath: ffOut });
+    const afterFf = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(ffOut))));
+    if (afterFf.state === 'in-sync') {
+      return { kind: 'place', path: ffOut, lang, offsetMs: afterFf.offsetMs, drift: 'resynced' };
+    }
   } catch {
-    return null; // ffsubsync failed -> caller quarantines
-  }
-  const afterFf = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(ffOut))));
-  if (afterFf.state === 'in-sync') {
-    return { kind: 'place', path: ffOut, lang, offsetMs: afterFf.offsetMs, drift: 'resynced' };
+    // ffsubsync failed or produced nothing usable -> caller quarantines.
   }
 
   return null; // neither tool reached in-sync -> caller quarantines

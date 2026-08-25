@@ -476,6 +476,25 @@ describe('runSubtitleJob', () => {
     expect(existsSync(expected)).toBe(true);
   });
 
+  it('alass exits 0 but writes nothing -> falls through to ffsubsync instead of failing the job', async () => {
+    // alass "succeeding" with no usable output is not a thrown error, so it must be treated
+    // exactly like a failed/missing binary: fall through to ffsubsync, never crash the job.
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    fx.media.setAlassWritesNothing();
+    fx.media.setFfsubsyncResult(SRT);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_SHIFTED }));
+
+    expect(fx.media.alassCalls).toHaveLength(1);
+    expect(fx.media.ffsubsyncCalls).toHaveLength(1); // fell through instead of stopping at alass
+    expect(hasEvent(fx.ctx.events.list(), 'subtitle.resynced')).toBe(true);
+    const expected = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
+    expect(existsSync(expected)).toBe(true);
+  });
+
   it('unscorable candidate -> quarantined as a warn event, counted into the one unresolved item', async () => {
     const fx = subtitleFixture();
     fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);

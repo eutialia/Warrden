@@ -859,6 +859,14 @@ export class FakeMediaTools implements MediaTools {
     this.opts.ffsubsyncResults = { '*': content };
   }
 
+  /** Post-construction seam: make `resyncAlass` resolve (exit 0) without writing `outPath` —
+   * the real binary's "ran fine, produced garbage/nothing" failure mode, as opposed to a
+   * non-zero exit. */
+  private alassWritesNothing = false;
+  setAlassWritesNothing(): void {
+    this.alassWritesNothing = true;
+  }
+
   /** Post-construction seam: override which binaries `available()` reports on PATH.
    * Defaults to all three present; pass e.g. `{ alass: false }` to exercise the ffsubsync
    * fallback or quarantine paths. */
@@ -888,6 +896,7 @@ export class FakeMediaTools implements MediaTools {
 
   async resyncAlass(input: { reference: string; subtitle: string; outPath: string }): Promise<void> {
     this.alassCalls.push(input);
+    if (this.alassWritesNothing) return;
     const injected = this.opts.alassResults?.[input.subtitle] ?? this.opts.alassResults?.['*'];
     writeFileSync(input.outPath, injected ?? readFileSync(input.subtitle));
   }
