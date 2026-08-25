@@ -137,10 +137,8 @@ async function mapBatch(input: {
     'You map each numbered subtitle file extracted from a downloaded subtitle pack to the episode it belongs to, using the episode table provided.',
     'Each file is shown as its path inside the pack, so a directory name may carry the season or the fansub group even when the filename holds only an episode number.',
     'Filenames may include pre-parsed hints (lang, parsed episode ref) — use those plus episode numbers, absolute numbers, and titles to decide.',
-    "The pack's directory and file names say which season(s) it covers.",
-    'Map each file to the episode it truly belongs to, whether or not that episode is wanted.',
-    'Never assign a file to a wanted episode only because the numbers coincide.',
-    "Use null when the file's season is not in the table.",
+    'Rows marked (wanted) are the episodes this run still needs a file for; every other row is there so a file from another season has somewhere true to go.',
+    'Assign the true episode either way, and null only when no row fits.',
     "Answer with each file's number and the matched episode id, using episodeId null when a file is genuinely unmatchable.",
     'Respond with JSON matching the schema provided — no prose outside the JSON.',
   ].join(' ');

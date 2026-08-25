@@ -46,10 +46,12 @@ describe('mapArchiveWithLlm', () => {
     ['an episode in the table that is not wanted', 13, null, [1]],
     ['an episode that is not in the table at all', 999, null, []],
   ])('assignment to %s', async (_label, assigned, expected, offTarget) => {
-    const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: assigned }], reasoning: 'ok' }]);
+    const llm = new FakeGenerator([
+      { assignments: [{ file: 1, episodeId: assigned }, { file: 2, episodeId: 12 }], reasoning: 'ok' },
+    ]);
     const dropped: number[] = [];
 
-    expect(await map({ llm, onOffTarget: (n) => dropped.push(n) })).toEqual([expected, null]);
+    expect(await map({ llm, onOffTarget: (n) => dropped.push(n) })).toEqual([expected, 12]);
     expect(dropped).toEqual(offTarget);
   });
 
@@ -65,6 +67,14 @@ describe('mapArchiveWithLlm', () => {
     const llm = new FakeGenerator([{ assignments: [], reasoning: 'ok' }]);
     await map({ llm });
     expect(llm.calls[0]!.prompt).toContain(line);
+  });
+
+  it('tells the model what the (wanted) marker means and when null is the answer', async () => {
+    const llm = new FakeGenerator([{ assignments: [], reasoning: 'ok' }]);
+    await map({ llm });
+    expect(llm.calls[0]!.system).toContain(
+      'Rows marked (wanted) are the episodes this run still needs a file for; every other row is there so a file from another season has somewhere true to go. Assign the true episode either way, and null only when no row fits.',
+    );
   });
 
   it('shows each file as its path under the pack root, since the directory carries the season', async () => {
