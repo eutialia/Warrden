@@ -14,10 +14,16 @@ const DRIFT_CONFIG = {
   windowSize: 0,
   maxOffsetMs: 120_000,
   offsetStepMs: 100,
-  /** Below this the two tracks share no alignment structure — resync would hallucinate. */
+  /** Below this the best offset barely overlaps at all: a track from a different cut or a
+   * different show. A wrong-season file of the same show still scores 0.60-0.78, so this
+   * threshold rejects noise, not mismatches — `acceptRatio` is what sorts those out. */
   qualityThreshold: 0.4,
   /** At/above this the candidate is placed as-is. */
   acceptRatio: 0.8,
+  /** Refuse to score at all below this many cues on the shorter side: a forced-signs track's
+   * handful of cues clears `acceptRatio` by chance often enough to be worthless as evidence.
+   * A don't-score valve, unlike `MIN_DIALOGUE_CUES`, which only declines to filter. */
+  minScorableCues: 20,
 };
 
 interface OffsetScore {
@@ -33,7 +39,7 @@ export interface DriftAssessment {
 }
 
 /** Scoring only ever needs a cue's timing, never its text. */
-type Span = Pick<SubtitleCue, 'startMs' | 'endMs'>;
+export type Span = Pick<SubtitleCue, 'startMs' | 'endMs'>;
 
 function overlapMs(a: Span, b: Span): number {
   return Math.max(0, Math.min(a.endMs, b.endMs) - Math.max(a.startMs, b.startMs));
@@ -43,9 +49,9 @@ function overlapMs(a: Span, b: Span): number {
  * the shorter list, 0..1. Two real releases always disagree about what to typeset — song
  * lyrics, signs, an ED card one track carries and the other doesn't — and those cues have no
  * partner at any offset, so a mean lets a minority of them drag a perfectly aligned file
- * under the accept ratio. The median asks the majority of cues instead. Two-pointer over the
- * sorted lists — O(n+m) per offset step, not O(n·m). */
-function scoreAtOffset(a: SubtitleCue[], b: SubtitleCue[], offsetMs: number): number {
+ * under the accept ratio. The median asks the majority of cues instead. Two-pointer overlap
+ * plus one sort of the ratios per offset step, not O(n·m). */
+function scoreAtOffset(a: Span[], b: Span[], offsetMs: number): number {
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
   const shiftedLong: Span[] = long.map((c) => ({ startMs: c.startMs - offsetMs * (long === b ? 1 : -1), endMs: c.endMs - offsetMs * (long === b ? 1 : -1) }));
   const ratios: number[] = [];
@@ -60,24 +66,29 @@ function scoreAtOffset(a: SubtitleCue[], b: SubtitleCue[], offsetMs: number): nu
     ratios.push(best);
   }
   ratios.sort((x, y) => x - y);
+  // On an even count this takes the upper of the two middles: the permissive choice.
   return ratios[Math.floor(ratios.length / 2)] ?? 0;
 }
 
-/** Sweeps `±maxOffsetMs` in `offsetStepMs` steps and returns the best-scoring offset. */
-export function bestOffsetScore(a: SubtitleCue[], b: SubtitleCue[], opts?: Partial<typeof DRIFT_CONFIG>): OffsetScore {
+/** Sweeps `±maxOffsetMs` in `offsetStepMs` steps and returns the best-scoring offset. Exact
+ * ties are routine — a periodic cue table realigns with itself a whole period over — so a tie
+ * goes to the offset nearest zero rather than to whichever end of the sweep came first. */
+export function bestOffsetScore(a: Span[], b: Span[], opts?: Partial<typeof DRIFT_CONFIG>): OffsetScore {
   const cfg = { ...DRIFT_CONFIG, ...opts };
   let best: OffsetScore = { offsetMs: 0, score: -1 };
   for (let offset = -cfg.maxOffsetMs; offset <= cfg.maxOffsetMs; offset += cfg.offsetStepMs) {
     const score = scoreAtOffset(a, b, offset);
-    if (score > best.score) best = { offsetMs: offset, score };
+    if (score > best.score || (score === best.score && Math.abs(offset) < Math.abs(best.offsetMs))) {
+      best = { offsetMs: offset, score };
+    }
   }
   return best;
 }
 
 /** Buckets a candidate against the reference: place as-is, resync then re-check, or reject. */
-export function assessDrift(a: SubtitleCue[], b: SubtitleCue[], opts?: Partial<typeof DRIFT_CONFIG>): DriftAssessment {
+export function assessDrift(a: Span[], b: Span[], opts?: Partial<typeof DRIFT_CONFIG>): DriftAssessment {
   const cfg = { ...DRIFT_CONFIG, ...opts };
-  if (a.length === 0 || b.length === 0) return { state: 'unscorable', offsetMs: 0, score: 0 };
+  if (Math.min(a.length, b.length) < cfg.minScorableCues) return { state: 'unscorable', offsetMs: 0, score: 0 };
   const { offsetMs, score } = bestOffsetScore(a, b, cfg);
   if (score < cfg.qualityThreshold) return { state: 'unscorable', offsetMs, score };
   if (score >= cfg.acceptRatio && Math.abs(offsetMs) <= cfg.offsetStepMs) return { state: 'in-sync', offsetMs, score };

@@ -86,6 +86,10 @@ function lagFor(ratio: number): number {
 const scoreAtZeroShift = (a: SubtitleCue[], b: SubtitleCue[]): number =>
   bestOffsetScore(a, b, { maxOffsetMs: 0 }).score;
 
+/** The bucketing fixtures below are hand-sized cue tables of a few cues each, well under the
+ * default scorable floor; that floor has its own case. */
+const SCORE_ANY_SIZE = { minScorableCues: 1 };
+
 describe('assessDrift', () => {
   const at82 = cuesWithLags([0, lagFor(0.82), -lagFor(0.82), 900, -900]);
   const at78 = cuesWithLags([0, lagFor(0.78), -lagFor(0.78), 900, -900]);
@@ -106,11 +110,24 @@ describe('assessDrift', () => {
     ['a table overlapping at 0.6 per cue is drifted', at60.reference, at60.candidate, 'drifted'],
     ['30% unmatched cues on the shorter side stay in-sync', withOrphans.reference, withOrphans.candidate, 'in-sync'],
   ])('%s', (_name, a, b, state) => {
-    expect(assessDrift(a, b).state).toBe(state);
+    expect(assessDrift(a, b, SCORE_ANY_SIZE).state).toBe(state);
+  });
+
+  it.each<[string, number, DriftAssessment['state']]>([
+    ['refuses a cue table one short of the scorable floor', 19, 'unscorable'],
+    ['scores a cue table at the floor', 20, 'in-sync'],
+  ])('%s', (_name, count, state) => {
+    const reference = cues(spacedStarts(200));
+    expect(assessDrift(reference, reference.slice(0, count)).state).toBe(state);
+  });
+
+  it('breaks an exact score tie toward the offset nearest zero', () => {
+    const periodic = cues(Array.from({ length: 12 }, (_, i) => i * 30));
+    expect(bestOffsetScore(periodic, periodic).offsetMs).toBe(0);
   });
 
   it('a drifted assessment carries the recovered offset', () => {
-    const r = assessDrift(BASE, shift(BASE, 5000));
+    const r = assessDrift(BASE, shift(BASE, 5000), SCORE_ANY_SIZE);
     expect(r.state).toBe('drifted');
     expect(r.offsetMs).toBe(5000);
   });
@@ -154,16 +171,15 @@ function withKaraokeCarpet(karaokeShiftMs: number): SubtitleCue[] {
 describe('assessDrift over karaoke-heavy cue tables', () => {
   const reference = withKaraokeCarpet(0);
   const candidate = withKaraokeCarpet(1000);
-  const sweep = { maxOffsetMs: 1500 };
 
   it('scores an unfiltered table on the karaoke carpet that outnumbers dialogue', () => {
-    const r = assessDrift(reference, candidate, sweep);
+    const r = assessDrift(reference, candidate);
     expect(r.state).toBe('drifted');
     expect(r.offsetMs).toBe(1000);
   });
 
   it('reads the same tables as in-sync once scored on dialogue cues only', () => {
-    const r = assessDrift(dialogueCues(reference), dialogueCues(candidate), sweep);
+    const r = assessDrift(dialogueCues(reference), dialogueCues(candidate));
     expect(r.state).toBe('in-sync');
     expect(r.offsetMs).toBe(0);
   });

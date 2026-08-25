@@ -27,61 +27,43 @@ const VIDEO_STREAMS: MediaStream[] = [
   { index: 2, codecType: 'subtitle', codecName: 'ass', language: 'ja', forced: false, title: null },
 ];
 
+/** Cue starts in seconds, unevenly spaced so no whole-table shift realigns the table with
+ * itself and the drift sweep peaks at the true offset. `count` clears the drift gate's
+ * `minScorableCues` floor, below which nothing is scored at all. */
+function cueStarts(count: number, firstSec: number): number[] {
+  const gaps = [31, 47, 29, 53, 37, 41, 59, 43];
+  const starts: number[] = [];
+  for (let i = 0; i < count; i++) starts.push((starts[i - 1] ?? firstSec - gaps[0]!) + gaps[i % gaps.length]!);
+  return starts;
+}
+
+function srtTimestamp(ms: number): string {
+  const pad = (n: number, width = 2) => String(n).padStart(width, '0');
+  return `${pad(Math.floor(ms / 3_600_000))}:${pad(Math.floor(ms / 60_000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${pad(ms % 1000, 3)}`;
+}
+
+function srtTable(startsSec: number[], durationMs: number): string {
+  return startsSec
+    .map((sec, i) => `${i + 1}\n${srtTimestamp(sec * 1000)} --> ${srtTimestamp(sec * 1000 + durationMs)}\nline ${i + 1}\n`)
+    .join('\n');
+}
+
+const SCORABLE_CUES = 24;
+
 /** An SRT cue table for the fixture's episode — shared by the reference extraction AND the
  * in-sync candidate so both parse to the same timings (drift sees them aligned). */
-const SRT = `1
-00:00:10,000 --> 00:00:12,000
-one
-
-2
-00:00:30,000 --> 00:00:32,000
-two
-
-3
-00:01:02,000 --> 00:01:04,000
-three
-
-4
-00:01:35,000 --> 00:01:37,000
-four
-
-5
-00:02:10,000 --> 00:02:12,000
-five
-`;
+const SRT = srtTable(cueStarts(SCORABLE_CUES, 10), 2000);
 
 /** The same table shifted +5s — `assessDrift` recovers the offset, sees `drifted`. */
-const SRT_SHIFTED = `1
-00:00:15,000 --> 00:00:17,000
-one
+const SRT_SHIFTED = srtTable(cueStarts(SCORABLE_CUES, 15), 2000);
 
-2
-00:00:35,000 --> 00:00:37,000
-two
-
-3
-00:01:07,000 --> 00:01:09,000
-three
-
-4
-00:01:40,000 --> 00:01:42,000
-four
-
-5
-00:02:15,000 --> 00:02:17,000
-five
-`;
-
-/** Cues with no timing relationship to SRT at all — `assessDrift` scores every offset below
- * the quality threshold and returns `unscorable`. */
-const SRT_UNRELATED = `1
-00:00:07,000 --> 00:00:09,000
-x
-
-2
-00:00:21,000 --> 00:00:23,000
-y
-`;
+/** Cues with no timing relationship to SRT at all — short flashes on a different rhythm, so
+ * every offset overlaps a reference cue by at most a fraction of its 2s and `assessDrift`
+ * scores below the quality threshold. */
+const SRT_UNRELATED = srtTable(
+  cueStarts(SCORABLE_CUES, 7).map((s) => s * 2 + 3),
+  300,
+);
 
 function makeZip(files: Record<string, string>, name = 'pack.zip'): string {
   const zip = new AdmZip();
