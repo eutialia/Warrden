@@ -20,7 +20,7 @@ import type { ArrApi, EpisodeResource } from '../../arr/types.js';
 import { traceArrClient } from '../../arr/traced.js';
 import { RescheduleError } from '../../jobs/errors.js';
 import type { JobRow } from '../../jobs/queue.js';
-import { decodeSubtitleBytes, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
+import { decodeSubtitleBytes, dialogueCues, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
 import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetMeta, type TargetMeta } from '../targetTitle.js';
 import { assertMounted, MOUNT_RETRY_MS } from '../mounts.js';
@@ -830,6 +830,13 @@ function reportCapped(ctx: AppContext, job: JobRow, t: EpisodeTarget): void {
   });
 }
 
+/** Reads a subtitle file into the cue table the drift gate scores: parsed, then narrowed to
+ * dialogue. Reference and candidate go through the same narrowing, so a karaoke carpet on
+ * either side can't decide the offset. */
+function cuesToScore(path: string): SubtitleCue[] {
+  return dialogueCues(parseSubtitleCues(decodeSubtitleBytes(readFileSync(path))));
+}
+
 /** Runs the drift gate for one candidate, returning what to do with it (and the source path
  * to place — the original, or a resynced output — plus the offset/drift labels for the event
  * and provenance). */
@@ -842,8 +849,7 @@ async function decideCandidate(entry: Candidate, t: EpisodeTarget, state: RunSta
     return { kind: 'place', path: entry.path, lang: entry.lang, offsetMs: 0, drift: 'unverified' };
   }
 
-  const candCues = parseSubtitleCues(decodeSubtitleBytes(readFileSync(entry.path)));
-  const first = assessDrift(refCues, candCues);
+  const first = assessDrift(refCues, cuesToScore(entry.path));
 
   if (first.state === 'in-sync') {
     return { kind: 'place', path: entry.path, lang: entry.lang, offsetMs: first.offsetMs, drift: 'in-sync' };
@@ -885,7 +891,7 @@ async function referenceCues(t: EpisodeTarget, state: RunState): Promise<Subtitl
       return null;
     }
   }
-  const cues = parseSubtitleCues(decodeSubtitleBytes(readFileSync(refPath)));
+  const cues = cuesToScore(refPath);
   return cues.length > 0 ? cues : null;
 }
 
@@ -916,7 +922,7 @@ async function tryResyncPipeline(
     const alassOut = join(resyncDir, `${base}-alass${ext}`);
     try {
       await media.resyncAlass({ reference: t.videoPath, subtitle: entryPath, outPath: alassOut });
-      const afterAlass = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(alassOut))));
+      const afterAlass = assessDrift(refCues, cuesToScore(alassOut));
       if (afterAlass.state === 'in-sync') {
         return { kind: 'place', path: alassOut, lang, offsetMs: afterAlass.offsetMs, drift: 'resynced' };
       }
@@ -931,7 +937,7 @@ async function tryResyncPipeline(
   const ffOut = join(resyncDir, `${base}-ffsubsync${ext}`);
   try {
     await media.resyncFfsubsync({ videoPath: t.videoPath, subtitlePath: entryPath, outPath: ffOut });
-    const afterFf = assessDrift(refCues, parseSubtitleCues(decodeSubtitleBytes(readFileSync(ffOut))));
+    const afterFf = assessDrift(refCues, cuesToScore(ffOut));
     if (afterFf.state === 'in-sync') {
       return { kind: 'place', path: ffOut, lang, offsetMs: afterFf.offsetMs, drift: 'resynced' };
     }

@@ -6,6 +6,9 @@
 export interface SubtitleCue {
   startMs: number;
   endMs: number;
+  /** The cue's rendered line: the ASS Text column, or the SRT block body. Carries the
+   * override tags the drift gate uses to tell dialogue from karaoke and typesetting. */
+  text: string;
 }
 
 // SRT: 00:00:01,000 or 00:00:01.000
@@ -22,14 +25,19 @@ function parseAssTimestamp(t: string): number | null {
   return Number(m[1]) * 3_600_000 + Number(m[2]) * 60_000 + Number(m[3]) * 1000 + Number(m[4]) * 10;
 }
 
+const SRT_TIMING = /(\d+:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d+:\d{2}:\d{2}[,.]\d{3})/;
+
 function parseSrt(content: string): SubtitleCue[] {
   const cues: SubtitleCue[] = [];
   for (const block of content.replace(/\r\n/g, '\n').split(/\n\n+/)) {
-    const m = block.match(/(\d+:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d+:\d{2}:\d{2}[,.]\d{3})/);
-    if (!m) continue;
+    const lines = block.split('\n');
+    const timingLine = lines.findIndex((l) => SRT_TIMING.test(l));
+    if (timingLine === -1) continue;
+    const m = lines[timingLine]!.match(SRT_TIMING)!;
     const startMs = parseSrtTimestamp(m[1]!);
     const endMs = parseSrtTimestamp(m[2]!);
-    if (startMs !== null && endMs !== null) cues.push({ startMs, endMs });
+    if (startMs === null || endMs === null) continue;
+    cues.push({ startMs, endMs, text: lines.slice(timingLine + 1).join('\n').trim() });
   }
   return cues;
 }
@@ -39,6 +47,7 @@ function parseAss(content: string): SubtitleCue[] {
   let inEvents = false;
   let startCol = 1;
   let endCol = 2;
+  let textCol = 9;
   for (const line of content.split(/\r?\n/)) {
     if (/^\[.*\]$/.test(line.trim())) {
       inEvents = line.trim().toLowerCase() === '[events]';
@@ -50,14 +59,17 @@ function parseAss(content: string): SubtitleCue[] {
       const cols = format[1]!.split(',').map((c) => c.trim().toLowerCase());
       startCol = cols.indexOf('start');
       endCol = cols.indexOf('end');
+      const text = cols.indexOf('text');
+      if (text !== -1) textCol = text;
       continue;
     }
     if (!/^Dialogue:/i.test(line)) continue;
-    // ASS text can itself contain commas — split only up to the Text column.
+    // The Text column is last and may itself contain commas, so re-join its split pieces.
     const parts = line.slice(line.indexOf(':') + 1).split(',');
     const startMs = parseAssTimestamp(parts[startCol] ?? '');
     const endMs = parseAssTimestamp(parts[endCol] ?? '');
-    if (startMs !== null && endMs !== null) cues.push({ startMs, endMs });
+    if (startMs === null || endMs === null) continue;
+    cues.push({ startMs, endMs, text: parts.slice(textCol).join(',').trim() });
   }
   return cues;
 }
@@ -66,6 +78,31 @@ function parseAss(content: string): SubtitleCue[] {
 export function parseSubtitleCues(content: string): SubtitleCue[] {
   const cues = /\[events\]/i.test(content) ? parseAss(content) : parseSrt(content);
   return cues.sort((a, b) => a.startMs - b.startMs);
+}
+
+/** Override tags that mark an event as karaoke timing or as positioned/animated typesetting
+ * rather than a spoken line. Matched as substrings, so `\k` already covers `\kf`/`\ko`; the
+ * full set is spelled out because it is the gate's contract, not an implementation shortcut. */
+const NON_DIALOGUE_TAGS = ['\\k', '\\K', '\\kf', '\\ko', '\\pos(', '\\move(', '\\org(', '\\clip(', '\\iclip(', '\\t('] as const;
+
+/** Below this many survivors the filter is distrusted and the unfiltered table is used —
+ * some groups `\pos` every line, and a handful of cues scores worse than a noisy full table. */
+export const MIN_DIALOGUE_CUES = 40;
+
+function isDialogue(cue: SubtitleCue): boolean {
+  if (NON_DIALOGUE_TAGS.some((tag) => cue.text.includes(tag))) return false;
+  return cue.text.replace(/\{[^}]*\}/g, '').trim().length > 0;
+}
+
+/**
+ * Narrows a cue table to spoken dialogue for drift scoring. A per-syllable OP/ED karaoke
+ * carpet routinely outnumbers a fansub's dialogue ten to one, and scoring against it lets
+ * the carpet — not the dialogue — pick the offset, which is how the gate lands on bogus
+ * alignments. Returns the input untouched when too little survives (see MIN_DIALOGUE_CUES).
+ */
+export function dialogueCues(cues: SubtitleCue[]): SubtitleCue[] {
+  const kept = cues.filter(isDialogue);
+  return kept.length < MIN_DIALOGUE_CUES ? cues : kept;
 }
 
 /**

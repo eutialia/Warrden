@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { assessDrift, bestOffsetScore, type DriftAssessment } from '../src/pipelines/subtitle/drift.js';
-import type { SubtitleCue } from '../src/media/subtitles.js';
+import { dialogueCues, type SubtitleCue } from '../src/media/subtitles.js';
 
 function cues(startsSec: number[], durationMs = 2000): SubtitleCue[] {
-  return startsSec.map((s) => ({ startMs: s * 1000, endMs: s * 1000 + durationMs }));
+  return startsSec.map((s) => ({ startMs: s * 1000, endMs: s * 1000 + durationMs, text: `line at ${s}s` }));
 }
 
 const BASE = cues([10, 30, 62, 95, 130, 180, 240, 300]);
 
 function shift(c: SubtitleCue[], deltaMs: number): SubtitleCue[] {
-  return c.map((x) => ({ startMs: x.startMs + deltaMs, endMs: x.endMs + deltaMs }));
+  return c.map((x) => ({ ...x, startMs: x.startMs + deltaMs, endMs: x.endMs + deltaMs }));
 }
 
 describe('bestOffsetScore', () => {
@@ -43,7 +43,7 @@ function cuesWithDeficientOverlap(
   const fullCount = n - deficientDurationsMs.length;
   const reference = cues(Array.from({ length: n }, (_, i) => (i + 1) * 30));
   const candidate = reference.map((cue, i) =>
-    i < fullCount ? cue : { startMs: cue.startMs, endMs: cue.startMs + deficientDurationsMs[i - fullCount]! },
+    i < fullCount ? cue : { ...cue, endMs: cue.startMs + deficientDurationsMs[i - fullCount]! },
   );
   return { reference, candidate };
 }
@@ -82,5 +82,41 @@ describe('assessDrift', () => {
     const r = assessDrift(score78Ref, score78Candidate);
     expect(r.offsetMs).toBe(0);
     expect(r.score).toBeCloseTo(0.78, 5);
+  });
+});
+
+/** A fansub .ass as the gate really sees it: a few hundred dialogue cues plus a per-syllable
+ * karaoke carpet under the OP, where the carpet outnumbers the dialogue 10:1 and therefore
+ * decides the score. `karaokeShiftMs` staggers the two carpets so they align at a bogus
+ * offset instead of at the true one. */
+function withKaraokeCarpet(karaokeShiftMs: number): SubtitleCue[] {
+  const dialogue = Array.from({ length: 300 }, (_, i) => ({
+    startMs: 95_000 + i * 4000,
+    endMs: 95_000 + i * 4000 + 2000,
+    text: `dialogue ${i}`,
+  }));
+  const karaoke = Array.from({ length: 3000 }, (_, i) => ({
+    startMs: karaokeShiftMs + i * 30 + (i % 97),
+    endMs: karaokeShiftMs + i * 30 + (i % 97) + 25,
+    text: `{\\k12}syl${i}`,
+  }));
+  return [...karaoke, ...dialogue].sort((a, b) => a.startMs - b.startMs);
+}
+
+describe('assessDrift over karaoke-heavy cue tables', () => {
+  const reference = withKaraokeCarpet(0);
+  const candidate = withKaraokeCarpet(1000);
+  const sweep = { maxOffsetMs: 3000 } as const;
+
+  it('lets the karaoke carpet outvote in-sync dialogue', () => {
+    const r = assessDrift(reference, candidate, sweep);
+    expect(r.state).toBe('drifted');
+    expect(r.offsetMs).toBe(1000);
+  });
+
+  it('reads the same tables as in-sync once scored on dialogue cues only', () => {
+    const r = assessDrift(dialogueCues(reference), dialogueCues(candidate), sweep);
+    expect(r.state).toBe('in-sync');
+    expect(r.offsetMs).toBe(0);
   });
 });

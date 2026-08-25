@@ -18,7 +18,7 @@ const DRIFT_CONFIG = {
   qualityThreshold: 0.4,
   /** At/above this the candidate is placed as-is. */
   acceptRatio: 0.8,
-} as const;
+};
 
 interface OffsetScore {
   offsetMs: number;
@@ -32,7 +32,10 @@ export interface DriftAssessment {
   score: number;
 }
 
-function overlapMs(a: SubtitleCue, b: SubtitleCue): number {
+/** Scoring only ever needs a cue's timing, never its text. */
+type Span = Pick<SubtitleCue, 'startMs' | 'endMs'>;
+
+function overlapMs(a: Span, b: Span): number {
   return Math.max(0, Math.min(a.endMs, b.endMs) - Math.max(a.startMs, b.startMs));
 }
 
@@ -40,7 +43,7 @@ function overlapMs(a: SubtitleCue, b: SubtitleCue): number {
  * shorter list, 0..1. Two-pointer over the sorted lists — O(n+m) per offset step, not O(n·m). */
 function scoreAtOffset(a: SubtitleCue[], b: SubtitleCue[], offsetMs: number): number {
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  const shiftedLong = long.map((c) => ({ startMs: c.startMs - offsetMs * (long === b ? 1 : -1), endMs: c.endMs - offsetMs * (long === b ? 1 : -1) }));
+  const shiftedLong: Span[] = long.map((c) => ({ startMs: c.startMs - offsetMs * (long === b ? 1 : -1), endMs: c.endMs - offsetMs * (long === b ? 1 : -1) }));
   let total = 0;
   let j = 0;
   for (const cue of short) {
