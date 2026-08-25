@@ -100,12 +100,17 @@ describe('dialogueCues', () => {
     expect(dialogueCues(withDialogueFloor(text))).toHaveLength(MIN_DIALOGUE_CUES);
   });
 
-  it('returns the input unchanged when too few cues would survive', () => {
+  const SIGNS = 500;
+
+  it.each([
+    ['falls back to the whole table when one cue too few survives', MIN_DIALOGUE_CUES - 1, SIGNS + MIN_DIALOGUE_CUES - 1],
+    ['filters when exactly the floor survives', MIN_DIALOGUE_CUES, MIN_DIALOGUE_CUES],
+  ])('%s', (_name, survivors, expectedLength) => {
     const input = [
-      ...Array.from({ length: MIN_DIALOGUE_CUES - 1 }, (_, i) => cueOf(`line ${i}`, i + 1)),
-      ...Array.from({ length: 500 }, (_, i) => cueOf('{\\pos(640,80)}sign', i + 100)),
+      ...Array.from({ length: survivors }, (_, i) => cueOf(`line ${i}`, i + 1)),
+      ...Array.from({ length: SIGNS }, (_, i) => cueOf('{\\pos(640,80)}sign', i + 100)),
     ];
-    expect(dialogueCues(input)).toBe(input);
+    expect(dialogueCues(input)).toHaveLength(expectedLength);
   });
 
   it('returns [] for []', () => {

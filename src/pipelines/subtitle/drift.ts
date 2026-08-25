@@ -39,12 +39,16 @@ function overlapMs(a: Span, b: Span): number {
   return Math.max(0, Math.min(a.endMs, b.endMs) - Math.max(a.startMs, b.startMs));
 }
 
-/** Scores `b` shifted by `offsetMs` against `a`: mean per-cue best overlap ratio over the
- * shorter list, 0..1. Two-pointer over the sorted lists — O(n+m) per offset step, not O(n·m). */
+/** Scores `b` shifted by `offsetMs` against `a`: the median per-cue best overlap ratio over
+ * the shorter list, 0..1. Two real releases always disagree about what to typeset — song
+ * lyrics, signs, an ED card one track carries and the other doesn't — and those cues have no
+ * partner at any offset, so a mean lets a minority of them drag a perfectly aligned file
+ * under the accept ratio. The median asks the majority of cues instead. Two-pointer over the
+ * sorted lists — O(n+m) per offset step, not O(n·m). */
 function scoreAtOffset(a: SubtitleCue[], b: SubtitleCue[], offsetMs: number): number {
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
   const shiftedLong: Span[] = long.map((c) => ({ startMs: c.startMs - offsetMs * (long === b ? 1 : -1), endMs: c.endMs - offsetMs * (long === b ? 1 : -1) }));
-  let total = 0;
+  const ratios: number[] = [];
   let j = 0;
   for (const cue of short) {
     const dur = Math.max(1, cue.endMs - cue.startMs);
@@ -53,9 +57,10 @@ function scoreAtOffset(a: SubtitleCue[], b: SubtitleCue[], offsetMs: number): nu
     for (let k = j; k < shiftedLong.length && shiftedLong[k]!.startMs < cue.endMs; k++) {
       best = Math.max(best, overlapMs(cue, shiftedLong[k]!) / dur);
     }
-    total += best;
+    ratios.push(best);
   }
-  return total / short.length;
+  ratios.sort((x, y) => x - y);
+  return ratios[Math.floor(ratios.length / 2)] ?? 0;
 }
 
 /** Sweeps `±maxOffsetMs` in `offsetStepMs` steps and returns the best-scoring offset. */
