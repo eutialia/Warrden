@@ -51,6 +51,10 @@ describe('parseSubtitleCues', () => {
     expect(parseSubtitleCues(ASS.replace(/\[Events\]/, section))).toEqual(ASS_CUES);
   });
 
+  it('falls back to the default Start/End columns when the Format line names neither', () => {
+    expect(parseSubtitleCues(ASS.replace(/^Format:.*$/m, 'Format: Layer, Begin, Stop, Style, Name, MarginL, MarginR, MarginV, Effect, Text'))).toEqual(ASS_CUES);
+  });
+
   it('returns [] for content with no parseable cues', () => {
     expect(parseSubtitleCues('not a subtitle file')).toEqual([]);
   });
@@ -69,8 +73,6 @@ describe('dialogueCues', () => {
   it.each([
     ['\\k', '{\\k12}shi{\\k8}ro'],
     ['\\K', '{\\K30}na{\\K22}mi'],
-    ['\\kf', '{\\kf20}so{\\kf15}ra'],
-    ['\\ko', '{\\ko20}ho{\\ko18}shi'],
     ['\\pos(', '{\\an5\\pos(640,80)}Sign: Cafe'],
     ['\\move(', '{\\move(0,0,320,240)}scrolling credit'],
     ['\\org(', '{\\org(320,240)\\frz30}tilted sign'],

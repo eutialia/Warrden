@@ -57,9 +57,11 @@ function parseAss(content: string): SubtitleCue[] {
     const format = line.match(/^Format:\s*(.+)$/i);
     if (format) {
       const cols = format[1]!.split(',').map((c) => c.trim().toLowerCase());
-      startCol = cols.indexOf('start');
-      endCol = cols.indexOf('end');
+      const start = cols.indexOf('start');
+      const end = cols.indexOf('end');
       const text = cols.indexOf('text');
+      if (start !== -1) startCol = start;
+      if (end !== -1) endCol = end;
       if (text !== -1) textCol = text;
       continue;
     }
@@ -82,11 +84,13 @@ export function parseSubtitleCues(content: string): SubtitleCue[] {
 
 /** Override tags that mark an event as karaoke timing or as positioned/animated typesetting
  * rather than a spoken line. Matched as substrings, so `\k` already covers `\kf`/`\ko`; the
- * full set is spelled out because it is the gate's contract, not an implementation shortcut. */
-const NON_DIALOGUE_TAGS = ['\\k', '\\K', '\\kf', '\\ko', '\\pos(', '\\move(', '\\org(', '\\clip(', '\\iclip(', '\\t('] as const;
+ * rest is spelled out because it is the gate's contract, not an implementation shortcut. */
+const NON_DIALOGUE_TAGS = ['\\k', '\\K', '\\pos(', '\\move(', '\\org(', '\\clip(', '\\iclip(', '\\t('] as const;
 
 /** Below this many survivors the filter is distrusted and the unfiltered table is used —
- * some groups `\pos` every line, and a handful of cues scores worse than a noisy full table. */
+ * some groups `\pos` every line, and a handful of cues scores worse than a noisy full table.
+ * A don't-filter valve only: whether a table is worth scoring at all is the drift gate's
+ * `minScorableCues`. */
 export const MIN_DIALOGUE_CUES = 40;
 
 function isDialogue(cue: SubtitleCue): boolean {
