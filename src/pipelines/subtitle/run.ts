@@ -632,16 +632,16 @@ async function matchArchiveRow(
       seriesTitle,
       files: unmatchedEntries,
       rootDir: row.path,
-      episodes: gaps.map((m) => ({
-        id: m.episodeId,
-        seriesId: job.target_id,
-        seasonNumber: m.seasonNumber,
-        episodeNumber: m.episodeNumber,
-        title: '',
-        episodeFileId: 0,
-        hasFile: true,
-      })),
+      episodes: asEpisodeResources(state.allEpisodes),
+      wanted: new Set(gaps.map((g) => g.episodeId)),
       jobId: job.id,
+      onOffTarget: (count) =>
+        ctx.trace.event({
+          jobId: job.id,
+          kind: 'subtitle.map-off-target',
+          summary: `dropped ${count} mapping(s) onto episodes this run does not want`,
+          payload: () => ({ archive: row.path, count }),
+        }),
     });
     const episodesById = new Map(gaps.map((m) => [m.episodeId, m]));
     for (let i = 0; i < unmatchedEntries.length; i++) {

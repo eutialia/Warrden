@@ -62,12 +62,20 @@ function renderFileLine(entry: ArchiveCacheEntry, index: number, rootDir: string
   return `#${index + 1} ${name}${hintSuffix}`;
 }
 
+/** Renders one episode table row, marking the ones this run still wants a file for. The
+ * unmarked rows are what stops a season-1 file from being cornered onto the season-1-numbered
+ * gap: the model has somewhere true to put it. */
+function renderMapEpisodeLine(e: EpisodeResource, wanted: Set<number>): string {
+  return `${renderEpisodeLine(e)}${wanted.has(e.id) ? ' (wanted)' : ''}`;
+}
+
 /**
  * Asks the LLM to map subtitle files extracted from a downloaded pack (already
  * pre-annotated at cache-write time with lang/episodeRef hints) onto the arr episodes
  * they belong to. Same contract shape and failure semantics as `matchSidecarsWithLlm`:
  * - Out-of-range file number → throws `LlmError` (contract violation).
  * - Unknown episode id → coerces to null (one bad guess shouldn't sink the batch).
+ * - Episode that exists but isn't wanted → null, counted through `onOffTarget`.
  * - Empty files → `[]`; empty episodes → all-null without an LLM call.
  */
 export async function mapArchiveWithLlm(input: {
@@ -77,11 +85,16 @@ export async function mapArchiveWithLlm(input: {
   /** Extraction root the file paths are rendered relative to — the archive cache dir. */
   rootDir: string;
   episodes: EpisodeResource[]; // only hasFile episodes — a sub needs a video to sit beside
+  /** The subset of `episodes` this run still lacks a file for. Everything else is context:
+   * shown so a file can be mapped truthfully, then dropped from the answer. */
+  wanted: Set<number>;
   /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
    * with no job at hand (tests), which just means the call isn't traced. */
   jobId?: number;
+  /** Called once per batch that dropped assignments as off-target, with how many. */
+  onOffTarget?: (count: number) => void;
 }): Promise<(number | null)[]> {
-  const { llm, seriesTitle, files, rootDir, episodes, jobId } = input;
+  const { llm, seriesTitle, files, rootDir, episodes, wanted, jobId, onOffTarget } = input;
 
   if (files.length === 0) {
     return [];
@@ -92,13 +105,15 @@ export async function mapArchiveWithLlm(input: {
     return files.map(() => null);
   }
 
-  const episodeLines = episodes.map(renderEpisodeLine).join('\n');
+  const episodeLines = episodes.map((e) => renderMapEpisodeLine(e, wanted)).join('\n');
   const validEpisodeIds = new Set(episodes.map((e) => e.id));
 
   const out: (number | null)[] = [];
   for (let start = 0; start < files.length; start += MAP_BATCH_SIZE) {
     const batch = files.slice(start, start + MAP_BATCH_SIZE);
-    out.push(...(await mapBatch({ llm, seriesTitle, batch, rootDir, episodeLines, validEpisodeIds, jobId })));
+    out.push(
+      ...(await mapBatch({ llm, seriesTitle, batch, rootDir, episodeLines, validEpisodeIds, wanted, jobId, onOffTarget })),
+    );
   }
   return out;
 }
@@ -112,14 +127,20 @@ async function mapBatch(input: {
   rootDir: string;
   episodeLines: string;
   validEpisodeIds: Set<number>;
+  wanted: Set<number>;
   jobId?: number;
+  onOffTarget?: (count: number) => void;
 }): Promise<(number | null)[]> {
-  const { llm, seriesTitle, batch, rootDir, episodeLines, validEpisodeIds, jobId } = input;
+  const { llm, seriesTitle, batch, rootDir, episodeLines, validEpisodeIds, wanted, jobId, onOffTarget } = input;
 
   const system = [
     'You map each numbered subtitle file extracted from a downloaded subtitle pack to the episode it belongs to, using the episode table provided.',
     'Each file is shown as its path inside the pack, so a directory name may carry the season or the fansub group even when the filename holds only an episode number.',
     'Filenames may include pre-parsed hints (lang, parsed episode ref) — use those plus episode numbers, absolute numbers, and titles to decide.',
+    "The pack's directory and file names say which season(s) it covers.",
+    'Map each file to the episode it truly belongs to, whether or not that episode is wanted.',
+    'Never assign a file to a wanted episode only because the numbers coincide.',
+    "Use null when the file's season is not in the table.",
     "Answer with each file's number and the matched episode id, using episodeId null when a file is genuinely unmatchable.",
     'Respond with JSON matching the schema provided — no prose outside the JSON.',
   ].join(' ');
@@ -150,8 +171,16 @@ async function mapBatch(input: {
     byFile.set(a.file, a.episodeId);
   }
 
-  return batch.map((_, i) => {
+  let offTarget = 0;
+  const ids = batch.map((_, i) => {
     const episodeId = byFile.get(i + 1) ?? null;
-    return episodeId !== null && validEpisodeIds.has(episodeId) ? episodeId : null;
+    if (episodeId === null || !validEpisodeIds.has(episodeId)) return null;
+    if (!wanted.has(episodeId)) {
+      offTarget++;
+      return null;
+    }
+    return episodeId;
   });
+  if (offTarget > 0) onOffTarget?.(offTarget);
+  return ids;
 }

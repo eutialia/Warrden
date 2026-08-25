@@ -1501,6 +1501,25 @@ describe('runSubtitleJob LLM remainder', () => {
     expect(prompt).not.toContain('#2');
     expect(existsSync(join(fx.libraryDir, 'Show - S03E05.zh-Hans.ass'))).toBe(true);
   });
+
+  // The season-1 episode is covered, so the run wants nothing for it — but it is in the
+  // table, which is the point: the model can say "this is S01E05" instead of being cornered
+  // into the season-3 gap because the numbers line up.
+  it('drops a mapping onto an episode the run does not want rather than placing it on the wanted one', async () => {
+    const fx = multiSeasonFixture(3);
+    coverSeasonOne(fx);
+    const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 1 }], reasoning: 'this is season 1' }]);
+    fx.ctx.llm = llm;
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ ...seasonPack(2), 'Show - extras.chs.ass': SRT }));
+
+    expect(llm.calls[0]!.prompt).toContain('id=1 S01E05');
+    expect(existsSync(join(fx.libraryDir, 'Show - S03E05.zh-Hans.ass'))).toBe(false);
+    expect(existsSync(join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass'))).toBe(false);
+    const traced = new TraceEntries(fx.ctx.db).listByJob(job.id).filter((r) => r.kind === 'subtitle.map-off-target');
+    expect(traced).toHaveLength(1);
+  });
 });
 
 const DAY = 24 * 3_600_000;
