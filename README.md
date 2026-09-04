@@ -255,8 +255,9 @@ hand-write a `dark:` override.
 
 ## More detail
 
-See [`docs/specs/2026-08-05-warrden-design.md`](docs/specs/2026-08-05-warrden-design.md)
-for the full design: architecture, pipelines, error handling, and phasing.
+See [Architecture](docs/architecture.md) and [Pipeline overview](docs/pipeline-overview.md)
+for how the three pipelines fit together, and the rest of `docs/` for acquire, ingest,
+subtitle, the site agent, storage, and the dashboard.
 
 ## License
 
