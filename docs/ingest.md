@@ -14,7 +14,7 @@ Clean `importPending` is busy: Sonarr is about to import. Stuck is `status: 'com
 
 Sweep the source folder for `.mka` audio and subtitle files (`.srt`, `.ass`). Fonts and other extras are ignored. Copy, never move, so seeding stays intact. Rename to the arr convention beside the imported file (`buildSidecarName`).
 
-Match is deterministic filename parsing first (`sidecars.ts`). The LLM (`matchLlm.ts`, call-site `sidecar-match`) runs only when names are cryptic. Language tags on external sidecars follow Jellyfin's `ExternalPathParser` rule: the dot segments after the video stem.
+Match is deterministic filename parsing first (`sidecars.ts`). The LLM (`matchLlm.ts`, call-site `sidecar-match`) runs only when names are cryptic. Language tags on external sidecars follow Jellyfin's `ExternalPathParser` rule: the dot segments after the video stem. An unmatched sidecar raises `ingest.unmatched`. It does not open a scored hold queue.
 
 ## Bundle rescue
 

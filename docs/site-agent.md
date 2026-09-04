@@ -50,7 +50,7 @@ The file is treated as a set of distinct facts, each owning exactly one bullet. 
 
 Web-agent memory is an injection target. `threatPatterns.ts` is a tripwire on every load and every write: exfil, delimiter spoofing, instructions to hide secrets from you. A poisoned bullet is dropped. The scanner is not a full defender. It is the tripwire the rest of the design assumes.
 
-A provider error (`LlmError`) during search fails the job. It does not blame the site, bump `fail_count`, or run reflection. A dead route or filesystem error still counts as a site fault.
+A provider error (`LlmError`) during search fails the job. It does not blame the site, bump `fail_count`, or run reflection. A dead route or filesystem error still counts as a site fault. There is no per-call-site off switch for reflection. Unset `llm.model` and every LLM feature is off, including `site-notes`.
 
 Captcha: one automated attempt in-loop (SVG in the response, read, re-POST). On failure, continue or raise Attention. No infinite retries.
 

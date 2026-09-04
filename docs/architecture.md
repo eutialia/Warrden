@@ -40,7 +40,7 @@ One TypeScript service. Docker, LXC, or a direct process. Components:
 - **HTTP server** (`src/server/`) receives arr webhooks, serves the dashboard, and streams events over SSE.
 - **SQLite in WAL mode** holds the job queue, event log, placed-file provenance, site profiles, managed-object registry, and debug traces. The Warrden process is the only writer.
 - **Job queue** (`src/jobs/`) runs singleton jobs keyed `(pipeline, arrInstance, targetKind, targetId)` with a dirty-flag re-queue. Jobs are idempotent. Recovery is re-run, never resume-from-step. Waiting (settle, mount, backoff) is `not_before` on the job, not an LLM `wait` tool.
-- **LLM layer** (`src/llm/`) wraps the Vercel AI SDK. Every call-site has its own model. The browse loop is Warrden's own step-budgeted loop; no agent framework owns control flow.
+- **LLM layer** (`src/llm/`) wraps the Vercel AI SDK behind one configured `llm.model` (OpenRouter). Call-site names (`release-pick`, `site-search`, `site-notes`, and the matchers) are labels on traces and billing, not separate models. Leave `llm.model` unset and every LLM feature is off. The browse loop is Warrden's own step-budgeted loop; no agent framework owns control flow.
 - **Filesystem** uses the same media the arrs use. `config.storage` names the four library paths. `pathMappings` translates arr-side paths when the arr and Warrden do not see the same tree. Mount liveness is checked before any filesystem work. See [Storage](storage.md).
 
 The dashboard is a React SPA served by the same process. v1 assumes a trusted LAN: no auth.

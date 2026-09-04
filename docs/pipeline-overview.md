@@ -86,11 +86,11 @@ flowchart LR
             syncT["Timing sync<br>alass / ffsubsync"]
             placeT["Sidecar place + verify"]
         end
-        llm["LLM layer<br>call-site routing, profiles,<br>prompt cache"]
+        llm["LLM layer<br>one model, call-site labels,<br>prompt cache"]
         db[("SQLite<br>jobs, profiles, events,<br>attention")]
     end
 
-    subgraph Agent["Warrden Agent: LLM call-sites<br>(one configurable model per role, no site access)"]
+    subgraph Agent["Warrden Agent: LLM call-sites<br>(one model, no site access)"]
         pickC["Release picker<br>call-site: release-pick"]
         mapC["Extras + archive mappers<br>call-sites: sidecar-match,<br>bundle-map, archive-map"]
         browseC["Browse policy, one action per step<br>call-site: site-search"]

@@ -29,7 +29,7 @@ The model answers with a 1-based candidate number, never a guid. `pickRelease` m
 
 ## Already satisfied
 
-A re-pick against a season the arr already has must not raise "no candidates". `seasonSatisfaction` (`satisfied.ts`) reads cutoff rejections such as `Existing file meets cutoff`. When every kept candidate was dropped for that reason, the record is `already-satisfied`, the event is `acquire.already-satisfied`, and a stale Attention item for that target is resolved. Activity paints this as a settled success, not a warning.
+A re-pick against a title the arr already has must not raise "no candidates". `seasonSatisfaction` (`satisfied.ts`) compares `episodeFileCount` to aired `episodeCount`. A movie is satisfied when `hasFile` is true. When the arr omitted file counts, the fallback is rejection text (`Existing file meets cutoff`, `not an upgrade for existing`) and only then. The record is `already-satisfied`, the event is `acquire.already-satisfied`, and a stale Attention item for that target is resolved. Activity paints this as "Already have it", a settled success.
 
 ## None viable
 

@@ -30,7 +30,7 @@ Query variants come from the arr primary title, alternate titles, and title form
 
 Host-owned, fully automatic (`src/pipelines/subtitle/drift.ts`). The reference is an embedded text track when the video has one. No embedded track, the candidate places as `unverified`. VAD or golden-section sampling is not built.
 
-Scoring uses dialogue cues, not karaoke or typesetting. `dialogueCues` drops cues whose text contains karaoke or motion override tags (`\k`, `\pos(`, `\move(`, `\t(`, and kin). If too few dialogue cues survive, the filter is skipped so a fully `\pos`'d track still scores. A table shorter than `minScorableCues` (20) is `unscorable`, not a lucky accept.
+Scoring uses dialogue cues, not karaoke or typesetting. `dialogueCues` drops cues whose text contains karaoke or motion override tags (`\k`, `\pos(`, `\move(`, `\t(`, and kin). If fewer than `MIN_DIALOGUE_CUES` (40) survive, the filter is skipped so a fully `\pos`'d track still scores. A table shorter than `minScorableCues` (20) is `unscorable`, not a lucky accept. The 0.80 floor is hardcoded, not a Settings field.
 
 `scoreAtOffset` returns the median of per-cue overlap, not the mean, so unmatched songs and signs in one track do not sink a synced file. Ties break toward zero offset.
 
