@@ -1,12 +1,7 @@
 /*
  * The token layer: every design decision as a plain CSS custom property, and
- * nothing else.
- *
- * Kept in its own file with no framework syntax so it can ship standalone. Tools
- * that read a design system's tokens (including the design-system export in
- * `.design-sync/`) get an authoritative list here instead of scraping them out of
- * a compiled stylesheet, where they would be mixed in with Tailwind's own
- * per-element internals and its default theme.
+ * nothing else. No framework syntax, so the values stay readable on their own
+ * rather than mixed in with Tailwind's per-element internals and default theme.
  *
  * Every custom property below is a real design decision. Nothing else belongs here.
  *
@@ -16,27 +11,11 @@
  * tones. Colour still means state and only state.
  */
 
-/*
- * The angle of the sweep in shadcn's `shimmer` text utility — the one animation
- * property the component CSS exposes. Registering it lets the browser interpolate the
- * angle instead of swapping it; the value is set in `:root` below, where both a reader
- * and anything extracting tokens from this file will look for it.
- *
- * These values match the declaration the component CSS already ships, so this repeats
- * it rather than changing it.
- */
-@property --shimmer-angle {
-    syntax: "<angle>";
-    inherits: true;
-    initial-value: 20deg;
-}
-
 /* Light theme. */
 :root {
     /* Nearly square corners. This is most of why the UI reads as flat and warm
        rather than as a generated starter — raising it undoes the look. */
     --radius: 0.1875rem;
-    --shimmer-angle: 20deg; /* @kind other */
 
     /* Three faces, three jobs: the sans for body and UI, the serif for titles and
        any large number, the mono for machine strings — paths, release names, IDs.
@@ -88,12 +67,6 @@
     --destructive-foreground: oklch(41% 0.13 28);
     --destructive-muted: oklch(94.5% 0.034 30);
     --destructive-border: oklch(86.5% 0.06 28);
-
-    --chart-1: oklch(50% 0.026 68);
-    --chart-2: oklch(55% 0.09 52);
-    --chart-3: oklch(52% 0.1 148);
-    --chart-4: oklch(66% 0.12 72);
-    --chart-5: oklch(51% 0.16 28);
 
     --sidebar: oklch(94.5% 0.007 76);
     --sidebar-foreground: oklch(22% 0.012 68);
@@ -147,12 +120,6 @@
     --destructive-foreground: oklch(83% 0.12 28);
     --destructive-muted: oklch(29% 0.07 28);
     --destructive-border: oklch(40% 0.1 28);
-
-    --chart-1: oklch(74% 0.032 72);
-    --chart-2: oklch(72% 0.09 52);
-    --chart-3: oklch(70% 0.11 150);
-    --chart-4: oklch(78% 0.12 78);
-    --chart-5: oklch(66% 0.17 28);
 
     --sidebar: oklch(14.5% 0.008 60);
     --sidebar-foreground: oklch(90% 0.008 78);

@@ -10,11 +10,8 @@ web/dist/
 .env
 compose.override.yaml
 
-# local design tooling workspace and outputs; not needed to build or run Warrden.
+# local design tooling workspaces; not needed to build or run Warrden.
 .design-sync/
 .ds-sync/
-ds-bundle/
-web/ds-dist/
-web/ds-tokens/
 .claude/
 .superpowers/

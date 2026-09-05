@@ -56,21 +56,6 @@ export function jobStatusLabel(status: JobStatus): string {
   }
 }
 
-export function jobStatusTone(status: JobStatus): Tone {
-  switch (status) {
-    case 'pending':
-      return 'neutral';
-    case 'running':
-      return 'info';
-    case 'done':
-      return 'success';
-    case 'failed':
-      return 'danger';
-    default:
-      return 'neutral';
-  }
-}
-
 /** A trace entry's own status. `interrupted` isn't a stored status: it's a `running` entry
  * on a job that has already finished, so it wants a human's eye rather than a spinner. */
 export function traceStatusLabel(status: TraceEntry['status'], interrupted: boolean): string {

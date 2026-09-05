@@ -1,7 +1,6 @@
 /*
- * Application stylesheet entry. The two halves are split so the design-system
- * export can ship the token layer separately from the compiled utilities; the app
- * simply loads both.
+ * Application stylesheet entry: the token values, and the Tailwind theme that maps
+ * them to utility names.
  */
 @import "./theme.css";
 @import "./tokens.css";
