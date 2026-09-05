@@ -41,7 +41,7 @@ export interface OverviewCounts {
 
 /**
  * The single aggregate read behind `GET /api/overview`. Every number is a plain
- * COUNT the indexes in `005_overview_indexes.sql` cover, so the home screen costs
+ * COUNT the indexes in `001_init.sql` cover, so the home screen costs
  * one round of cheap queries rather than pulling whole tables into the API layer to
  * length them. Adding a count here means checking there is an index for it.
  */
