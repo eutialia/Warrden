@@ -15,3 +15,6 @@ compose.override.yaml
 .ds-sync/
 .claude/
 .superpowers/
+
+# per-machine Claude Code notes (hosts, IPs, shares); the committed CLAUDE.md is public-safe
+CLAUDE.local.md
