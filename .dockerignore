@@ -20,6 +20,9 @@ web/node_modules
 .git
 docs
 tests
+.claude
+.design-sync
+.ds-sync
 # Top-level only, deliberately: seeds/sites/*.md must reach the build context
 # (the Dockerfile COPYs seeds/ into the image). Widening this to **/*.md would
 # silently ship a seedless image with no build error.
