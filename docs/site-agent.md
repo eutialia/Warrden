@@ -10,7 +10,7 @@ There is no site-specific code. The loop's verbs (GET, POST, cookies, downloads)
 
 Politeness: concurrency 1 per site. Per-site cooldowns and a run-scoped cookie jar under the data directory matter more than prompt cache for a multi-title night.
 
-Every destination is checked by `destinationGuard.ts` before connect: no loopback, no RFC1918, no link-local, no DNS rebinding between check and connect. Redirects are re-checked.
+Every destination is checked by `destinationGuard.ts` before connect: no loopback, no RFC1918, no link-local, no non-http(s) scheme. Redirects are re-checked. The guard reads URL literals, down to the IPv6 spellings that carry an IPv4 address. It does not read DNS, so a hostname that merely resolves to a guarded address — or rebinds between the check and the connect — gets through; catching that needs the address the socket actually connected to.
 
 ## What the agent learns into the database
 
@@ -42,7 +42,7 @@ Ceilings: 10,000 characters across the agent-owned sections, enforced on write. 
 
 At the start of a site's run the file is loaded, scanned, and injected into the system prompt. The loop must load knowledge before its first `search` step.
 
-One reflection call per site run (`site-notes`), after the pipeline knows what the download actually produced. It receives the current file, the run transcript, and the outcome, and returns typed delta operations plus a verdict. Protocol lessons write only on a verified success. Agents that wrote lessons regardless of outcome scored worse than agents with no memory at all.
+One reflection call per site run (`site-notes`), after the pipeline knows what the download actually produced. It receives the current file, the run transcript, and the outcome, and returns typed delta operations plus a verdict. Protocol lessons (Access, Search, Download) write on a verified success, or on a run that at least read a search result page. A run with neither may still write Pitfalls. Agents that wrote lessons regardless of outcome scored worse than agents with no memory at all.
 
 The file is treated as a set of distinct facts, each owning exactly one bullet. If this run's observation concerns a fact the file already covers, the op is `update` of that bullet, not a second bullet.
 
