@@ -23,11 +23,11 @@ import { traceTrigger } from '../../trace/tracer.js';
 import { resolveTargetTitle } from '../targetTitle.js';
 import { errorMessage } from '../../util/errors.js';
 import { assertMounted } from '../mounts.js';
-import { placeBlocked } from '../placeGuard.js';
-import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../settle.js';
+import { placeBlocked, reportPlaceBlocked } from '../placeGuard.js';
+import { settleGate, SETTLE_RETRY_MS } from '../settle.js';
 import { planBundleImport } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
-import { assessQueue, type QueueAssessment } from './queueState.js';
+import { assessQueue, type QueueAssessment } from '../queueState.js';
 import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, sidecarStem, SIDECAR_EXTS, VIDEO_EXTS } from './sidecars.js';
 import { effectiveDownloadRoots } from '../../config/storage.js';
 import { resolveSourceDirsDetailed } from './sources.js';
@@ -105,25 +105,10 @@ export async function runIngestJob(ctx: AppContext, job: JobRow): Promise<void> 
 
   assertMounted(ctx, job, 'ingest');
 
-  const records = await client.listQueue();
-  const assessment = assessQueue(records, { kind: job.target_kind, id: job.target_id });
+  const assessment = await settleGate(ctx, job, client, 'ingest');
+  if (!assessment) return;
 
-  if (assessment.state === 'busy') {
-    if (Date.now() - job.created_at > SETTLE_DEADLINE_MS) {
-      ctx.events.append({
-        kind: 'ingest.settle-timeout',
-        level: 'attention',
-        jobId: job.id,
-        message: `Gave up waiting for Sonarr/Radarr to finish importing (still busy after ${Math.round(SETTLE_DEADLINE_MS / 3_600_000)}h) — check the download queue there`,
-        data: targetEventData(job),
-      });
-      return;
-    }
-    ctx.trace.event({ jobId: job.id, kind: 'pipeline.wait', summary: 'waiting for arr import to settle' });
-    throw new RescheduleError('arr still importing this target', SETTLE_RETRY_MS);
-  }
-
-  // Same placement and shape as the busy branch above: before any filesystem work, so the
+  // Same placement as the settle gate above: before any filesystem work, so the
   // whole job simply re-runs (it is idempotent by design) once the dwell has elapsed. No
   // deadline guard of its own is needed: `RESCUE_DWELL_MS` is two orders of magnitude under
   // `SETTLE_DEADLINE_MS` and a job's age only grows, so this branch can only ever hold a job
@@ -654,24 +639,8 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
   const targetPath = join(dirname(videoLocal), targetName);
 
   const block = placeBlocked(placedFiles, targetPath, sidecarPath);
-  if (block?.kind === 'foreign') {
-    ctx.events.append({
-      kind: 'ingest.skipped-foreign',
-      level: 'warn',
-      jobId: job.id,
-      message: `Skipped "${basename(sidecarPath)}" — "${targetName}" already exists and wasn't placed by Warrden`,
-      data: targetEventData(job, { sidecarPath, targetPath }),
-    });
-    return;
-  }
-  if (block?.kind === 'collision') {
-    ctx.events.append({
-      kind: 'ingest.skipped-collision',
-      level: 'warn',
-      jobId: job.id,
-      message: `Skipped "${basename(sidecarPath)}" — "${targetName}" is already claimed by "${block.claimedBy}"`,
-      data: targetEventData(job, { sidecarPath, targetPath }),
-    });
+  if (block) {
+    reportPlaceBlocked(ctx, job, 'ingest', block, sidecarPath, targetPath);
     return;
   }
 

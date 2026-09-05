@@ -55,7 +55,7 @@ describe('app', () => {
   });
 
   it('does not mount the events routes when ctx.events is absent', async () => {
-    const res = await createApp({}).request('/api/events');
+    const res = await createApp({}).request('/api/events/stream');
     expect(res.status).toBe(404);
   });
 
@@ -160,49 +160,6 @@ describe('app', () => {
   });
 
   describe('events routes', () => {
-    it('GET /api/events returns the JSON list, newest first', async () => {
-      const events = new EventLog(freshDb());
-      events.append({ kind: 'job.started', message: 'go' });
-      events.append({ kind: 'job.done', message: 'done' });
-      const app = createApp({ events });
-
-      const res = await app.request('/api/events?limit=1');
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as { kind: string }[];
-      expect(body.map((e) => e.kind)).toEqual(['job.done']);
-    });
-
-    it.each([
-      { query: '', expectedKinds: ['job.done', 'job.started'] }, // no params -> default limit 100, all rows
-      { query: '?limit=1', expectedKinds: ['job.done'] },
-      { query: '?limit=abc', expectedKinds: ['job.done', 'job.started'] }, // non-numeric -> falls back to default
-      { query: '?limit=', expectedKinds: ['job.done', 'job.started'] }, // empty -> falls back to default, not LIMIT 0
-      { query: '?level=', expectedKinds: ['job.done', 'job.started'] }, // empty level -> no filter, not WHERE level=''
-    ])('GET /api/events$query returns $expectedKinds', async ({ query, expectedKinds }) => {
-      const events = new EventLog(freshDb());
-      events.append({ kind: 'job.started', message: 'go' });
-      events.append({ kind: 'job.done', message: 'done' });
-      const app = createApp({ events });
-
-      const res = await app.request(`/api/events${query}`);
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as { kind: string }[];
-      expect(body.map((e) => e.kind)).toEqual(expectedKinds);
-    });
-
-    it('GET /api/events clamps an outsized ?limit= to MAX_LIMIT (1000) rather than passing it straight to SQL', async () => {
-      const db = freshDb();
-      const events = new EventLog(db);
-      const insert = db.prepare(`INSERT INTO events (ts, kind, level, message, data) VALUES (?, 'job.done', 'info', 'done', '{}')`);
-      for (let i = 0; i < 1001; i++) insert.run(i);
-      const app = createApp({ events });
-
-      const res = await app.request('/api/events?limit=999999');
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as unknown[];
-      expect(body).toHaveLength(1000);
-    });
-
     it('GET /api/events/stream responds with text/event-stream and streams an appended event', async () => {
       const events = new EventLog(freshDb());
       const app = createApp({ events });
@@ -1199,31 +1156,6 @@ describe('app', () => {
       });
     });
 
-    it('PUT /api/site-profiles updates tier and search patterns (partial body)', async () => {
-      const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
-      const app = createApp(ctx);
-
-      const res = await app.request('/api/site-profiles', {
-        method: 'PUT',
-        headers: jsonHeaders,
-        body: JSON.stringify({
-          baseUrl: 'https://acg.rip',
-          lastWorkingTier: 'chromium',
-          searchUrlPatterns: ['https://acg.rip/?q={query}'],
-        }),
-      });
-      expect(res.status).toBe(200);
-
-      // The response body is the post-update row — the dashboard swaps its table row with it.
-      const body = await res.json();
-      expect(body).toMatchObject({ last_working_tier: 'chromium', search_url_patterns: ['https://acg.rip/?q={query}'] });
-
-      const profile = new SiteProfiles(ctx.db).get('https://acg.rip')!;
-      expect(profile.last_working_tier).toBe('chromium');
-      expect(profile.search_url_patterns).toEqual(['https://acg.rip/?q={query}']);
-      expect(profile.fail_count).toBe(0); // untouched by the partial body
-    });
-
     it('PUT /api/site-profiles 404s for an unconfigured site', async () => {
       const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
       const app = createApp(ctx);
@@ -1234,21 +1166,6 @@ describe('app', () => {
         body: JSON.stringify({ failCount: 0 }),
       });
       expect(res.status).toBe(404);
-    });
-
-    it('PUT /api/site-profiles rejects a bogus tier with 400', async () => {
-      const ctx = ctxWithSites([{ baseUrl: 'https://acg.rip' }]);
-      const app = createApp(ctx);
-      const profiles = new SiteProfiles(ctx.db);
-      profiles.upsert({ baseUrl: 'https://acg.rip' });
-
-      const res = await app.request('/api/site-profiles', {
-        method: 'PUT',
-        headers: jsonHeaders,
-        body: JSON.stringify({ baseUrl: 'https://acg.rip', lastWorkingTier: 'sneaker-net' }),
-      });
-      expect(res.status).toBe(400);
-      expect(profiles.get('https://acg.rip')!.last_working_tier).toBeNull();
     });
 
     it('PUT /api/site-profiles accepts failCount 0 (reset failures)', async () => {

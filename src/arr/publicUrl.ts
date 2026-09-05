@@ -9,13 +9,6 @@ export interface NetAddress {
 }
 
 const VIRTUAL_IFACE = /^(lo|docker0|br-.+|veth.*|cni.*|flannel.*|virbr.*|tun.*|tap.*|wg.*)$/;
-const VITE_DEV_PORTS = new Set(['5173', '4173']);
-
-export function isLoopbackHost(host: string): boolean {
-  const hostname = host.replace(/^\[|\]$/g, '').toLowerCase();
-  if (hostname === 'localhost' || hostname === '::1') return true;
-  return isLoopbackIpv4(hostname);
-}
 
 function isLoopbackIpv4(address: string): boolean {
   const n = ipv4ToInt(address);
@@ -78,24 +71,6 @@ export function defaultPublicUrl(port: number): string {
     defaultIface: readDefaultIface(),
     inContainer: existsSync('/.dockerenv'),
   });
-}
-
-export function suggestPublicUrl(input: { publicUrl: string; origin: string; listenPort: number }): string | null {
-  let current: URL;
-  let page: URL;
-  try {
-    current = new URL(input.publicUrl);
-    page = new URL(input.origin);
-  } catch {
-    return null;
-  }
-  if (!isLoopbackHost(current.hostname)) return null;
-  if (isLoopbackHost(page.hostname)) return null;
-  if (VITE_DEV_PORTS.has(page.port)) {
-    page.protocol = 'http:';
-    page.port = String(input.listenPort);
-  }
-  return page.origin;
 }
 
 function listHostAddresses(): NetAddress[] {

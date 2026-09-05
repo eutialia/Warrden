@@ -5,10 +5,8 @@ export interface ReleaseCandidate {
   title: string;
   size: number;
   seeders: number | null;
-  leechers: number | null;
   rejected: boolean;
   rejections: string[];
-  publishDate: string;
   // Optional: Sonarr/Radarr send these on /release; fixtures and Radarr movie
   // rows often omit them. Acquire reads them instead of parsing titles.
   fullSeason?: boolean;
@@ -24,7 +22,6 @@ export interface SeasonStatistics {
   episodeCount: number;
   totalEpisodeCount: number;
   nextAiring?: string;
-  previousAiring?: string;
   episodeFileCount?: number;
 }
 
@@ -46,10 +43,7 @@ export interface AlternateTitle {
 export interface SeriesResource {
   id: number;
   title: string;
-  year: number;
-  tvdbId: number;
   tags: number[];
-  added: string;
   // Season 0 is Sonarr's convention for "Specials" — acquire deliberately skips it (see
   // runAcquireJob's per-season loop) rather than treating specials like a regular season.
   seasons: SeasonResource[];
@@ -60,9 +54,6 @@ export interface SeriesResource {
 export interface MovieResource {
   id: number;
   title: string;
-  year: number;
-  tmdbId: number;
-  added: string;
   hasFile: boolean;
   alternateTitles?: AlternateTitle[];
   /** Radarr often exposes the non-English original title separately. */
@@ -98,7 +89,7 @@ export interface NotificationSummary {
   onDownload?: boolean;
   onUpgrade?: boolean;
   /** The implementation's own settings, as name/value pairs. Only `url` is read (see
-   * `registerWebhooks`), and only to tell a webhook still pointing at us from one left
+   * `classifyWebhook`), and only to tell a webhook still pointing at us from one left
    * behind by a rename or a `server.publicUrl` change. */
   fields?: { name: string; value?: unknown }[];
 }
@@ -111,17 +102,14 @@ export interface QueueRecord {
   status: string; // 'downloading' | 'completed' | ...
   trackedDownloadStatus?: string; // 'ok' | 'warning' | 'error'
   trackedDownloadState?: string; // 'downloading' | 'importPending' | 'importing' | 'importBlocked' | 'imported' | ...
-  title: string;
 }
 
 export interface HistoryRecord {
   id: number;
   seriesId?: number;
   movieId?: number;
-  episodeId?: number;
   eventType: string; // 'downloadFolderImported' is the one Ingest cares about
   date: string;
-  sourceTitle: string;
   // droppedPath / importedPath / downloadId live here on import events
   data: Record<string, string | undefined>;
 }

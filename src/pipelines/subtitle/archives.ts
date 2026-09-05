@@ -44,13 +44,6 @@ export function isIngestibleSubtitlePayload(filePath: string): boolean {
   return isSupportedArchive(filePath) || isLooseSubtitleFile(filePath);
 }
 
-export function isNativeArchive(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return (
-    lower.endsWith('.zip') || lower.endsWith('.tar.gz') || lower.endsWith('.tgz') || lower.endsWith('.tar')
-  );
-}
-
 export function isSevenZipFamily(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   return lower.endsWith('.rar') || lower.endsWith('.7z');

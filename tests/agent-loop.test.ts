@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { AgentActionSchema, runAgentLoop, TierBlockedError } from '../src/agent/loop.js';
 import type { FetchOpts, FetchResult, FetchTier } from '../src/agent/tiers.js';
-import type { TranscriptEntry } from '../src/db/subtitleRuns.js';
+import type { TranscriptEntry } from '../src/agent/transcript.js';
+import { buildSearchHints, type SearchHints } from '../src/pipelines/subtitle/queries.js';
 import { defaultProfileRow, FakeGenerator, tmpDir } from './helpers.js';
 import { parseFailure } from './llmFixtures.js';
 
 const PROFILE = defaultProfileRow('https://acg.rip');
+/** The loop reads only `title` off these, and an all-empty rest renders an empty hint
+ * block — which is what every test here that isn't about hints wants. */
+const HINTS: SearchHints = buildSearchHints({ title: 'F', languages: [] });
 
 /** Fill required sentinel fields so FakeGenerator's schema.parse accepts partial actions. */
 function act(
@@ -58,7 +62,7 @@ describe('runAgentLoop', () => {
       act({ action: 'download', url: 'https://acg.rip/dl/123.zip', note: 'downloading batch' }),
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML, { ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'Frieren', destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: buildSearchHints({ title: 'Frieren', languages: [] }), destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
     expect(out).toEqual({
       stop: { kind: 'done' },
       steps: 3,
@@ -74,7 +78,7 @@ describe('runAgentLoop', () => {
       act({ action: 'search', url: 'https://acg.rip/?term=y', note: 's' }),
     ]);
     const tier = fakeTier([OK_HTML, OK_HTML]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 2, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 2, onTranscript: () => {} });
     expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 2, listings: 1 });
   });
 
@@ -83,7 +87,7 @@ describe('runAgentLoop', () => {
       act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
       act({ action: 'give_up', url: '', note: 'nothing here', reason: 'the site lists nothing for this season yet' }),
     ]);
-    const out = await runAgentLoop({ llm, tier: fakeTier([OK_HTML]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier: fakeTier([OK_HTML]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out).toEqual({
       stop: { kind: 'gave-up', because: 'unsure', reason: 'the site lists nothing for this season yet' },
       steps: 2,
@@ -93,13 +97,13 @@ describe('runAgentLoop', () => {
 
   it('falls back to a stated-nothing reason when give_up carries no sentence', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nothing here' })]);
-    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out).toEqual({ stop: { kind: 'gave-up', because: 'unsure', reason: 'no reason given' }, steps: 1, listings: 0 });
   });
 
   it.each(['not-found', 'blocked', 'unsure'] as const)('carries a give_up because=%s through to the stop', async (because) => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stopping', reason: 'r', because })]);
-    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out.stop).toEqual({ kind: 'gave-up', because, reason: 'r' });
   });
 
@@ -124,13 +128,13 @@ describe('runAgentLoop', () => {
 
   it('reads a give_up with an empty because as unsure', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'stopping', reason: 'r', because: '' })]);
-    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out.stop).toEqual({ kind: 'gave-up', because: 'unsure', reason: 'r' });
   });
 
   it('spells out what each give_up because means', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
-    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
     const system = llm.calls[0]!.system!;
     expect(system).toContain('- not-found: you searched and the site has nothing for these episodes');
     expect(system).toContain('- blocked: you could not get through');
@@ -160,7 +164,7 @@ describe('runAgentLoop', () => {
       { ok: true, status: 200, body: first, blocked: false },
       { ok: true, status: 200, body: second, blocked: false },
     ]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out.listings).toBe(expected);
   });
 
@@ -170,7 +174,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
     ]);
     const tier = fakeTier([{ ok: false, status: 503, body: 'nope', blocked: false }]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out.listings).toBe(0);
   });
 
@@ -178,7 +182,7 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator([act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' })]);
     const tier = fakeTier([{ ok: false, status: 403, body: 'Attention Required! | Cloudflare', blocked: true }]);
     await expect(
-      runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} }),
+      runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} }),
     ).rejects.toBeInstanceOf(TierBlockedError);
   });
 
@@ -189,7 +193,7 @@ describe('runAgentLoop', () => {
     ]);
     const tier = fakeTier([OK_HTML]);
     const entries: unknown[] = [];
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
     expect(entries).toHaveLength(2);
   });
 
@@ -207,7 +211,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done probing' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: '{"url":"https://cdn/x.zip"}', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(1);
     expect(tier.calls[0]).toEqual({
       url: 'https://acg.rip/api/dl',
@@ -236,7 +240,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'ok', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls[0]!.opts).toEqual({ method: 'GET' });
   });
 
@@ -253,7 +257,7 @@ describe('runAgentLoop', () => {
         blocked: false,
       },
     ]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain(
       'request GET https://acg.rip/down/uE7Rx2 — protocol step -> HTTP 403: Download page expired Go back to the detail page and download again.',
@@ -270,7 +274,7 @@ describe('runAgentLoop', () => {
     const tier = fakeTier([
       { ok: false, status: 403, body: '<div class="err">Session expired,\n  please sign in.</div>', blocked: false },
     ]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain('open https://acg.rip/t/123 — opening -> HTTP 403: Session expired, please sign in.');
     expect(secondPrompt).not.toContain('<div');
@@ -282,7 +286,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
     const tier = fakeTier([{ ok: false, status: 403, body: '', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain('open https://acg.rip/t/123 — opening -> HTTP 403');
     expect(secondPrompt).not.toContain('HTTP 403:');
@@ -294,7 +298,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'stopped' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(0);
     const secondPrompt = llm.calls[1]!.prompt;
     expect(secondPrompt).toContain('request refused: https://evil.test/admin is not on acg.rip');
@@ -309,7 +313,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'stopped' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(0);
     expect(out.listings).toBe(0);
     expect(llm.calls[1]!.prompt).toContain('search refused: https://evil.test/collect is not on acg.rip');
@@ -321,7 +325,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: '<html>results</html>', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(1);
   });
 
@@ -337,7 +341,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'ok', blocked: false }]);
-    await runAgentLoop({ llm, tier, site, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(1);
   });
 
@@ -352,7 +356,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(0);
   });
 
@@ -406,7 +410,7 @@ describe('runAgentLoop', () => {
   )('%s refuses %s and continues rather than throwing', async (action, _name, url) => {
     const llm = new FakeGenerator([act({ action, url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', filePath: '/dl/x', blocked: false }]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out).toMatchObject({ stop: { kind: 'gave-up' }, steps: 2 });
     expect(tier.calls).toHaveLength(0);
     expect(llm.calls[1]!.prompt).toContain(`${action} refused: ${url} targets a private/loopback address`);
@@ -426,7 +430,7 @@ describe('runAgentLoop', () => {
   ])('open does not refuse %s', async (_name, url) => {
     const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'fine', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(1);
   });
 
@@ -436,7 +440,7 @@ describe('runAgentLoop', () => {
   ])('refuses a URL that will not parse (%s) rather than handing it to the tier', async (_name, url) => {
     const llm = new FakeGenerator([act({ action: 'open', url, note: 'probe' }), act({ action: 'give_up', url: '', note: 'stopped' })]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'should-not-see', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls).toHaveLength(0);
     expect(llm.calls[1]!.prompt).toContain(`open refused: ${url} is not a usable URL`);
   });
@@ -451,7 +455,7 @@ describe('runAgentLoop', () => {
   ])('records the refusal of a %s in the transcript', async (_name, action, level, reason) => {
     const llm = new FakeGenerator([action, act({ action: 'give_up', url: '', note: 'stopped' })]);
     const entries: TranscriptEntry[] = [];
-    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
     const refusals = entries.filter((e) => e.action === 'refused');
     expect(refusals).toHaveLength(1);
     expect(refusals[0]!.detail).toContain(reason);
@@ -466,9 +470,9 @@ describe('runAgentLoop', () => {
         act({ action, url: 'https://acg.rip/t/1', note: 'probe' }),
         act({ action: 'give_up', url: '', note: 'stopped' }),
       ]);
-      const tier = fakeTier([{ ok: false, blocked: false, refusedUrl }]);
+      const tier = fakeTier([{ ok: false, blocked: false, refused: { url: refusedUrl, reason: 'private' as const } }]);
       const entries: TranscriptEntry[] = [];
-      const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+      const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
       expect(out).toMatchObject({ stop: { kind: 'gave-up' }, steps: 2 });
       const refusal = entries.find((e) => e.action === 'refused');
       expect(refusal?.level).toBe('attention');
@@ -487,10 +491,10 @@ describe('runAgentLoop', () => {
       ...new Array(4).fill(null).map(() => act({ action: 'open', url: 'https://acg.rip/t/1', note: 'probe' })),
     ]);
     const tier = fakeTier(
-      new Array(4).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl, refusedReason: 'unparseable' as const })),
+      new Array(4).fill(null).map(() => ({ ok: false, blocked: false, refused: { url: refusedUrl, reason: 'unparseable' as const } })),
     );
     const entries: TranscriptEntry[] = [];
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 4, onTranscript: (e) => entries.push(e) });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 4, onTranscript: (e) => entries.push(e) });
     expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 4, listings: 0 });
     const refusals = entries.filter((e) => e.action === 'refused');
     expect(refusals).toHaveLength(4);
@@ -506,9 +510,9 @@ describe('runAgentLoop', () => {
       act({ action: 'open', url: 'https://acg.rip/t/1', note: 'probe' }),
       act({ action: 'give_up', url: '', note: 'stopped' }),
     ]);
-    const tier = fakeTier([{ ok: false, blocked: false, refusedUrl, refusedReason: 'private' as const }]);
+    const tier = fakeTier([{ ok: false, blocked: false, refused: { url: refusedUrl, reason: 'private' as const } }]);
     const entries: TranscriptEntry[] = [];
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: (e) => entries.push(e) });
     const detail = entries.find((e) => e.action === 'refused')!.detail;
     expect(detail).toContain('…[elided]');
     expect(detail).not.toContain('a'.repeat(300));
@@ -519,8 +523,8 @@ describe('runAgentLoop', () => {
     const llm = new FakeGenerator(
       new Array(5).fill(null).map(() => act({ action: 'open', url: 'https://acg.rip/t/1', note: 'probe' })),
     );
-    const tier = fakeTier(new Array(5).fill(null).map(() => ({ ok: false, blocked: false, refusedUrl: 'http://[::1]/x' })));
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
+    const tier = fakeTier(new Array(5).fill(null).map(() => ({ ok: false, blocked: false, refused: { url: 'http://[::1]/x', reason: 'private' as const } })));
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
     expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3, listings: 0 });
   });
 
@@ -534,7 +538,7 @@ describe('runAgentLoop', () => {
       }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, filePath: '/dl/pack.zip', blocked: false }]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(out.download?.filePath).toBe('/dl/pack.zip');
     expect(tier.calls[0]!.opts).toMatchObject({ destPath: expect.any(String), referer: 'https://acg.rip/t/123' });
   });
@@ -547,7 +551,7 @@ describe('runAgentLoop', () => {
       site: SITE,
       profile: PROFILE,
       knowledge: 'Site knowledge:\n- IF searching THEN GET /s. (confirmed 2026-08-10)',
-      query: 'F',
+      hints: HINTS,
       destDir: tmpDir(),
       maxSteps: 1,
       onTranscript: () => {},
@@ -562,7 +566,7 @@ describe('runAgentLoop', () => {
     const knowledge = '## Search\n- IF searching THEN GET /s. (confirmed 2026-08-10)';
     const run = async (k: string): Promise<string> => {
       const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'done' })]);
-      await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: k, query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+      await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: k, hints: HINTS, destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
       return llm.calls[0]!.system!;
     };
 
@@ -580,7 +584,7 @@ describe('runAgentLoop', () => {
       new Array(5).fill(null).map(() => act({ action: 'open', url: 'http://169.254.169.254/latest/meta-data', note: 'probe' })),
     );
     const tier = fakeTier([]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 20, onTranscript: () => {} });
     expect(out).toEqual({ stop: { kind: 'refused', refusals: 3 }, steps: 3, listings: 0 });
     expect(llm.calls).toHaveLength(3);
   });
@@ -594,7 +598,7 @@ describe('runAgentLoop', () => {
   ])('does not end the run over %s', async (_name, action) => {
     const llm = new FakeGenerator(new Array(6).fill(null).map(() => action));
     const entries: TranscriptEntry[] = [];
-    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 6, onTranscript: (e) => entries.push(e) });
+    const out = await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 6, onTranscript: (e) => entries.push(e) });
     expect(out).toEqual({ stop: { kind: 'exhausted' }, steps: 6, listings: 0 });
     // Every step still refused, and every refusal still reached the transcript.
     expect(entries.filter((e) => e.action === 'refused')).toHaveLength(6);
@@ -602,7 +606,7 @@ describe('runAgentLoop', () => {
 
   it('tells the agent a fresh episode with nothing listed is a give_up, not a longer hunt', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
-    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
     expect(llm.calls[0]!.system).toContain(
       'When every missing episode aired within the last 7 days and the site shows nothing for them, give_up with because=not-found: subtitles for a fresh episode usually do not exist yet, and the next scheduled run will look again.',
     );
@@ -610,7 +614,7 @@ describe('runAgentLoop', () => {
 
   it('joins action bullets as separate lines and states download/cookie/elision rules', async () => {
     const llm = new FakeGenerator([act({ action: 'give_up', url: '', note: 'nope' })]);
-    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 1, onTranscript: () => {} });
     const system = llm.calls[0]!.system;
     expect(system).toContain('- search:');
     expect(system).toContain('\n- open:');
@@ -630,7 +634,7 @@ describe('runAgentLoop', () => {
       { ok: true, status: 200, body: 'A'.repeat(3000), blocked: false },
       { ok: true, status: 200, body: 'B'.repeat(3000), blocked: false },
     ]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
 
     const prompt = llm.calls[2]!.prompt;
     expect(prompt).toContain('search https://acg.rip/?term=x — candidate slug is /t/8891 -> OK: ');
@@ -654,7 +658,7 @@ describe('runAgentLoop', () => {
       act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
-    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
 
     const prompt = llm.calls[1]!.prompt;
     expect(prompt).toContain('[form: formhash=a1b2c3, searchsubmit=yes]');
@@ -681,7 +685,7 @@ describe('runAgentLoop', () => {
       act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
-    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
 
     const prompt = llm.calls[1]!.prompt;
     expect(prompt).toContain('[form /search.php post]');
@@ -703,7 +707,7 @@ describe('runAgentLoop', () => {
       act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
-    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
 
     const prompt = llm.calls[1]!.prompt;
     expect(prompt).toContain('[form: formhash=a1b2c3]');
@@ -716,7 +720,7 @@ describe('runAgentLoop', () => {
       act({ action: 'search', url: 'https://acg.rip/?term=x', note: 's' }),
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
-    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier: fakeTier([{ ok: true, status: 200, body, blocked: false }]), site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
 
     expect(llm.calls[1]!.prompt).toContain('[form: formhash=a1b2c3]');
   });
@@ -734,7 +738,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done', because: 'not-found' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: '<html>results</html>', blocked: false }]);
-    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    const out = await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
 
     expect(tier.calls[0]).toEqual({
       url: 'https://acg.rip/search.php',
@@ -751,7 +755,7 @@ describe('runAgentLoop', () => {
       act({ action: 'give_up', url: '', note: 'done' }),
     ]);
     const tier = fakeTier([{ ok: true, status: 200, body: 'ok', blocked: false }]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 5, onTranscript: () => {} });
     expect(tier.calls[0]!.opts).toEqual({});
   });
 
@@ -770,7 +774,7 @@ describe('runAgentLoop', () => {
       { ok: true, status: 200, body: longB, blocked: false },
       { ok: true, status: 200, body: longC, blocked: false },
     ]);
-    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', query: 'F', destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
+    await runAgentLoop({ llm, tier, site: SITE, profile: PROFILE, knowledge: '', hints: HINTS, destDir: tmpDir(), maxSteps: 10, onTranscript: () => {} });
 
     // After 3 steps the 4th prompt (give_up call) should elide steps 1–2 and keep step 3 full.
     const prompt = llm.calls[3]!.prompt;
@@ -800,7 +804,7 @@ describe('runAgentLoop', () => {
       site: SITE,
       profile: PROFILE,
       knowledge: '',
-      query: 'F',
+      hints: HINTS,
       destDir: tmpDir(),
       maxSteps: 10,
       onTranscript: (e) => transcript.push(e),
@@ -820,7 +824,7 @@ describe('runAgentLoop', () => {
       site: SITE,
       profile: PROFILE,
       knowledge: '',
-      query: 'F',
+      hints: HINTS,
       destDir: tmpDir(),
       maxSteps: 10,
       onTranscript: () => {},
@@ -839,7 +843,7 @@ describe('runAgentLoop', () => {
         site: SITE,
         profile: PROFILE,
         knowledge: '',
-        query: 'F',
+        hints: HINTS,
         destDir: tmpDir(),
         maxSteps: 10,
         onTranscript: () => {},

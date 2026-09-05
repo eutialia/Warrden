@@ -70,13 +70,15 @@ describe('CookieJar', () => {
 
 describe('CurlTier', () => {
   it('returns ok with body for a 200 text response', async () => {
-    const tier = new CurlTier(async () => new Response('<html>ok</html>', { status: 200 }));
+    const tier = new CurlTier({ fetchImpl: async () => new Response('<html>ok</html>', { status: 200 }) });
     const res = await tier.fetch('https://x');
     expect(res).toMatchObject({ ok: true, status: 200, body: '<html>ok</html>', blocked: false });
   });
 
   it('flags a cloudflare 403 as blocked, not ok', async () => {
-    const tier = new CurlTier(async () => new Response('Attention Required! | Cloudflare', { status: 403 }));
+    const tier = new CurlTier({
+      fetchImpl: async () => new Response('Attention Required! | Cloudflare', { status: 403 }),
+    });
     const res = await tier.fetch('https://x');
     expect(res.ok).toBe(false);
     expect(res.blocked).toBe(true);
@@ -84,7 +86,7 @@ describe('CurlTier', () => {
 
   it('streams to destPath when given one', async () => {
     const dest = join(tmpDir(), 'dl.zip');
-    const tier = new CurlTier(async () => new Response(new TextEncoder().encode('PK-bytes')));
+    const tier = new CurlTier({ fetchImpl: async () => new Response(new TextEncoder().encode('PK-bytes')) });
     const res = await tier.fetch('https://x/pack.zip', { destPath: dest });
     expect(res).toMatchObject({ ok: true, filePath: dest });
     expect(readFileSync(dest, 'utf-8')).toBe('PK-bytes');
@@ -92,16 +94,16 @@ describe('CurlTier', () => {
 
   it('flags a cloudflare 403 on a destPath download as blocked and writes no file', async () => {
     const dest = join(tmpDir(), 'wall.zip');
-    const tier = new CurlTier(
-      async () => new Response('Attention Required! | Cloudflare', { status: 403 }),
-    );
+    const tier = new CurlTier({
+      fetchImpl: async () => new Response('Attention Required! | Cloudflare', { status: 403 }),
+    });
     const res = await tier.fetch('https://x/wall.zip', { destPath: dest });
     expect(res).toEqual({ ok: false, status: 403, blocked: true });
     expect(existsSync(dest)).toBe(false);
   });
 
   it('a network throw becomes ok:false, blocked:false', async () => {
-    const tier = new CurlTier(async () => { throw new Error('ECONNREFUSED'); });
+    const tier = new CurlTier({ fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
     const res = await tier.fetch('https://x');
     expect(res).toEqual({ ok: false, blocked: false });
   });
@@ -201,7 +203,7 @@ describe('CurlTier', () => {
       },
     });
     const res = await tier.fetch('https://site/start');
-    expect(res).toEqual({ ok: false, status: 302, blocked: false, refusedUrl, refusedReason: 'private' });
+    expect(res).toEqual({ ok: false, status: 302, blocked: false, refused: { url: refusedUrl, reason: 'private' } });
     // The public first hop happened; the private one never left the process.
     expect(seen).toEqual(['https://site/start']);
   });
@@ -224,8 +226,7 @@ describe('CurlTier', () => {
       ok: false,
       status: 302,
       blocked: false,
-      refusedUrl: location,
-      refusedReason: 'unparseable',
+      refused: { url: location, reason: 'unparseable' },
     });
   });
 
@@ -240,8 +241,7 @@ describe('CurlTier', () => {
     expect(await tier.fetch('http://169.254.169.254/latest/meta-data')).toEqual({
       ok: false,
       blocked: false,
-      refusedUrl: 'http://169.254.169.254/latest/meta-data',
-      refusedReason: 'private',
+      refused: { url: 'http://169.254.169.254/latest/meta-data', reason: 'private' },
     });
     expect(called).toBe(0);
   });
@@ -264,7 +264,7 @@ describe('CurlTier', () => {
     });
     const res = await tier.fetch('https://site/start');
     expect(res).toMatchObject({ ok: true, status: 200, body: '<html>landed</html>' });
-    expect(res.refusedUrl).toBeUndefined();
+    expect(res.refused).toBeUndefined();
     expect(seen).toEqual(['https://site/start', 'https://mirror.example/step', 'https://cdn.example/final']);
   });
 

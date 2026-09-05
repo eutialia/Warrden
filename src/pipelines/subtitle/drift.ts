@@ -10,8 +10,6 @@ import type { SubtitleCue } from '../../media/subtitles.js';
  */
 
 const DRIFT_CONFIG = {
-  /** 0 = score the whole file. Reserved for future golden-section windowed sampling. */
-  windowSize: 0,
   maxOffsetMs: 120_000,
   offsetStepMs: 100,
   /** Below this the best offset barely overlaps at all: a track from a different cut or a

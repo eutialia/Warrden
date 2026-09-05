@@ -16,7 +16,6 @@ export interface Job {
   attempts: number;
   not_before: number;
   payload: Record<string, unknown>;
-  result: Record<string, unknown> | null;
   error: string | null;
   created_at: number;
   updated_at: number;
@@ -124,14 +123,11 @@ export interface SiteProfileRow {
 }
 
 /** Body for `PUT /api/site-profiles/:name` — every field optional (a PATCH-shaped PUT).
- * `lastWorkingTier: null` clears the stored tier; `lastFailureAt: null` clears the
- * failure timestamp; omitting either leaves it untouched. */
+ * `lastFailureAt: null` clears the failure timestamp; omitting it leaves it untouched. */
 export interface SiteProfileUpdate {
   /** Which site to write to. A URL cannot survive a path segment, so it travels in
    * the body. */
   baseUrl: string;
-  lastWorkingTier?: AccessTier | null;
-  searchUrlPatterns?: string[];
   failCount?: number;
   lastFailureAt?: number | null;
   /** Only `null` is accepted server-side — the "re-enable" button. A site can only be

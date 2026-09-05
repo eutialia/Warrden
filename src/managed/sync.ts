@@ -1,3 +1,4 @@
+import { NOTIFICATION_NAME } from '../arr/register.js';
 import type { ArrApi, NotificationSummary, ReleaseProfileResource, TagResource } from '../arr/types.js';
 import type { AppContext } from '../context.js';
 import { ManagedObjects, type ManagedObjectKind } from '../db/managedObjects.js';
@@ -6,8 +7,6 @@ import { errorMessage } from '../util/errors.js';
 import { groupFromWarrdenProfileName, isWarrdenProfile, isWarrdenTag } from './ownership.js';
 
 type SyncCtx = Pick<AppContext, 'db' | 'config' | 'clients' | 'events'>;
-
-const NOTIFICATION_NAME = 'Warrden';
 
 /**
  * Makes `managed_objects` the owner of Warrden's arr-side tags, release profiles, and

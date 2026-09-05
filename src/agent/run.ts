@@ -1,11 +1,11 @@
 import type { AppContext } from '../context.js';
 import { siteLabel } from '../config/siteLabel.js';
 import { SiteProfiles, type AccessTier } from '../db/siteProfiles.js';
-import { SubtitleRuns, type TranscriptEntry } from '../db/subtitleRuns.js';
+import type { TranscriptEntry } from './transcript.js';
 import type { SubtitleSiteConfig } from '../config/schema.js';
 import type { JobRow } from '../jobs/queue.js';
 import { targetEventData } from '../events/target.js';
-import { buildSearchHints, type SearchHints } from '../pipelines/subtitle/queries.js';
+import type { SearchHints } from '../pipelines/subtitle/queries.js';
 import { errorMessage } from '../util/errors.js';
 import { AGENT_SECTIONS, defaultSeedsDir, knowledgeForPrompt, loadKnowledge } from './siteKnowledge.js';
 import { scanForThreats } from './threatPatterns.js';
@@ -98,7 +98,7 @@ export interface SiteRunResult {
  * pipeline calls it for a visit that never started — so one `agent.stop` IS one site visit's
  * verdict, which is why it carries a `verdict` tone and the visit's whole shape as facts.
  * The dashboard's per-visit row reads these rather than re-deriving the same conclusion from
- * `subtitle_runs`.
+ * the run's individual step events.
  */
 export function reportAgentStop(
   ctx: AppContext,
@@ -108,7 +108,7 @@ export function reportAgentStop(
 ): void {
   const head = [
     where.site !== undefined ? `[${where.site}]` : '',
-    where.round !== undefined ? `round ${where.round}/${where.maxRounds ?? where.round}` : '',
+    where.round !== undefined ? `round ${where.round}/${where.maxRounds}` : '',
     where.tier !== undefined ? `(${where.tier})` : '',
   ]
     .filter(Boolean)
@@ -125,7 +125,7 @@ export function reportAgentStop(
           site: where.site,
           tier: where.tier,
           round: where.round,
-          maxRounds: where.maxRounds ?? where.round,
+          maxRounds: where.maxRounds,
           steps: where.steps,
           stop: stop.kind,
           callsite: where.callsite,
@@ -233,15 +233,15 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
  * a `SiteRunResult` carrying the download (if any), the full transcript, and the stop that
  * ended it. A broken site is a health event, not a job failure, so site faults come back as
  * a stop; a provider error (`LlmError`) is not the site's fault and throws out of here to
- * fail the job. The transcript lands in `subtitle_runs` and streams live as
- * `subtitle.transcript` events, and is also handed back to the caller so it can be replayed
+ * fail the job. The transcript is emitted step by step as `subtitle.transcript` events and
+ * `agent.step` trace entries, and is also handed back to the caller so it can be replayed
  * into reflection.
  */
 export async function searchSite(
   ctx: AppContext,
   job: JobRow,
   site: SubtitleSiteConfig,
-  query: string | SearchHints,
+  hints: SearchHints,
   destDir: string,
   opts: SearchSiteOptions = {},
 ): Promise<SiteRunResult> {
@@ -252,22 +252,11 @@ export async function searchSite(
   const maxRounds = opts.maxRounds ?? 1;
 
   const profiles = new SiteProfiles(ctx.db);
-  const runs = new SubtitleRuns(ctx.db);
   profiles.upsert({ baseUrl: site.baseUrl });
   const profile = profiles.get(site.baseUrl)!;
-  const hints: SearchHints =
-    typeof query === 'string'
-      ? buildSearchHints({
-          title: query,
-          languages: ctx.config.subtitle.languages,
-          preferredGroups: ctx.config.subtitle.preferredGroups,
-        })
-      : query;
-  const primaryQuery = hints.title;
 
   const knowledge = loadKnowledgeForPrompt(ctx, job, site.baseUrl, opts.seedsDir ?? defaultSeedsDir());
 
-  const runId = runs.start(job.id, siteLabel(site.baseUrl));
   // One top-level step per site, so every agent step, LLM call and tier escalation of this
   // site's run hangs off it in the trace view.
   const siteStep = ctx.trace.begin({
@@ -280,13 +269,12 @@ export async function searchSite(
   const startIdx = tierStartIndex(profile.last_working_tier, profile.last_success_at);
   const activeTiers: FetchTier[] = [];
   // Every transcript entry this run produces, in order — handed back to the caller so
-  // reflection (Task 6) sees the same steps that landed in subtitle_runs.
+  // reflection sees the same steps the event log did.
   const transcript: TranscriptEntry[] = [];
   /** Shared append+SSE path for every transcript entry, whether emitted by the loop's own
    * steps or by the runner's escalation handling. */
   const onTranscriptEvent = (entry: TranscriptEntry): void => {
     transcript.push(entry);
-    runs.appendTranscript(runId, [entry]);
     ctx.trace.event({
       jobId: job.id,
       kind: 'agent.step',
@@ -328,7 +316,7 @@ export async function searchSite(
 
   /**
    * Ends a run that brought back no file: one `agent.stop` line saying which tier it
-   * finished on, how many steps it spent and why it ended, the `subtitle_runs` row closed,
+   * finished on, how many steps it spent and why it ended, the site's trace step closed,
    * and the failure booked against the site's profile — but only when the stop is the
    * site's own fault. `failure` is the separate question of whether an operator is told at
    * all: a wall on a run that was never allowed to climb says nothing about the site, so it
@@ -347,7 +335,6 @@ export async function searchSite(
       tier: lastTier,
       steps,
     });
-    runs.finish(runId, 'failed');
     siteStep.end('error');
     if (failure !== undefined) {
       if (stopIsSiteFault(stop)) {
@@ -408,7 +395,6 @@ export async function searchSite(
           site,
           profile,
           knowledge,
-          query: primaryQuery,
           hints,
           destDir,
           maxSteps: ctx.config.browser.stepBudget,
@@ -422,7 +408,6 @@ export async function searchSite(
         searchObserved ||= run.listings > 0;
 
         if (run.download !== undefined) {
-          runs.finish(runId, 'done');
           siteStep.end('ok');
           const searchUrl = run.download.searchUrl;
           const isNew =
@@ -490,7 +475,6 @@ export async function searchSite(
           // job fails, and the runner retries it with the backoff the error asks for — the
           // same thing `archive-map` has always done.
           if (err instanceof LlmError) {
-            runs.finish(runId, 'failed');
             siteStep.end('error');
             throw err;
           }

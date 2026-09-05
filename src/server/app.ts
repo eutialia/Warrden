@@ -40,13 +40,12 @@ import { ModelCatalog } from '../llm/catalog.js';
 import { deleteManagedObject } from '../managed/deleteObject.js';
 import { pinReleaseGroup } from '../pipelines/acquire/pin.js';
 import { resolvePickedRelease } from '../pipelines/acquire/picked.js';
-import { assessQueue } from '../pipelines/ingest/queueState.js';
+import { assessQueue } from '../pipelines/queueState.js';
 import { NOOP_TRACER, traceTrigger } from '../trace/tracer.js';
 import { errorMessage } from '../util/errors.js';
 import { cachedStorage, probeStorage, resetStorageCache } from './storageHealth.js';
 import { fallbackTargetLabel, jobTitleKey, resolveJobTitle, resolveJobTitles } from './titles.js';
 
-const DEFAULT_EVENTS_LIMIT = 100;
 const DEFAULT_JOBS_LIMIT = 50;
 const MAX_LIMIT = 1000;
 
@@ -80,11 +79,6 @@ function parseLimit(raw: string | undefined, fallback: number): number {
   return Math.min(Math.max(Math.trunc(n), 0), MAX_LIMIT);
 }
 
-// `?level=` (empty) means "no filter", same as omitting the param entirely.
-function parseLevel(raw: string | undefined): string | undefined {
-  return raw === undefined || raw === '' ? undefined : raw;
-}
-
 // 2000 is a generous ceiling for a freeform operator note, not a real limit anyone should
 // hit — it exists so a runaway/pasted-in-error hint can't inflate the LLM prompt (and its
 // token cost) unboundedly.
@@ -101,9 +95,7 @@ const AcquireBodySchema = z.object({
 const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).optional() });
 
 // Dashboard edits to a site profile — every field optional so a partial PUT only touches
-// what the client sent. `lastWorkingTier` is the full AccessTier union or explicit null
-// (clears the "known-good" tier), `searchUrlPatterns` capped at 5 non-empty entries.
-// `failCount` is the accessible reset seam: PUT `{ failCount: 0 }` clears the
+// what the client sent. `failCount` is the accessible reset seam: PUT `{ failCount: 0 }` clears the
 // escalation/backoff bookkeeping. Setting `disabledAt` is not writable here — a site is
 // only ever disabled through the evidence-gated attention accept route below. Clearing it
 // (`disabledAt: null`) is: the Sites page's "re-enable" button, an operator override for a
@@ -113,8 +105,6 @@ const RepickBodySchema = z.object({ hint: z.string().max(HINT_MAX_LENGTH).option
 const SiteProfileUpdateSchema = z.object({
   /** Which site to write to — its base URL, the only identity a site has. */
   baseUrl: z.url(),
-  lastWorkingTier: z.enum(['curl', 'chromium', 'camoufox', 'remote']).nullable().optional(),
-  searchUrlPatterns: z.array(z.string().min(1)).max(5).optional(),
   failCount: z.number().int().min(0).optional(),
   // Explicit null clears the timestamp (used with failCount: 0 by "reset failures").
   lastFailureAt: z.number().int().nullable().optional(),
@@ -324,12 +314,6 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
   if (ctx.events) {
     const events = ctx.events;
-
-    app.get('/api/events', (c) => {
-      const limit = parseLimit(c.req.query('limit'), DEFAULT_EVENTS_LIMIT);
-      const level = parseLevel(c.req.query('level'));
-      return c.json(events.list({ limit, level }));
-    });
 
     app.get('/api/events/stream', (c) => {
       return streamSSE(c, async (stream) => {
@@ -888,8 +872,8 @@ export function createApp(ctx: Partial<AppContext>): Hono {
       if (!parsed.success) {
         return c.json({ error: 'invalid request', issues: parsed.error.issues }, 400);
       }
-      // `null` fields (clear tier / clear lastFailureAt) pass straight through to `update`,
-      // whose `!== undefined` guard still writes the column to null while an absent field
+      // An explicit `lastFailureAt: null` passes straight through to `update`, whose
+      // `!== undefined` guard still writes the column to null while an absent field
       // is untouched. When the client only sends `failCount: 0` (the dashboard "reset
       // failures" button), also clear lastFailureAt so the cooldown bookkeeping is fully
       // wiped — fail_count alone is not enough if a stale last_failure_at remains. Same

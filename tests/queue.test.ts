@@ -83,7 +83,7 @@ describe('JobQueue', () => {
     q.enqueue(target);
     const job = q.claim()!;
     q.enqueue(target); // marked dirty mid-run
-    expect(q.complete(job.id, undefined, { requeueNotBefore: 8_000 }).requeued).toBe(true);
+    expect(q.complete(job.id, { requeueNotBefore: 8_000 }).requeued).toBe(true);
 
     expect(q.claim(7_999)).toBeNull();
     expect(q.claim(8_000)).not.toBeNull();
@@ -222,20 +222,6 @@ describe('JobQueue', () => {
 
     expect(q.list().map((j) => j.id)).toEqual([c, b, a]);
     expect(q.list({ limit: 2 }).map((j) => j.id)).toEqual([c, b]);
-  });
-
-  it('round-trips payload and result JSON through enqueue -> claim -> complete -> get', () => {
-    const payload = { season: 3, reason: 'missing' };
-    const result = { picked: 'release-guid-123', sizeMB: 1234 };
-    const { id } = q.enqueue({ ...target, payload });
-
-    const claimed = q.claim()!;
-    expect(claimed.payload).toEqual(payload);
-
-    q.complete(id!, result);
-    const done = q.get(id!)!;
-    expect(done.status).toBe('done');
-    expect(done.result).toEqual(result);
   });
 
   it('complete() throws when the job is not running', () => {

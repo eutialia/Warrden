@@ -136,19 +136,12 @@ export class EventLog {
     return this.db.prepare('DELETE FROM events WHERE ts < ?').run(cutoff).changes;
   }
 
-  list(opts?: { limit?: number; level?: string }): EventRow[] {
-    let sql = 'SELECT * FROM events';
-    const params: unknown[] = [];
-    if (opts?.level !== undefined) {
-      sql += ' WHERE level = ?';
-      params.push(opts.level);
-    }
-    sql += ' ORDER BY id DESC';
-    if (opts?.limit !== undefined) {
-      sql += ' LIMIT ?';
-      params.push(opts.limit);
-    }
-    const rows = this.db.prepare(sql).all(...params) as EventRowRaw[];
+  list(opts?: { level?: string }): EventRow[] {
+    const rows = (
+      opts?.level === undefined
+        ? this.db.prepare('SELECT * FROM events ORDER BY id DESC').all()
+        : this.db.prepare('SELECT * FROM events WHERE level = ? ORDER BY id DESC').all(opts.level)
+    ) as EventRowRaw[];
     return rows.map(parseRow);
   }
 
@@ -156,10 +149,10 @@ export class EventLog {
    * One job's events, oldest first, so a run can narrate itself in the order it happened.
    * `list()` is newest-first because it feeds a live feed; a single run reads as a story.
    *
-   * Always bounded: an uncapped SELECT is the same class of hole GET /api/events used
-   * to have. A full window is reported, because the caller is then reading a prefix of a
-   * run rather than the run — silently returning one is how a truncated story reads as a
-   * complete one.
+   * Always bounded: `events` only ever grows, so an uncapped SELECT hands the caller a
+   * result set with no ceiling. A full window is reported, because the caller is then
+   * reading a prefix of a run rather than the run — silently returning one is how a
+   * truncated story reads as a complete one.
    */
   listByJob(jobId: number, opts?: { limit?: number }): EventRow[] {
     const limit = opts?.limit ?? DEFAULT_LIST_BY_JOB_LIMIT;

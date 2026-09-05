@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { siteLabel } from '../config/siteLabel.js';
 import type { SubtitleSiteConfig } from '../config/schema.js';
 import type { AppContext } from '../context.js';
-import type { TranscriptEntry } from '../db/subtitleRuns.js';
+import type { TranscriptEntry } from './transcript.js';
 import { targetEventData } from '../events/target.js';
 import type { JobRow } from '../jobs/queue.js';
 import { LlmError, resolveModel } from '../llm/generator.js';
@@ -129,8 +129,6 @@ export const ReflectionSchema = z.object({
   reason: z.string().describe('one sentence of evidence for the verdict'),
   ops: z.array(KnowledgeOpSchema).describe('bullet edits; an empty list is a fine outcome'),
 });
-
-export type Reflection = z.infer<typeof ReflectionSchema>;
 
 /** One operation that did not land, with the reason an operator can read back. `hostile`
  * marks the refusals that are an attempt to poison the agent's memory rather than a

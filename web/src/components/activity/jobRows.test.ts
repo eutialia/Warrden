@@ -23,7 +23,6 @@ const JOB: Job = {
   attempts: 0,
   not_before: 1787489321864,
   payload: { source: 'ingest' },
-  result: null,
   error: null,
   created_at: 1787488721864,
   updated_at: 1787491977137,

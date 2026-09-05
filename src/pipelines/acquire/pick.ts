@@ -10,7 +10,7 @@ import type { SeasonMode } from './seasonMode.js';
  * candidate list (`renderCandidateLine` below) — it never sees a guid — so it answers
  * with the candidate's number (1-based, matching the `#N` prefix on each rendered line)
  * rather than an identifier it was never shown. `pickRelease` maps that number back to
- * the real candidate (and its guid) internally; see `PickResultSchema` below for the
+ * the real candidate (and its guid) internally; see `PickResult` below for the
  * shape callers of `pickRelease` actually get back.
  */
 // A flat object, NOT a discriminated union: providers that take the schema as a tool /
@@ -47,17 +47,15 @@ const LlmPickResponseSchema = z
 /** External shape `pickRelease` resolves to — a `guid`, not the candidate number the LLM
  * actually answered with, so every other caller (`run.ts`, tests) keeps working against a
  * real candidate identifier rather than an index into a list only `pick.ts` ever builds. */
-const PickResultSchema = z.discriminatedUnion('decision', [
-  z.object({
-    decision: z.literal('pick'),
-    guid: z.string(),
-    releaseGroup: z.string().nullable(),
-    confidence: z.enum(['high', 'medium', 'low']),
-    reasoning: z.string(),
-  }),
-  z.object({ decision: z.literal('none'), reasoning: z.string() }),
-]);
-type PickResult = z.infer<typeof PickResultSchema>;
+type PickResult =
+  | {
+      decision: 'pick';
+      guid: string;
+      releaseGroup: string | null;
+      confidence: 'high' | 'medium' | 'low';
+      reasoning: string;
+    }
+  | { decision: 'none'; reasoning: string };
 
 const CALLSITE = 'release-pick';
 

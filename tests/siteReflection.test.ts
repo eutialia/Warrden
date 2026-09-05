@@ -22,7 +22,7 @@ import {
 } from '../src/agent/siteKnowledge.js';
 import { AiSdkGenerator, LlmError } from '../src/llm/generator.js';
 import type { AppContext } from '../src/context.js';
-import type { TranscriptEntry } from '../src/db/subtitleRuns.js';
+import type { TranscriptEntry } from '../src/agent/transcript.js';
 import { baseConfig, enqueueAndClaim, FakeGenerator, findEvent, hasEvent, makeCtx, subtitleJobInput, tmpDir } from './helpers.js';
 
 const SITE = 'https://x.test';

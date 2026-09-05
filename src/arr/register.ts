@@ -5,7 +5,7 @@ import type { ArrApi, NotificationSummary } from './types.js';
 import { errorMessage } from '../util/errors.js';
 import { webhookFailureDetail } from './webhookError.js';
 
-const NOTIFICATION_NAME = 'Warrden';
+export const NOTIFICATION_NAME = 'Warrden';
 
 /** Only the parts of AppContext registration actually reads, the same idiom as
  * `HandleWebhookCtx` in `webhooks.ts`, so the config route can hand it the fields it has
@@ -21,8 +21,16 @@ function notificationUrl(notification: NotificationSummary): string | undefined 
 
 export type ArrWebhookStatus = 'ok' | 'missing' | 'stale' | 'unknown';
 
-/** Live arr notification vs the URL we currently serve. Missing `url` is stale: we cannot
- * prove the hook points at us. */
+/**
+ * Live arr notification vs the URL we currently serve. Checks every flag this app actually
+ * has, not every flag the registration body sends: a hook subscribed to Download alone still
+ * delivers nothing on the add event, so treating it as healthy left it standing forever and no
+ * arr-side add ever reached Warrden. The notification resource is per-app though, so Sonarr
+ * echoes `onSeriesAdd` and never `onMovieAdded` and Radarr the reverse; demanding both would
+ * make the predicate permanently false and re-PUT an already-correct webhook on every pass.
+ * Missing `url` is stale, same as one pointing elsewhere: we cannot prove the hook points at
+ * us, so a skip would leave Settings showing Webhook failed forever.
+ */
 export function classifyWebhook(
   found: NotificationSummary | undefined,
   kind: 'sonarr' | 'radarr',
@@ -100,18 +108,7 @@ export async function registerWebhooks(ctx: RegisterCtx, opts?: { force?: boolea
       const existing = await client.listNotifications();
       const found = existing.find((n) => n.name === NOTIFICATION_NAME);
       if (found) {
-        const registeredUrl = notificationUrl(found);
-        // Every flag that this app actually has, not every flag `body` sends: a hook
-        // subscribed to Download alone still delivers nothing on the add event, so treating it
-        // as healthy left it standing forever and no arr-side add ever reached Warrden. The
-        // notification resource is per-app though, so Sonarr echoes `onSeriesAdd` and never
-        // `onMovieAdded` and Radarr the reverse; demanding both would make the predicate
-        // permanently false and re-PUT an already-correct webhook on every single pass.
-        const addEvent = arr.kind === 'sonarr' ? found.onSeriesAdd : found.onMovieAdded;
-        const subscribedToAll = addEvent === true && found.onDownload === true && found.onUpgrade === true;
-        // Missing `url` is stale, same as a url that points elsewhere: we cannot prove the
-        // arr is POSTing at us, so a skip would leave Settings showing Webhook failed forever.
-        if (!force && subscribedToAll && registeredUrl === url) {
+        if (!force && classifyWebhook(found, arr.kind, url) === 'ok') {
           // Already present in the arr and subscribed to everything we need, but the
           // local registry may have been reset (fresh db, restore) — re-record it so
           // GC (reconcile.ts's gc()) can still find it.

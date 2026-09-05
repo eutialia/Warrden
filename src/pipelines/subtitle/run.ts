@@ -11,7 +11,7 @@ import { ArchiveCache, type ArchiveCacheEntry, type ArchiveCacheRow } from '../.
 import { AttentionItems } from '../../db/attention.js';
 import { PlacedFiles } from '../../db/placedFiles.js';
 import { SiteProfiles, type SiteProfileRow } from '../../db/siteProfiles.js';
-import type { TranscriptEntry } from '../../db/subtitleRuns.js';
+import type { TranscriptEntry } from '../../agent/transcript.js';
 import { eventEnvelope } from '../../events/envelope.js';
 import { targetEventData } from '../../events/target.js';
 import { atomicCopy } from '../../fs/files.js';
@@ -24,10 +24,9 @@ import { decodeSubtitleBytes, dialogueCues, parseSubtitleCues, type SubtitleCue 
 import type { MediaTools } from '../../media/tools.js';
 import { resolveTargetMeta, type TargetMeta } from '../targetTitle.js';
 import { assertMounted, MOUNT_RETRY_MS } from '../mounts.js';
-import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../settle.js';
-import { assessQueue } from '../ingest/queueState.js';
+import { settleGate } from '../settle.js';
 import { buildSidecarName, matchEpisodeRef } from '../ingest/sidecars.js';
-import { placeBlocked, type PlaceBlock } from '../placeGuard.js';
+import { placeBlocked, reportPlaceBlocked } from '../placeGuard.js';
 import {
   entriesForFiles,
   extractArchive,
@@ -155,7 +154,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   const client = traceArrClient(rawClient, ctx.trace, job.id);
 
   assertMounted(ctx, job, 'subtitle');
-  if (await settleGate(ctx, job, client)) return;
+  if (!(await settleGate(ctx, job, client, 'subtitle'))) return;
 
   const media = requireMedia(ctx);
   await assertProbeAvailable(ctx, job, media);
@@ -189,7 +188,7 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     }
 
     const { videos: gapList, absent } = await findMissingSubtitles({
-      videos: targets.map((t) => ({ videoPath: t.videoPath, episodeId: t.episodeId })),
+      videos: targets.map((t) => ({ videoPath: t.videoPath })),
       languages: ctx.config.subtitle.languages,
       media,
     });
@@ -286,36 +285,6 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }
-}
-
-/**
- * The same wait ingest opens a run with, for the same reason one level down: a subtitle job
- * enqueued off one season's import can be claimed while the arr is still moving the next
- * season's files, and reconciling "what is missing" against a half-imported library sends the
- * agent hunting for episodes that are seconds from existing.
- *
- * Returns `true` when the caller must stop without doing anything — the deadline has passed
- * and a human now owns it. A `busy` verdict inside the deadline throws `RescheduleError`,
- * which is not a retry: the runner never counts it against `attempts`, so
- * `SETTLE_DEADLINE_MS` against `job.created_at` is the only thing bounding the wait.
- */
-async function settleGate(ctx: AppContext, job: JobRow, client: ArrApi): Promise<boolean> {
-  const assessment = assessQueue(await client.listQueue(), { kind: job.target_kind, id: job.target_id });
-  if (assessment.state !== 'busy') return false;
-
-  if (Date.now() - job.created_at > SETTLE_DEADLINE_MS) {
-    ctx.events.append({
-      kind: 'subtitle.settle-timeout',
-      level: 'attention',
-      jobId: job.id,
-      message: `Gave up waiting for Sonarr/Radarr to finish importing before searching for subtitles (still busy after ${Math.round(SETTLE_DEADLINE_MS / 3_600_000)}h) — check the download queue there`,
-      data: targetEventData(job),
-    });
-    return true;
-  }
-
-  ctx.trace.event({ jobId: job.id, kind: 'pipeline.wait', summary: 'waiting for arr import to settle' });
-  throw new RescheduleError('arr still importing this target', SETTLE_RETRY_MS);
 }
 
 /** Series: every hasFile episode with an episode file. Movie: the single movie file, if any.
@@ -500,6 +469,11 @@ function notePlacement(gaps: EpisodeTarget[], resolved: number[], t: EpisodeTarg
   }
 }
 
+/** Everything the archive-matching path reads off a cached row: where the pack was
+ * extracted and what came out of it. A just-extracted pack has no row yet, so
+ * `extractAndMatch` hands these two fields straight over rather than faking the rest. */
+type ArchiveContents = Pick<ArchiveCacheRow, 'path' | 'files'>;
+
 /**
  * The files in an archive worth spending anything on: a candidate has to carry a language
  * tag, and that tag has to cover one of the configured languages. Everything else — untagged
@@ -508,7 +482,7 @@ function notePlacement(gaps: EpisodeTarget[], resolved: number[], t: EpisodeTarg
  * A big pack is mostly files nobody asked for, so this is the ordinary case rather than news:
  * one trace line for the whole archive, no event.
  */
-function wantedCandidates(ctx: AppContext, job: JobRow, row: ArchiveCacheRow): Candidate[] {
+function wantedCandidates(ctx: AppContext, job: JobRow, row: ArchiveContents): Candidate[] {
   const languages = ctx.config.subtitle.languages;
   const wanted = row.files.filter(
     (f): f is Candidate => f.lang !== null && languages.some((want) => langCovers(want, f.lang)),
@@ -531,7 +505,7 @@ function wantedCandidates(ctx: AppContext, job: JobRow, row: ArchiveCacheRow): C
  * before routing so a file that's already gone never reaches the paid `archive-map` call
  * only to be dropped by `driftAndPlace`'s own (now redundant) disk check.
  */
-function onDisk(ctx: AppContext, job: JobRow, row: ArchiveCacheRow, candidates: Candidate[]): Candidate[] {
+function onDisk(ctx: AppContext, job: JobRow, row: ArchiveContents, candidates: Candidate[]): Candidate[] {
   const alive = candidates.filter((f) => existsSync(f.path));
   const gone = candidates.length - alive.length;
   if (gone > 0) {
@@ -569,7 +543,7 @@ function wantedFor(entry: Candidate, t: EpisodeTarget): boolean {
 async function matchArchiveRow(
   ctx: AppContext,
   job: JobRow,
-  row: ArchiveCacheRow,
+  row: ArchiveContents,
   gaps: EpisodeTarget[],
   seriesTitle: string,
   state: RunState,
@@ -606,23 +580,6 @@ async function matchArchiveRow(
       summary: `skipped ${covered} file(s) naming episodes already covered`,
       payload: () => ({ archive: row.path, covered }),
     });
-  }
-
-  // Movies: a single video slot — every remaining archive file targets that one video
-  // (lang filtering is via notePlacement shrinking `lacking`).
-  if (job.target_kind === 'movie' && unmatchedPaths.length > 0 && gaps[0]) {
-    const only = gaps[0];
-    for (const path of unmatchedPaths) {
-      // notePlacement may have removed `only` from `gaps` once every language is filled.
-      if (!gaps.includes(only)) break;
-      const entry = entryByPath.get(path)!;
-      const placedLang = await driftAndPlace(ctx, job, row, entry, only, state, site);
-      if (placedLang !== undefined) {
-        placedCount++;
-        notePlacement(gaps, resolved, only, placedLang);
-      }
-    }
-    return { resolved, placedCount };
   }
 
   if (unmatchedPaths.length > 0 && gaps.length > 0) {
@@ -683,13 +640,12 @@ type EntryRoute =
  * A season the entry names outright that no gap belongs to is the same fact one level up:
  * whichever episode of season 1 this is, season 1 is done.
  *
- * Movies keep the old path: one video slot, no episode refs to resolve, and the caller's
- * movie branch tries every leftover file against that slot itself.
+ * A movie never reaches the LLM: its one open slot is what `matchDeterministic` returns
+ * for any entry, so every candidate routes as a match until the slot is filled.
  */
 function routeEntry(entry: Candidate, gaps: EpisodeTarget[], all: VideoTarget[], isMovie: boolean): EntryRoute {
   const direct = matchDeterministic(gaps, entry, isMovie);
   if (direct) return { kind: 'match', target: direct };
-  if (isMovie) return { kind: 'llm' };
 
   const ref = entry.episodeRef;
   if (ref === null) return { kind: 'llm' };
@@ -738,23 +694,6 @@ function destinationFor(videoPath: string, entry: Candidate): string {
   return join(dirname(videoPath), buildSidecarName(basename(videoPath), { lang: entry.lang, ext }));
 }
 
-/** The warn event for a placement one of the guards stopped: a file Warrden didn't place
- * already sits at the destination, or another source already claims it. */
-function reportBlocked(ctx: AppContext, job: JobRow, block: PlaceBlock, sourcePath: string, targetPath: string): void {
-  const targetName = basename(targetPath);
-  const message =
-    block.kind === 'foreign'
-      ? `Skipped "${basename(sourcePath)}" — "${targetName}" already exists and wasn't placed by Warrden`
-      : `Skipped "${basename(sourcePath)}" — "${targetName}" is already claimed by "${block.claimedBy}"`;
-  ctx.events.append({
-    kind: block.kind === 'foreign' ? 'subtitle.skipped-foreign' : 'subtitle.skipped-collision',
-    level: 'warn',
-    jobId: job.id,
-    message,
-    data: targetEventData(job, { sourcePath, targetPath }),
-  });
-}
-
 /**
  * The gates + placement for one candidate file against one episode. Returns the language tag
  * that was placed (which the caller uses to shrink the episode's `lacking` set), or
@@ -774,7 +713,7 @@ function reportBlocked(ctx: AppContext, job: JobRow, block: PlaceBlock, sourcePa
 async function driftAndPlace(
   ctx: AppContext,
   job: JobRow,
-  row: ArchiveCacheRow,
+  row: ArchiveContents,
   entry: Candidate,
   t: EpisodeTarget,
   state: RunState,
@@ -787,7 +726,7 @@ async function driftAndPlace(
   const targetPath = destinationFor(t.videoPath, entry);
   const blocked = placeBlocked(state.placedFiles, targetPath, entry.path);
   if (blocked) {
-    reportBlocked(ctx, job, blocked, entry.path, targetPath);
+    reportPlaceBlocked(ctx, job, 'subtitle', blocked, entry.path, targetPath);
     return undefined;
   }
 
@@ -990,7 +929,7 @@ function placeSubtitle(
   t: EpisodeTarget,
   targetPath: string,
   plan: { path: string; lang: string; offsetMs: number; drift: 'in-sync' | 'unverified' | 'resynced' },
-  row: ArchiveCacheRow,
+  row: ArchiveContents,
   entry: Candidate,
   site: string | undefined,
 ): string {
@@ -1108,7 +1047,6 @@ async function siteSearchPass(
         callsite: SEARCH_CALLSITE,
         site: siteLabel(site.baseUrl),
         steps: 0,
-        ...(skip.backoffMs !== undefined ? { backoffMs: skip.backoffMs } : {}),
       });
       continue;
     }
@@ -1128,12 +1066,12 @@ function skipReason(
   profile: SiteProfileRow | null,
   cooldownSeconds: number,
   now: number,
-): { stop: StopReason; backoffMs?: number } | null {
+): { stop: StopReason } | null {
   if (profile === null) return null;
   if (profile.disabled_at !== null) return { stop: { kind: 'skipped', why: 'disabled' } };
   const backoffMs = failBackoffMs(profile.fail_count, cooldownSeconds);
   if (profile.fail_count > 0 && profile.last_failure_at !== null && now - profile.last_failure_at < backoffMs) {
-    return { stop: { kind: 'skipped', why: 'cooldown' }, backoffMs };
+    return { stop: { kind: 'skipped', why: 'cooldown' } };
   }
   return null;
 }
@@ -1150,9 +1088,9 @@ function cachedPacks(cache: ArchiveCache, job: JobRow): FetchedPack[] {
 
 /**
  * Every round one site gets this job. A round is a whole `searchSite` call — its own
- * `subtitle_runs` row, its own agent loop, its own reflection — and the site gets another
- * one as long as the last round brought back a pack this job did not already have and
- * something is still missing, up to `MAX_SEARCH_ROUNDS`. That is what turns "one pack per
+ * agent loop, its own reflection — and the site gets another one as long as the last round
+ * brought back a pack this job did not already have and something is still missing, up to
+ * `MAX_SEARCH_ROUNDS`. That is what turns "one pack per
  * site per job" into "keep pulling from a site that is working": a pack covering S1+S2 used
  * to end the job with S3 and S4 untouched.
  *
@@ -1425,18 +1363,8 @@ async function extractAndMatch(
     files: entries,
   });
 
-  const row: ArchiveCacheRow = {
-    id: -1,
-    arr_instance: job.arr_instance,
-    target_kind: job.target_kind,
-    target_id: job.target_id,
-    source_url: download.url,
-    path: cacheDir,
-    files: entries,
-    created_at: Date.now(),
-  };
   // matchArchiveRow drops episodes that lack nothing from `gaps` itself.
-  const { placedCount } = await matchArchiveRow(ctx, job, row, gaps, seriesTitle, state, siteLabel(site.baseUrl));
+  const { placedCount } = await matchArchiveRow(ctx, job, { path: cacheDir, files: entries }, gaps, seriesTitle, state, siteLabel(site.baseUrl));
   return placedCount > 0;
 }
 

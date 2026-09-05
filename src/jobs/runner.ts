@@ -67,7 +67,7 @@ export function startRunner(
 
       try {
         await handler(ctx, job);
-        ctx.queue.complete(job.id, undefined, requeueOpts(ctx, job));
+        ctx.queue.complete(job.id, requeueOpts(ctx, job));
         reportRunFinished(ctx, job);
       } catch (err) {
         if (err instanceof RescheduleError) {

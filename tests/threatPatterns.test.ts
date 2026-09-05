@@ -610,6 +610,12 @@ describe('scanForThreats', () => {
     expect(scanForThreats(text, 'strict')).toEqual([]);
   });
 
+  /**
+   * Not a recall result. An independent corpus of thirty-two attacks, written against the
+   * gaps rather than the rules, was caught six times: this list is a regression fence on
+   * shapes someone thought to write down, and the scanner is a tripwire for unsophisticated
+   * payloads rather than a control that stops a determined injection.
+   */
   it.each(ATTACKS)('still flags the known shape of %s', (_label, payload) => {
     expect(scanForThreats(payload, 'strict').length).toBeGreaterThan(0);
   });
@@ -620,28 +626,6 @@ describe('scanForThreats', () => {
 
   it.each(KNOWN_FALSE_POSITIVES)('still drops %s, which is an open defect', (_label, text, pattern) => {
     expect(scanForThreats(text, 'strict').map((hit) => hit.pattern)).toEqual([pattern]);
-  });
-
-  /**
-   * What this measures, and what it does not.
-   *
-   * The left-hand number is a precision result and can be read as one: the bullets were
-   * written by people who had not read the patterns, aimed at the danger zones, and none of
-   * them is blocked. The right-hand number is NOT a recall result. It says that the shapes
-   * someone thought to write down here are still caught — nothing more. An independent
-   * corpus of thirty-two attacks, written against the gaps rather than the rules, was caught
-   * six times. Read the right-hand list as a regression fence on known shapes, and read the
-   * scanner as a tripwire for unsophisticated payloads rather than a control that stops a
-   * determined injection.
-   */
-  it('blocks no legitimate bullet, and still catches every attack shape it knows', () => {
-    const blockedKnowledge = CLEAN_RULES.filter(([, text]) => scanForThreats(text, 'strict').length > 0);
-    const missedKnownShapes = ATTACKS.filter(([, text]) => scanForThreats(text, 'strict').length === 0);
-    expect({
-      corpusSizes: [CLEAN_RULES.length, ATTACKS.length],
-      blockedKnowledge: blockedKnowledge.map(([label]) => label),
-      missedKnownShapes: missedKnownShapes.map(([label]) => label),
-    }).toEqual({ corpusSizes: [155, 45], blockedKnowledge: [], missedKnownShapes: [] });
   });
 
   it('applies extra rules at the strict scope only', () => {

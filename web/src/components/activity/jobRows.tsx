@@ -10,9 +10,9 @@ import { acquireOutcomeLabel } from '@/lib/labels';
  *
  * The event log is now the whole story: each pipeline narrates its own steps, closes each
  * site visit with an `agent.stop`, and ends the run with a `run.finished` carrying its
- * verdict and counts. So this no longer synthesises anything — the per-visit rows that used
- * to be rebuilt from `subtitleRuns` and the run verdict that used to be rebuilt from the job
- * row are ordinary events with a `verdict` tone, sorted by `ts` like everything else.
+ * verdict and counts. So this no longer synthesises anything — the per-visit rows and the
+ * run verdict are ordinary events with a `verdict` tone, sorted by `ts` like everything
+ * else.
  *
  * What is still not in the log is the pick's *evidence* — the candidate list, the model's
  * reasoning, the release card — which lives in `acquire_records`. That is why acquire keeps

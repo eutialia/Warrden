@@ -144,7 +144,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
 
   it('searches a movie with {movieId} and never pins', async () => {
     const client = fakeArrClient({
-      movies: [movieResource({ title: 'A Movie', year: 2023 })],
+      movies: [movieResource({ title: 'A Movie' })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' })]) });
@@ -159,7 +159,7 @@ describe('runAcquireJob — search params and pinning by target kind', () => {
 
   it('falls back to a listMovies() lookup for the title when the job was enqueued without one', async () => {
     const client = fakeArrClient({
-      movies: [movieResource({ title: 'Looked Up Title', year: 2023 })],
+      movies: [movieResource({ title: 'Looked Up Title' })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([pickResponse({ decision: 'none', candidate: null, releaseGroup: null, confidence: null, reasoning: 'n/a' })]) });
@@ -466,7 +466,7 @@ describe('runAcquireJob — candidate cap (I11)', () => {
 describe('runAcquireJob — double-grab guard (I10)', () => {
   it('movie: skips the grab and completes cleanly when a crashed re-run already grabbed a release for this job', async () => {
     const client = fakeArrClient({
-      movies: [movieResource({ title: 'A Movie', year: 2023 })],
+      movies: [movieResource({ title: 'A Movie' })],
       releases: [candidate({ guid: 'g1' })],
     });
     const llm = new FakeGenerator([]);
@@ -758,7 +758,7 @@ describe('runAcquireJob — season mode (unaired skip, pack vs single)', () => {
 
   it('a movie veto keeps the plain none-viable payload: with no shape claimed there is nothing to force-grab', async () => {
     const client = fakeArrClient({
-      movies: [movieResource({ title: 'Perfect Blue', year: 1997 })],
+      movies: [movieResource({ title: 'Perfect Blue' })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = ctxWithClient('sonarr', client, {
@@ -824,7 +824,7 @@ describe('runAcquireJob: interactive search cache across job retries', () => {
   function retryFixture(targetKind: 'series' | 'movie') {
     const client = fakeArrClient({
       series: [seriesResource({ id: 42, title: 'Frieren' })],
-      movies: [movieResource({ title: 'A Movie', year: 2023 })],
+      movies: [movieResource({ title: 'A Movie' })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = ctxWithClient('sonarr', client, { llm: new FakeGenerator([new Error('llm blip'), noneResponse(), noneResponse()]) });
@@ -842,7 +842,7 @@ describe('runAcquireJob: interactive search cache across job retries', () => {
   });
 
   it('drops the cache when the grab itself throws, so the retry searches for a live guid instead of replaying a dead one', async () => {
-    const client = fakeArrClient({ movies: [movieResource({ id: 7, title: 'A Movie', year: 2023 })], releases: [candidate({ guid: 'g1' })] });
+    const client = fakeArrClient({ movies: [movieResource({ id: 7, title: 'A Movie' })], releases: [candidate({ guid: 'g1' })] });
     client.grabRelease = vi.fn(async () => {
       throw new Error('release no longer available');
     });
@@ -1101,7 +1101,7 @@ describe('runAcquireJob under startRunner: a permanent LLM error', () => {
 
   it('fails the job terminally on attempt 1, raises attention, and leaves the searched candidates cached', async () => {
     const client = fakeArrClient({
-      movies: [movieResource({ id: 7, title: 'A Movie', year: 2023 })],
+      movies: [movieResource({ id: 7, title: 'A Movie' })],
       releases: [candidate({ guid: 'g1' })],
     });
     const ctx = ctxWithClient('radarr', client, {

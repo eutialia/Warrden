@@ -1,5 +1,5 @@
-import type { QueueRecord } from '../../arr/types.js';
-import type { TargetKind } from '../../jobs/queue.js';
+import type { QueueRecord } from '../arr/types.js';
+import type { TargetKind } from '../jobs/queue.js';
 
 export type QueueAssessment =
   | { state: 'settled' }

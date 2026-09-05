@@ -7,7 +7,7 @@ import type { FetchResult, FetchTier } from './tiers.js';
 import { siteKey } from '../config/siteLabel.js';
 import { safeUrlTailName } from '../fs/paths.js';
 import type { SiteProfileRow } from '../db/siteProfiles.js';
-import type { TranscriptEntry } from '../db/subtitleRuns.js';
+import type { TranscriptEntry } from './transcript.js';
 import { formatSearchHintsForPrompt, FRESH_DAYS, type SearchHints } from '../pipelines/subtitle/queries.js';
 import type { StopReason } from './stop.js';
 
@@ -319,18 +319,16 @@ export async function runAgentLoop(input: {
    * `knowledgeForPrompt`) and scanned for prompt injection by the caller. `''` when
    * there's nothing to inject, or when the scan tripped and the caller withheld it. */
   knowledge: string;
-  /** Primary title; also `hints.title` when hints are provided. */
-  query: string;
-  hints?: SearchHints;
+  hints: SearchHints;
   destDir: string;
   maxSteps: number;
   onTranscript: (e: TranscriptEntry) => void;
   /** Files this loop's `llm.call` entries under the caller's per-site step. */
   trace?: { jobId: number; parentSeq?: number };
 }): Promise<AgentRun> {
-  const { llm, tier, site, profile, knowledge, destDir, maxSteps, onTranscript } = input;
-  const query = input.hints?.title ?? input.query;
-  const hintBlock = input.hints ? formatSearchHintsForPrompt(input.hints) : '';
+  const { llm, tier, site, profile, knowledge, hints, destDir, maxSteps, onTranscript } = input;
+  const query = hints.title;
+  const hintBlock = formatSearchHintsForPrompt(hints);
 
   const patterns = [site.searchUrlTemplate, ...profile.search_url_patterns].filter((p): p is string => p !== undefined);
   const system = [
@@ -453,9 +451,9 @@ export async function runAgentLoop(input: {
      * header that is not a URL, which fetches nothing either way but would otherwise read
      * as an ordinary HTTP failure. */
     const refuseHop = (res: FetchResult): 'stop' | 'continue' | null => {
-      if (res.refusedUrl === undefined) return null;
-      const reason = res.refusedReason ?? 'private';
-      const line = `${action.action} refused: ${capUrl(action.url)} redirected to ${capUrl(res.refusedUrl)}, which ${REFUSAL_REASON[reason]}`;
+      if (res.refused === undefined) return null;
+      const { url, reason } = res.refused;
+      const line = `${action.action} refused: ${capUrl(action.url)} redirected to ${capUrl(url)}, which ${REFUSAL_REASON[reason]}`;
       return refuse(line, isSecuritySignal(reason) ? 'attention' : undefined) ? 'stop' : 'continue';
     };
 

@@ -519,10 +519,7 @@ export function seriesResource(overrides?: Partial<SeriesResource>): SeriesResou
   return {
     id: 42,
     title: 'Frieren',
-    year: 2023,
-    tvdbId: 1,
     tags: [],
-    added: '',
     seasons: [{ seasonNumber: 1, monitored: true }],
     ...overrides,
   };
@@ -537,9 +534,6 @@ export function movieResource(overrides?: Partial<MovieResource>): MovieResource
   return {
     id: 7,
     title: 'Perfect Blue',
-    year: 1997,
-    tmdbId: 573,
-    added: '',
     hasFile: false,
     ...overrides,
   };
@@ -570,7 +564,7 @@ export function episodeResource(overrides?: Partial<EpisodeResource>): EpisodeRe
  * and by `ingest-run.test.ts` to seed `fakeArrClient.queue` for its settle-gate/rescue
  * tests. */
 export function queueRecord(overrides?: Partial<QueueRecord>): QueueRecord {
-  return { id: 1, seriesId: 42, status: 'downloading', title: 'x', ...overrides };
+  return { id: 1, seriesId: 42, status: 'downloading', ...overrides };
 }
 
 /** A `downloadFolderImported` `HistoryRecord` fixture (base: `reconcile.test.ts`'s own
@@ -579,7 +573,7 @@ export function queueRecord(overrides?: Partial<QueueRecord>): QueueRecord {
  * generic default. Used by `reconcile.test.ts`'s `ingestBackstop` tests, `ingestFixture`'s
  * own single history record, and `ingest-run.test.ts`'s multi-history-record tests. */
 export function historyRecord(overrides: Partial<HistoryRecord> & { id: number }): HistoryRecord {
-  return { eventType: 'downloadFolderImported', date: new Date().toISOString(), sourceTitle: 'Test Release', data: {}, ...overrides };
+  return { eventType: 'downloadFolderImported', date: new Date().toISOString(), data: {}, ...overrides };
 }
 
 export interface IngestFixture {
@@ -652,14 +646,13 @@ export function ingestFixture(opts?: {
       id: 1,
       seriesId: targetKind === 'series' ? targetId : undefined,
       movieId: targetKind === 'movie' ? targetId : undefined,
-      sourceTitle: torrentName,
       data: { droppedPath },
     }),
   ];
 
   const client = fakeArrClient({
     series: targetKind === 'series' ? [seriesResource({ id: targetId, title: seriesTitle })] : [],
-    movies: targetKind === 'movie' ? [movieResource({ id: targetId, title: seriesTitle, year: 2024, tmdbId: 1, hasFile: true })] : [],
+    movies: targetKind === 'movie' ? [movieResource({ id: targetId, title: seriesTitle, hasFile: true })] : [],
     seriesHistory: targetKind === 'series' ? history : [],
     movieHistory: targetKind === 'movie' ? history : [],
     episodes: targetKind === 'series' ? episodes : [],
@@ -801,10 +794,8 @@ export function candidate(overrides?: Partial<ReleaseCandidate>): ReleaseCandida
     title: 'Sousou no Frieren - S01E01 [1080p][Dual Audio][HEVC 10bit]',
     size: Math.round(1.4 * BYTES_PER_GB),
     seeders: 25,
-    leechers: 2,
     rejected: false,
     rejections: [],
-    publishDate: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
 }

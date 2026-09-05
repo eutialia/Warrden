@@ -17,8 +17,8 @@ export function isLoopbackPublicUrl(publicUrl: string): boolean {
   }
 }
 
-/** Mirror of `suggestPublicUrl` in `src/arr/publicUrl.ts`. Kept here because web has no
- * shared package with the server. */
+/** Runs entirely in the browser: the suggestion is derived from the page's own origin,
+ * which the server never sees. */
 export function suggestPublicUrl(input: { publicUrl: string; origin: string; listenPort: number }): string | null {
   let current: URL;
   let page: URL;

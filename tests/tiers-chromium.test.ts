@@ -109,8 +109,7 @@ describe('ChromiumTier', () => {
       expect(res).toEqual({
         ok: false,
         blocked: false,
-        refusedUrl: 'http://169.254.169.254/latest/meta-data',
-        refusedReason: 'private',
+        refused: { url: 'http://169.254.169.254/latest/meta-data', reason: 'private' },
       });
       expect(Date.now() - started).toBeLessThan(2000);
       await tier.close();
@@ -148,7 +147,7 @@ describe('ChromiumTier', () => {
     state.apiResponses = [{ status: 302, location: '//[::1' }];
     const tier = makeTier('chromium');
     const res = await tier.fetch('https://acg.rip/api/dl', { method: 'POST', body: 'a=1' });
-    expect(res).toEqual({ ok: false, status: 302, blocked: false, refusedUrl: '//[::1', refusedReason: 'unparseable' });
+    expect(res).toEqual({ ok: false, status: 302, blocked: false, refused: { url: '//[::1', reason: 'unparseable' } });
     expect(state.apiCalls).toHaveLength(1);
     await tier.close();
   });

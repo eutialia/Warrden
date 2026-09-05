@@ -13,14 +13,13 @@ export interface FetchResult {
   body?: string; // HTML/text, capped
   filePath?: string; // set when destPath was given and the download succeeded
   blocked: boolean;
-  /** The destination `refusedDestination` refused, when that is why this fetch failed —
-   * in practice a redirect hop, since the loop checks the URL it hands in beforehand. A
-   * refusal is a failed result and never a throw, so the loop reports it as a refusal
-   * instead of as an anonymous network error. */
-  refusedUrl?: string;
-  /** Why `refusedUrl` was refused, so the transcript says which of the two it was: a hop
-   * onto a guarded address, or a `Location` header that is not a URL at all. */
-  refusedReason?: RefusedDestination;
+  /** The destination `refusedDestination` refused and why, when that is why this fetch
+   * failed — in practice a redirect hop, since the loop checks the URL it hands in
+   * beforehand. A refusal is a failed result and never a throw, so the loop reports it as a
+   * refusal instead of as an anonymous network error. The reason travels with the url in one
+   * field because neither is ever known without the other, and a half-set pair would let the
+   * transcript call an unparseable `Location` header a private address. */
+  refused?: { url: string; reason: RefusedDestination };
 }
 
 /** Options for a tier fetch — GET by default; POST/body/referer for protocol steps. */
@@ -144,21 +143,15 @@ export class CurlTier implements FetchTier {
   private readonly jar: CookieJar;
   private readonly fetchImpl: FetchImpl;
 
-  constructor(opts: MakeTierOpts | FetchImpl = {}) {
-    // Back-compat: tests pass a bare fetch impl as the first arg.
-    if (typeof opts === 'function') {
-      this.fetchImpl = opts;
-      this.jar = new CookieJar();
-    } else {
-      this.fetchImpl = opts.fetchImpl ?? fetch;
-      this.jar = opts.cookieJar ?? new CookieJar();
-    }
+  constructor(opts: MakeTierOpts = {}) {
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.jar = opts.cookieJar ?? new CookieJar();
   }
 
   async fetch(url: string, opts?: FetchOpts): Promise<FetchResult> {
     try {
       const refusal = refusedDestination(url);
-      if (refusal !== null) return { ok: false, blocked: false, refusedUrl: url, refusedReason: refusal };
+      if (refusal !== null) return { ok: false, blocked: false, refused: { url, reason: refusal } };
       let currentUrl = url;
       let method: 'GET' | 'POST' = opts?.method ?? 'GET';
       // GET never carries a body — only POST forwards body/contentType.
@@ -199,7 +192,7 @@ export class CurlTier implements FetchTier {
           // Guard the hop BEFORE it is requested: this is the only place that sees it.
           const next = resolveRedirect(location, currentUrl);
           if (next.refused !== null) {
-            return { ok: false, status: res.status, blocked: false, refusedUrl: next.url, refusedReason: next.refused };
+            return { ok: false, status: res.status, blocked: false, refused: { url: next.url, reason: next.refused } };
           }
           currentUrl = next.url;
           // POST bodies are not re-sent; 302/303 (and typical 301) follow with GET.
@@ -282,11 +275,11 @@ class ChromiumTier implements FetchTier {
 
   async fetch(url: string, opts?: FetchOpts): Promise<FetchResult> {
     const refusal = refusedDestination(url);
-    if (refusal !== null) return { ok: false, blocked: false, refusedUrl: url, refusedReason: refusal };
+    if (refusal !== null) return { ok: false, blocked: false, refused: { url, reason: refusal } };
     this.refusedHop = null;
     const res = await this.attempt(url, opts);
     return !res.ok && this.refusedHop !== null
-      ? { ...res, refusedUrl: this.refusedHop, refusedReason: 'private' }
+      ? { ...res, refused: { url: this.refusedHop, reason: 'private' } }
       : res;
   }
 
@@ -367,7 +360,7 @@ class ChromiumTier implements FetchTier {
           }
           const next = resolveRedirect(location, currentUrl);
           if (next.refused !== null) {
-            return { ok: false, status, blocked: false, refusedUrl: next.url, refusedReason: next.refused };
+            return { ok: false, status, blocked: false, refused: { url: next.url, reason: next.refused } };
           }
           currentUrl = next.url;
           // Same POST-downgrade rule as CurlTier: 301/302/303 continue with GET, 307/308

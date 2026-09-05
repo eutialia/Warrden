@@ -1,20 +1,9 @@
 import { CATALOG } from './languages.catalog.js';
 
-/**
- * Language tags the subtitle-sources picker offers. BCP-47, matching what
- * Warrden writes next to a video (`zh-Hans.ass`).
- */
-
-export const LANGUAGE_TAGS: readonly string[] = CATALOG.map((row) => row.tag);
-
 const NAME_BY_TAG = new Map(CATALOG.map((row) => [row.tag, row.name]));
 const CANONICAL_BY_LOWER = new Map(CATALOG.map((row) => [row.tag.toLowerCase(), row.tag]));
 
 const displayNames = new Intl.DisplayNames(['en'], { type: 'language' });
-
-export function canonicalLanguageTag(raw: string): string | null {
-  return CANONICAL_BY_LOWER.get(raw.trim().toLowerCase()) ?? null;
-}
 
 export function languageName(tag: string): string {
   const canonical = CANONICAL_BY_LOWER.get(tag.trim().toLowerCase());

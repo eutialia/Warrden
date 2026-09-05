@@ -77,15 +77,7 @@ export async function reconcile(ctx: AppContext): Promise<void> {
   // After GC so this pass cannot recreate a pin GC just removed. Adopt live leftovers
   // and recreate registry rows the arr lost (a series still carrying the tag, profile
   // deleted by hand) — Warrden owns the inventory, the arr must match it.
-  try {
-    await syncManagedObjects(ctx);
-  } catch (err) {
-    ctx.events.append({
-      kind: 'managed.sync-failed',
-      level: 'warn',
-      message: `Managed-object sync after reconcile crashed: ${errorMessage(err)}`,
-    });
-  }
+  await syncManagedObjects(ctx);
 }
 
 /** Fetches the resource list relevant to the instance's configured kind: only series for a
@@ -157,7 +149,7 @@ function reconcileInstance(ctx: AppContext, syncState: SyncState, name: string, 
       // `webhook.received`. Every job now opens on the same kind of row.
       ctx.events.append({
         kind: 'trigger.reconcile',
-        jobId: result.id ?? undefined,
+        jobId: result.id,
         message: `Reconcile scan on "${name}" (missed webhook add)`,
         data: eventEnvelope({
           scope: 'trigger',
@@ -290,7 +282,7 @@ async function ingestBackstop(ctx: AppContext, syncState: SyncState, name: strin
     });
     ctx.events.append({
       kind: 'trigger.reconcile',
-      jobId: result.id ?? undefined,
+      jobId: result.id,
       message: `Reconcile scan on "${name}" (missed import history)`,
       data: eventEnvelope({
         scope: 'trigger',

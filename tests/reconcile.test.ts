@@ -18,8 +18,8 @@ import {
   hasEvent,
 } from './helpers.js';
 
-const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, year: 2024, tvdbId: id, tags });
-const movie = (id: number) => movieResource({ id, title: `M${id}`, year: 2024, tmdbId: id, hasFile: true });
+const series = (id: number, tags: number[] = []) => seriesResource({ id, title: `S${id}`, tags });
+const movie = (id: number) => movieResource({ id, title: `M${id}`, hasFile: true });
 
 describe('reconcile', () => {
   it('a sonarr-kind instance only fetches series, never movies (Sonarr has no /movie endpoint)', async () => {
@@ -373,7 +373,7 @@ describe('reconcile', () => {
   });
 
   it('re-pinning an old registry row refreshes created_at, so a stale-snapshot race does not gc it out from under a fresh pin', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 2024 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     const ctx = ctxWithClient('sonarr', client, { config: configWithArrs('sonarr') });
 
     await pinReleaseGroup({ client, db: ctx.db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
@@ -525,8 +525,8 @@ describe('reconcile', () => {
         // The webhook path's own ingest job for this target, already run to completion.
         const swept = ctx.queue.enqueue({ pipeline: 'ingest', targetKind: 'series', targetId: 1, arrInstance: 'sonarr' });
         ctx.queue.claim();
-        ctx.queue.complete(swept.id!);
-        const sweptAt = ctx.queue.get(swept.id!)!.updated_at;
+        ctx.queue.complete(swept.id);
+        const sweptAt = ctx.queue.get(swept.id)!.updated_at;
 
         client.listRecentImports = async () => [
           historyRecord({ id: 2, seriesId: 1, date: new Date(sweptAt + offsetMs).toISOString() }),

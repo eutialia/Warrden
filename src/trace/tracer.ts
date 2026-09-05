@@ -33,7 +33,7 @@ export const NOOP_TRACER: Tracer = {
 /** Structural mirror of `JobQueue.enqueue`'s result, kept local so the tracer owes the
  * job queue no import. */
 export interface TriggerResult {
-  id: number | null;
+  id: number;
   outcome: 'enqueued' | 'coalesced' | 'marked-dirty';
 }
 
@@ -54,7 +54,7 @@ export function traceTrigger(
   result: TriggerResult,
   e: { kind: string; summary: string; payload?: PayloadThunk },
 ): void {
-  if (trace === undefined || result.outcome === 'marked-dirty' || result.id === null) return;
+  if (trace === undefined || result.outcome === 'marked-dirty') return;
   trace.event({
     jobId: result.id,
     kind: e.kind,

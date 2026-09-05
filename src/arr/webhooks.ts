@@ -234,7 +234,7 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
   });
   ctx.events.append({
     kind: 'webhook.received',
-    jobId: result.id ?? undefined,
+    jobId: result.id,
     message: `${event.eventType} for "${target.title}" (${instanceName})`,
     data: eventEnvelope({
       scope: 'trigger',
@@ -249,7 +249,7 @@ export function handleWebhook(ctx: HandleWebhookCtx, instanceName: string, paylo
         // A pack import is one webhook per file, every one of them coalesced onto the same
         // job. The rows stay individually stored — Phase C reads them as the per-file
         // history — and a reader folds them into one line by this key.
-        coalesceKey: result.id === null ? undefined : `hooks:${result.id}`,
+        coalesceKey: `hooks:${result.id}`,
         ...(isUpgrade === undefined ? {} : { reason: isUpgrade ? 'upgrade' : 'new' }),
         // The import itself: which episodes, which file, which release. A pack fires one of
         // these per file, so these rows ARE the per-file history the drawer renders.

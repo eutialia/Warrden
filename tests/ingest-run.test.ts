@@ -670,9 +670,9 @@ describe('runIngestJob — sidecar sweep and placement', () => {
 
     fx.client.seriesHistory = [
       // dirname -> fx.torrentDir
-      historyRecord({ id: 1, seriesId: fx.targetId, date: '', sourceTitle: 'x', data: { droppedPath: join(fx.torrentDir, 'e1.mkv') } }),
+      historyRecord({ id: 1, seriesId: fx.targetId, date: '', data: { droppedPath: join(fx.torrentDir, 'e1.mkv') } }),
       // dirname -> nestedDir, INSIDE fx.torrentDir
-      historyRecord({ id: 2, seriesId: fx.targetId, date: '', sourceTitle: 'x', data: { droppedPath: join(nestedDir, 'e2.mkv') } }),
+      historyRecord({ id: 2, seriesId: fx.targetId, date: '', data: { droppedPath: join(nestedDir, 'e2.mkv') } }),
     ];
 
     const llm = new FakeGenerator([{ assignments: [{ file: 1, episodeId: 1 }], reasoning: 'x' }]);
@@ -1395,7 +1395,7 @@ describe('runIngestJob — mapArrPath boundary', () => {
 
     const client = fakeArrClient({
       series: [seriesResource({ id: 42, title: 'Frieren' })],
-      seriesHistory: [historyRecord({ id: 1, seriesId: 42, date: '', sourceTitle: 'Show Torrent', data: { droppedPath: arrDroppedPath } })],
+      seriesHistory: [historyRecord({ id: 1, seriesId: 42, date: '', data: { droppedPath: arrDroppedPath } })],
       episodes: [episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true })],
       episodeFiles: [{ id: 100, seriesId: 42, seasonNumber: 1, relativePath: videoFileName, path: arrVideoPath }],
     });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assessQueue } from '../src/pipelines/ingest/queueState.js';
+import { assessQueue } from '../src/pipelines/queueState.js';
 import { queueRecord } from './helpers.js';
 
 const seriesTarget = { kind: 'series' as const, id: 42 };

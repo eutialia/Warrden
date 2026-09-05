@@ -10,7 +10,7 @@ describe('EventLog', () => {
     const unsub = log.subscribe((e) => seen.push(e.kind));
     log.append({ kind: 'job.started', message: 'Acquire started' });
     log.append({ kind: 'job.done', message: 'Acquire done', level: 'info' });
-    expect(log.list({ limit: 10 }).map((e) => e.kind)).toEqual(['job.done', 'job.started']);
+    expect(log.list().map((e) => e.kind)).toEqual(['job.done', 'job.started']);
     expect(seen).toEqual(['job.started', 'job.done']);
     unsub();
     log.append({ kind: 'x', message: 'x' });

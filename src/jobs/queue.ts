@@ -20,7 +20,7 @@ export interface FailResult {
 }
 
 interface EnqueueResult {
-  id: number | null;
+  id: number;
   outcome: 'enqueued' | 'coalesced' | 'marked-dirty';
 }
 
@@ -35,7 +35,6 @@ export interface JobRow {
   attempts: number;
   not_before: number;
   payload: Record<string, unknown>;
-  result: Record<string, unknown> | null;
   error: string | null;
   created_at: number;
   updated_at: number;
@@ -53,18 +52,13 @@ interface JobRowRaw {
   attempts: number;
   not_before: number;
   payload: string;
-  result: string | null;
   error: string | null;
   created_at: number;
   updated_at: number;
 }
 
 function parseRow(row: JobRowRaw): JobRow {
-  return {
-    ...row,
-    payload: JSON.parse(row.payload) as Record<string, unknown>,
-    result: row.result === null ? null : (JSON.parse(row.result) as Record<string, unknown>),
-  };
+  return { ...row, payload: JSON.parse(row.payload) as Record<string, unknown> };
 }
 
 /**
@@ -181,15 +175,15 @@ export class JobQueue {
    * that is the trailing edge for a debounced pipeline: triggers that arrived while the run
    * was in flight get one more run, but not before the debounce window has passed.
    */
-  complete(id: number, result?: object, opts?: { requeueNotBefore?: number }): { requeued: boolean } {
+  complete(id: number, opts?: { requeueNotBefore?: number }): { requeued: boolean } {
     const now = Date.now();
     const tx = this.db.transaction((): { requeued: boolean } => {
       const job = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id) as JobRowRaw | undefined;
       if (!job) throw new Error(`complete: job ${id} not found`);
 
       const info = this.db
-        .prepare(`UPDATE jobs SET status = 'done', dirty = 0, result = ?, error = NULL, updated_at = ? WHERE id = ? AND status = 'running'`)
-        .run(result === undefined ? null : JSON.stringify(result), now, id);
+        .prepare(`UPDATE jobs SET status = 'done', dirty = 0, error = NULL, updated_at = ? WHERE id = ? AND status = 'running'`)
+        .run(now, id);
       if (info.changes === 0) {
         throw new Error(`complete: job ${id} is not running (status=${job.status})`);
       }

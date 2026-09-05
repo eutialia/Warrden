@@ -5,12 +5,10 @@ import type { MediaStream, MediaTools } from '../../media/tools.js';
 export interface VideoEntry {
   // Kept exported: tests build VideoEntry[] fixtures against this shape.
   videoPath: string;
-  episodeId?: number;
 }
 
 export interface SubtitleGap {
   videoPath: string;
-  episodeId?: number;
   lacking: string[]; // configured tags this video does not carry, in config order
   covered: boolean; // at least one configured tag is present
   embeddedRefs: { streamIndex: number; lang: string | null }[]; // embedded subs usable as drift reference
@@ -167,7 +165,6 @@ export async function findMissingSubtitles(input: {
     if (lacking.length > 0) {
       gaps.push({
         videoPath: video.videoPath,
-        episodeId: video.episodeId,
         lacking,
         covered: lacking.length < languages.length,
         embeddedRefs: rankReferenceStreams(embedded),

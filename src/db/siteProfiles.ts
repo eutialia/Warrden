@@ -30,7 +30,8 @@ function parseRow(row: SiteProfileRowRaw): SiteProfileRow {
 }
 
 export interface UpdateSiteProfileInput {
-  /** `null` clears the stored known-good tier (dashboard "forget this floor"). */
+  /** `null` clears the stored known-good tier. Agent-written only — the dashboard has no
+   * write path to it. */
   lastWorkingTier?: AccessTier | null;
   searchUrlPatterns?: string[];
   lastSuccessAt?: number | null;

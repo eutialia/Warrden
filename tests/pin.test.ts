@@ -14,7 +14,7 @@ describe('pinReleaseGroup', () => {
     expect(rows.map((r: any) => r.kind).sort()).toEqual(['release_profile', 'tag']);
   });
   it('is idempotent for the same group', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     const db = freshDb();
     const p = { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' };
     await pinReleaseGroup({ client, db }, p);
@@ -26,7 +26,7 @@ describe('pinReleaseGroup', () => {
   });
 
   it('reuses an existing profile already carrying the pinned tag even when the group string differs only in a way that slugifies the same (no duplicate, differently-named profile)', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     const db = freshDb();
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'SubsPlease' });
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'subsplease' });
@@ -34,7 +34,7 @@ describe('pinReleaseGroup', () => {
     expect(client.profiles).toHaveLength(1); // reused by tag membership, not re-created under the new name
   });
   it('reconciles a name-matched profile whose tags are stale (e.g. after its old tag was GC\'d) by adding the current tag id', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     client.pushProfile({ name: 'warrden: [SubsPlease]', enabled: true, required: ['SubsPlease'], ignored: [], tags: [999], indexerId: 0 });
     const db = freshDb();
 
@@ -47,7 +47,7 @@ describe('pinReleaseGroup', () => {
   });
 
   it('never adopts a USER-owned profile by tag membership — a matching but non-warrden-named profile is left alone and a fresh warrden-named profile is created instead', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     const tag = client.pushTag('warrden-subsplease');
     const userProfile = client.pushProfile({ name: 'My Custom Profile', enabled: true, required: [], ignored: [], tags: [tag.id], indexerId: 0 });
     const db = freshDb();
@@ -65,7 +65,7 @@ describe('pinReleaseGroup', () => {
   });
 
   it('refreshes a warrden-named profile\'s stale `required` list to include the group, whether matched by name or by tag', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     const tag = client.pushTag('warrden-subsplease');
     // Matched by name, but `required` never got the group (stale/legacy row).
     client.pushProfile({ name: 'warrden: [SubsPlease]', enabled: true, required: [], ignored: [], tags: [tag.id], indexerId: 0 });
@@ -79,7 +79,7 @@ describe('pinReleaseGroup', () => {
   });
 
   it('re-pinning a different group swaps the series tag', async () => {
-    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F', year: 0 })] });
+    const client = fakeArrClient({ series: [seriesResource({ id: 42, title: 'F' })] });
     const db = freshDb();
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'GroupA' });
     await pinReleaseGroup({ client, db }, { instanceName: 'sonarr', seriesId: 42, group: 'GroupB' });
