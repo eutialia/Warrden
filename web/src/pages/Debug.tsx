@@ -267,7 +267,7 @@ export default function DebugPage() {
               setTab('story');
             }}
           />
-          <LaneStrip entries={entries} events={detail?.events ?? []} jobTerminal={jobTerminal} selectedSeq={selectedSeq} onSelect={select} />
+          <LaneStrip key={selectedJob} entries={entries} events={detail?.events ?? []} jobTerminal={jobTerminal} selectedSeq={selectedSeq} onSelect={select} />
           <div className={inspectorOpen ? 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_400px]' : 'flex min-h-0 flex-1 flex-col'}>
             <Waterfall
               entries={entries}

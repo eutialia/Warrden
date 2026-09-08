@@ -1,6 +1,7 @@
 import type { EventRow, TraceEntry } from '@/api';
 import { stepTone } from '@/components/activity/eventStep';
 import type { Tone } from '@/lib/tone';
+import { clamp } from '@/lib/utils';
 
 export type Lane = 'trigger' | 'arr' | 'agent' | 'llm' | 'media' | 'writes' | 'verdicts';
 export const LANES: readonly Lane[] = ['trigger', 'arr', 'agent', 'llm', 'media', 'writes', 'verdicts'];
@@ -48,14 +49,25 @@ export function verdictTicks(events: EventRow[]): { id: number; ts: number; tone
 }
 
 export const IDLE_THRESHOLD_MS = 2000;
-export const IDLE_SEGMENT_WEIGHT_MS = 1500;
+// All idle gaps together draw one ninth of the strip, however many there are.
+export const IDLE_SEGMENT_SHARE = 8;
+
+export interface Gap {
+  from: number;
+  to: number;
+}
+
+export interface Tick {
+  ts: number;
+  x: number;
+  label: string;
+}
 
 export interface TimeScale {
   start: number;
   end: number;
   toX(ts: number): number;
-  idles: { from: number; to: number; x0: number; x1: number }[];
-  ticks: { ts: number; x: number; label: string }[];
+  idles: (Gap & { x0: number; x1: number })[];
 }
 
 /** Piecewise-linear: real time everywhere except inside an idle gap, which is drawn at a
@@ -66,69 +78,140 @@ export function buildTimeScale(entries: TraceEntry[], now: number): TimeScale {
   const start = roots[0]?.ts_start ?? now;
   const end = Math.max(now, ...roots.map((e) => e.ts_end ?? now));
 
-  const gaps: { from: number; to: number }[] = [];
+  const gaps: Gap[] = [];
   let reach = start;
   for (const e of roots) {
     if (e.ts_start - reach > IDLE_THRESHOLD_MS) gaps.push({ from: reach, to: e.ts_start });
     reach = Math.max(reach, e.ts_end ?? now);
   }
 
-  const idleTotal = gaps.reduce((sum, g) => sum + (g.to - g.from), 0);
-  const weighted = Math.max(end - start - idleTotal + gaps.length * IDLE_SEGMENT_WEIGHT_MS, 1);
+  const active = end - start - gaps.reduce((sum, g) => sum + (g.to - g.from), 0);
+  const idleWeight = Math.max(active / (IDLE_SEGMENT_SHARE * Math.max(gaps.length, 1)), 1);
+  const weighted = Math.max(active + gaps.length * idleWeight, 1);
 
   const toX = (ts: number): number => {
-    const t = Math.min(Math.max(ts, start), end);
+    const t = clamp(ts, start, end);
     let w = 0;
     let cursor = start;
     for (const g of gaps) {
       if (t <= g.from) break;
       w += g.from - cursor;
-      if (t < g.to) return (w + ((t - g.from) / (g.to - g.from)) * IDLE_SEGMENT_WEIGHT_MS) / weighted;
-      w += IDLE_SEGMENT_WEIGHT_MS;
+      if (t < g.to) return (w + ((t - g.from) / (g.to - g.from)) * idleWeight) / weighted;
+      w += idleWeight;
       cursor = g.to;
     }
     w += t - cursor;
     return end === start ? 1 : w / weighted;
   };
 
-  const idles = gaps.map((g) => ({ ...g, x0: toX(g.from), x1: toX(g.to) }));
-  const ticks = tickTimes(start, end, gaps).map((ts) => ({ ts, x: toX(ts), label: formatAt(ts - start).slice(1) }));
-  return { start, end, toX, idles, ticks };
+  return { start, end, toX, idles: gaps.map((g) => ({ ...g, x0: toX(g.from), x1: toX(g.to) })) };
 }
 
-function activeBetween(from: number, to: number, gaps: { from: number; to: number }[]): number {
+type Scale = Pick<TimeScale, 'start' | 'end' | 'idles'>;
+
+/** Drawn width of one millisecond of active time. Uniform, because the scale is linear
+ * outside the gaps and every gap is drawn at the same fixed weight. */
+function slopeOf(scale: Scale): number {
+  const idleDrawn = scale.idles.reduce((sum, g) => sum + (g.x1 - g.x0), 0);
+  return (1 - idleDrawn) / Math.max(activeBetween(scale.start, scale.end, scale.idles), 1);
+}
+
+/** x -> ts, the exact inverse of `toX`: linear outside the gaps, and inside one, the
+ * fraction of its drawn segment is the fraction of its real length. */
+export function invert(scale: Scale, x: number): number {
+  const slope = slopeOf(scale);
+  let cursor = scale.start;
+  let w = 0;
+  for (const g of scale.idles) {
+    if (x < g.x1) {
+      if (x <= g.x0) break;
+      return g.from + ((x - g.x0) / (g.x1 - g.x0)) * (g.to - g.from);
+    }
+    cursor = g.to;
+    w = g.x1;
+  }
+  return clamp(cursor + (x - w) / slope, scale.start, scale.end);
+}
+
+/** Ticks for the visible window `[x0, x1]` of scale space, with `x` remapped into that
+ * window and the label still counted from the run's start. */
+export function axisTicks(scale: TimeScale, x0: number, x1: number): Tick[] {
+  const from = x0 <= 0 ? scale.start : invert(scale, x0);
+  const to = x1 >= 1 ? scale.end : invert(scale, x1);
+  const span = x1 - x0;
+  const step = tickStep(slopeOf(scale) / span);
+  const decimals = step < 100 ? 2 : step < 1000 ? 1 : 0;
+  return tickTimes(from, to, scale.idles, step).map((ts) => ({
+    ts,
+    x: clamp((scale.toX(ts) - x0) / span, 0, 1),
+    label: formatAt(ts - scale.start, decimals).slice(1),
+  }));
+}
+
+function activeBetween(from: number, to: number, gaps: Gap[]): number {
   const idle = gaps.reduce((sum, g) => sum + Math.max(0, Math.min(to, g.to) - Math.max(from, g.from)), 0);
   return to - from - idle;
 }
 
-const TICK_STEPS = [500, 1000, 2000, 5000, 10_000, 30_000, 60_000, 300_000];
+export function runFacts(scale: TimeScale): string {
+  const active = activeBetween(scale.start, scale.end, scale.idles);
+  const idle = scale.end - scale.start - active;
+  const parts = [`${formatAt(active).slice(1)} active`];
+  if (idle > 0) parts.push(`${formatAt(idle).slice(1)} idle`);
+  return parts.join(' · ');
+}
 
-/** The real timestamp `activeOffset` ms of work after `start`. A budget that runs out exactly
- * at the mouth of a gap resolves to the far edge, which is where the work resumes. */
-function realAt(start: number, activeOffset: number, gaps: { from: number; to: number }[]): number {
-  let t = start;
-  let remaining = activeOffset;
+// Ticks closer together than this fraction of the drawn window overprint each other: an
+// idle gap compresses the working stretches around it into a sliver, and ten ticks inside
+// that sliver read as one smear. A tenth also caps the axis at ten ticks.
+const MIN_TICK_GAP = 0.1;
+
+const TICK_STEPS = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 30_000, 60_000, 300_000];
+
+/** The finest step whose ticks still land `MIN_TICK_GAP` apart, given the drawn fraction
+ * one millisecond of active time takes in the window. */
+function tickStep(drawn: number): number {
+  return TICK_STEPS.find((s) => s * drawn >= MIN_TICK_GAP) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
+}
+
+/** The stretches of real work in `[from, to]`: the complement of the idle gaps. A `from`
+ * inside a gap starts at that gap's far edge, which is where the work resumes. */
+function activeSegments(from: number, to: number, gaps: Gap[]): Gap[] {
+  const segments: Gap[] = [];
+  let cursor = from;
   for (const g of gaps) {
-    if (g.from <= t) continue;
-    const span = g.from - t;
-    if (remaining < span) return t + remaining;
-    remaining -= span;
-    t = g.to;
+    const start = Math.max(from, g.from);
+    const end = Math.min(to, g.to);
+    if (end <= start) continue;
+    if (start > cursor) segments.push({ from: cursor, to: start });
+    cursor = Math.max(cursor, end);
   }
-  return t + remaining;
+  if (cursor < to) segments.push({ from: cursor, to });
+  return segments;
 }
 
 /** Ticks are spaced in active time, not real time: stepping in real time over a run whose
  * working stretches are each shorter than the step lands every tick inside an idle gap and
- * leaves the axis with one mark at zero. The step is the finest of the fixed set that still
- * keeps the axis at ten ticks or fewer. */
-function tickTimes(start: number, end: number, gaps: { from: number; to: number }[]): number[] {
-  const active = activeBetween(start, end, gaps);
-  const step = TICK_STEPS.find((s) => active / s <= 10) ?? TICK_STEPS[TICK_STEPS.length - 1]!;
+ * leaves the axis with one mark at zero. */
+function tickTimes(from: number, to: number, gaps: Gap[], step: number): number[] {
+  const segments = activeSegments(from, to, gaps);
+  const active = segments.reduce((sum, s) => sum + (s.to - s.from), 0);
+  const inGap = gaps.some((g) => g.from < from && from < g.to);
+  const realAt = (offset: number): number => {
+    if (offset === 0 && !inGap) return from;
+    let remaining = offset;
+    let last = from;
+    for (const s of segments) {
+      if (remaining < s.to - s.from) return s.from + remaining;
+      remaining -= s.to - s.from;
+      last = s.to;
+    }
+    return last + remaining;
+  };
   const out: number[] = [];
-  for (let offset = 0; offset <= active; offset += step) out.push(realAt(start, offset, gaps));
+  for (let offset = 0; offset <= active; offset += step) out.push(realAt(offset));
   const last = out[out.length - 1]!;
-  if (last < end && activeBetween(last, end, gaps) > step / 2) out.push(end);
+  if (last < to && activeBetween(last, to, gaps) > step / 2) out.push(to);
   return out;
 }
 
@@ -137,10 +220,10 @@ export function effectiveNow(entries: TraceEntry[], jobTerminal: boolean): numbe
   return entries.reduce((max, e) => Math.max(max, e.ts_end ?? e.ts_start), 0);
 }
 
-export function formatAt(ms: number): string {
-  if (ms < 60_000) return `+${(ms / 1000).toFixed(1)}s`;
+export function formatAt(ms: number, decimals?: number): string {
+  if (ms < 60_000) return `+${(ms / 1000).toFixed(decimals ?? 1)}s`;
   const minutes = Math.floor(ms / 60_000);
-  if (minutes < 60) return `+${minutes}m ${Math.floor((ms % 60_000) / 1000)}s`;
+  if (minutes < 60) return `+${minutes}m ${((ms % 60_000) / 1000).toFixed(decimals ?? 0)}s`;
   return `+${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
