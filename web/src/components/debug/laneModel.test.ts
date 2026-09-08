@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventRow, TraceEntry } from '@/api';
 import {
+  axisTicks,
   buildTimeScale,
   childrenBySeq,
   effectiveNow,
@@ -8,8 +9,10 @@ import {
   formatAt,
   formatTook,
   IDLE_THRESHOLD_MS,
+  invert,
   isToolKind,
   laneOf,
+  runFacts,
   turnOf,
   verdictTicks,
 } from '@/components/debug/laneModel';
@@ -153,20 +156,74 @@ describe('buildTimeScale', () => {
     expect(scale.idles.some((g) => g.from === 12_200)).toBe(false);
   });
   it('ticks in active time: 3s of work takes a 500ms step, and the tick whose budget runs out at the mouth of the gap resolves to its far edge', () => {
-    expect(scale.ticks.map((t) => t.ts)).toEqual([0, 500, 1000, 1500, 12_000, 12_500, 13_000]);
+    expect(axisTicks(scale, 0, 1).map((t) => t.ts)).toEqual([0, 500, 1000, 1500, 12_000, 12_500, 13_000]);
   });
-  it('ticks every 5s on an uninterrupted 25s run: 2s would need 12.5 ticks, 5s needs 5', () => {
+  it('ticks every 5s on an uninterrupted 25s run: 2s would land them closer than MIN_TICK_GAP', () => {
     const s = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 25_000 })], 25_000);
-    expect(s.ticks.map((t) => t.ts)).toEqual([0, 5000, 10_000, 15_000, 20_000, 25_000]);
+    expect(axisTicks(s, 0, 1).map((t) => t.ts)).toEqual([0, 5000, 10_000, 15_000, 20_000, 25_000]);
   });
-  it('drops to a 500ms step on a 2s run', () => {
+  it('drops to a 200ms step on a 2s run', () => {
     const s = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 2000 })], 2000);
-    expect(s.ticks.map((t) => t.ts)).toEqual([0, 500, 1000, 1500, 2000]);
+    expect(axisTicks(s, 0, 1).map((t) => t.ts)).toEqual([0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000]);
   });
   it('handles a single instantaneous entry without dividing by zero', () => {
     const s = buildTimeScale([entry({ seq: 0, ts_start: 5, ts_end: 5 })], 5);
     expect(s.toX(5)).toBe(1);
     expect(Number.isFinite(s.toX(5))).toBe(true);
+  });
+});
+
+describe('invert', () => {
+  const scale = buildTimeScale(
+    [entry({ seq: 0, ts_start: 0, ts_end: 1000 }), entry({ seq: 1, ts_start: 12_000, ts_end: 13_000 })],
+    13_000,
+  );
+  it.each([0, 500, 1000, 4000, 8000, 11_999, 12_000, 12_500, 13_000])('round-trips %dms across the idle gap', (ts) => {
+    expect(invert(scale, scale.toX(ts))).toBeCloseTo(ts, 0);
+  });
+});
+
+describe('axisTicks', () => {
+  const scale = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 25_000 })], 25_000);
+
+  it('keeps the tick at the run start when the first working stretch is instantaneous', () => {
+    const s = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 0 }), entry({ seq: 1, ts_start: 10_000, ts_end: 10_400 })], 10_400);
+    const ticks = axisTicks(s, 0, 1);
+    expect(ticks[0]).toMatchObject({ ts: 0, x: 0, label: '0.00s' });
+  });
+
+  it('over a zoomed window steps finer, stays inside the window, and maps x into view space', () => {
+    const full = axisTicks(scale, 0, 1);
+    const zoomed = axisTicks(scale, 0.2, 0.36);
+    expect(zoomed.length).toBeGreaterThan(1);
+    for (const t of zoomed) {
+      expect(t.x).toBeGreaterThanOrEqual(0);
+      expect(t.x).toBeLessThanOrEqual(1);
+      expect(t.ts).toBeGreaterThanOrEqual(4900);
+      expect(t.ts).toBeLessThanOrEqual(9100);
+    }
+    const step = (ts: { ts: number }[]) => ts[1]!.ts - ts[0]!.ts;
+    expect(step(zoomed)).toBeLessThan(step(full));
+  });
+  it('labels a deep zoom to distinct times: a 1s run at 20x still gets three ticks', () => {
+    const s = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 1000 })], 1000);
+    const labels = axisTicks(s, 0.5, 0.55).map((t) => t.label);
+    expect(new Set(labels).size).toBeGreaterThanOrEqual(3);
+  });
+  it('remaps a zoomed window over an idle gap without leaving it', () => {
+    const gapped = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 1000 }), entry({ seq: 1, ts_start: 600_000, ts_end: 601_000 })], 601_000);
+    for (const t of axisTicks(gapped, 0.4, 0.9)) {
+      expect(t.x).toBeGreaterThanOrEqual(0);
+      expect(t.x).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe('runFacts', () => {
+  it('sums active time and idle time, and drops idle when there is none', () => {
+    const gapped = buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 1000 }), entry({ seq: 1, ts_start: 601_000, ts_end: 601_900 })], 601_900);
+    expect(runFacts(gapped)).toBe('1.9s active \u00b7 10m 0s idle');
+    expect(runFacts(buildTimeScale([entry({ seq: 0, ts_start: 0, ts_end: 1900 })], 1900))).toBe('1.9s active');
   });
 });
 

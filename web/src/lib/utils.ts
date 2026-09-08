@@ -63,3 +63,6 @@ export function formatReleaseSize(bytes: number): string {
   return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
 }
 
+export function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(v, lo), hi);
+}
