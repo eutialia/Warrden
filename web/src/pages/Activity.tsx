@@ -19,12 +19,10 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { ALL, foldJobsByTarget, jobTitle, PHASES, STATUSES, type TargetGroup } from '@/lib/jobs';
+import { ALL, filterJobs, foldJobsByTarget, JOB_WINDOW, PHASES, STATUSES, type TargetGroup } from '@/lib/jobs';
 import { jobStatusLabel, pipelineLabel } from '@/lib/labels';
 
 const PAGE_SIZE = 50;
-// One widened fetch is the most a bookmark can ask for. Matches MAX_LIMIT in src/server/app.ts.
-const DEEP_LINK_LIMIT = 1000;
 
 const PIPELINE_ITEMS: Record<string, string> = {
   [ALL]: 'All work',
@@ -52,12 +50,12 @@ export default function Activity() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [widenedForTarget, setWidenedForTarget] = useState<string | null>(null);
 
-  // The bookmark's 1000-row window is not the operator's "Load older jobs"
+  // The bookmark's wide window is not the operator's "Load older jobs"
   // count. Deriving keeps closing the drawer from leaving every SSE refetch
   // at 1000, without throwing away a limit they chose themselves.
   const targetParam = searchParams.get('target');
   const widened = targetParam !== null && widenedForTarget === targetParam;
-  const limit = widened ? DEEP_LINK_LIMIT : userLimit;
+  const limit = widened ? JOB_WINDOW : userLimit;
 
   const beginFetch = useFetchGeneration();
   const refetch = useCallback(() => {
@@ -82,18 +80,7 @@ export default function Activity() {
 
   useEffect(refetch, [refetch]);
 
-  // Filtering is client-side over the fetched window: the API returns a bounded
-  // list already, and a homelab's job history is small enough that a round-trip
-  // per keystroke would be the slower option.
-  const visible = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return jobs.filter((job) => {
-      if (pipeline !== ALL && job.pipeline !== pipeline) return false;
-      if (status !== ALL && job.status !== status) return false;
-      if (!needle) return true;
-      return `${jobTitle(job)} ${job.arr_instance}`.toLowerCase().includes(needle);
-    });
-  }, [jobs, query, pipeline, status]);
+  const visible = useMemo(() => filterJobs(jobs, { query, pipeline, status }), [jobs, query, pipeline, status]);
 
   const filtered = query.trim() !== '' || pipeline !== ALL || status !== ALL;
 

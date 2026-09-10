@@ -1,5 +1,9 @@
-import { isTruncationEnvelope } from '@/api';
+import { isTruncationEnvelope, type TruncationEnvelope } from '@/api';
 import { Button } from '@/components/ui/button';
+
+export function TruncationNote({ envelope }: { envelope: TruncationEnvelope }) {
+  return <p className="text-[11px] text-muted-foreground">truncated ({Math.round(envelope.bytes / 1024).toLocaleString()} KB)</p>;
+}
 
 export function PayloadView({ value, error, onRetry }: { value: unknown; error?: string; onRetry?: () => void }) {
   if (error !== undefined)
@@ -18,7 +22,7 @@ export function PayloadView({ value, error, onRetry }: { value: unknown; error?:
   const envelope = isTruncationEnvelope(value) ? value : null;
   return (
     <div className="space-y-1.5">
-      {envelope && <p className="text-[11px] text-muted-foreground">truncated ({Math.round(envelope.bytes / 1024).toLocaleString()} KB)</p>}
+      {envelope && <TruncationNote envelope={envelope} />}
       <pre className="max-h-[60vh] overflow-auto rounded-sm border bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap">
         {envelope ? envelope.head : JSON.stringify(value, null, 2)}
       </pre>

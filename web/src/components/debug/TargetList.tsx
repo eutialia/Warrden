@@ -1,12 +1,14 @@
 import { useMemo } from 'react';
 import { Search } from 'lucide-react';
 import type { Job } from '@/api';
+import { PhaseDots } from '@/components/activity/ActivityList';
 import { RelativeTime } from '@/components/activity/RelativeTime';
+import { StatusDot } from '@/components/ToneBadge';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ALL, foldJobsByTarget, jobTitle, PHASES, phaseSummary, phaseTone, STATUSES, type TargetGroup } from '@/lib/jobs';
+import { ALL, foldJobsByTarget, jobTitle, PHASES, STATUSES, type TargetGroup } from '@/lib/jobs';
 import { jobStatusLabel, pipelineLabel, runOutcome } from '@/lib/labels';
-import { TONE_SOLID, TONE_TEXT } from '@/lib/tone';
+import { TONE_TEXT } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
 export function TargetList({
@@ -69,26 +71,24 @@ function TargetRow({ group, selectedJobId, onSelect }: { group: TargetGroup; sel
   const open = group.runs.some((r) => r.id === selectedJobId);
   const latestOutcome = runOutcome(group.latest);
   return (
-    <li className={cn('cursor-pointer border-b px-3 py-2 text-xs transition-colors hover:bg-accent', open && 'bg-accent')} onClick={() => onSelect(group.latest.id)}>
-      <button type="button" className="flex w-full cursor-pointer items-center gap-2 text-left">
-        <span className="min-w-0 flex-1 truncate font-medium">{jobTitle(group.latest)}</span>
-        <span className={cn('size-1.5 shrink-0 rounded-full', TONE_SOLID[latestOutcome.tone])} title={latestOutcome.label} />
-      </button>
-      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-        <span className="truncate">{group.latest.arr_instance}</span>
-        <span>·</span>
-        {PHASES.map((p) => {
-          const runs = group.byPhase[p];
-          return (
-            <span
-              key={p}
-              title={`${pipelineLabel(p)} - ${phaseSummary(p, runs)}`}
-              className={cn('size-1.5 rounded-full', runs.length === 0 ? 'bg-muted-foreground/20' : TONE_SOLID[phaseTone(runs)])}
-            />
-          );
-        })}
-        <span>·</span>
-        <RelativeTime ts={group.lastTs} />
+    <li className={cn('border-b px-3 py-2 text-xs transition-colors hover:bg-accent', open && 'bg-accent')}>
+      {/* The header button's hit area must not reach the expanded run list below it. */}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => onSelect(group.latest.id)}
+          className="flex w-full cursor-pointer items-center gap-2 text-left after:absolute after:inset-0"
+        >
+          <span className="min-w-0 flex-1 truncate font-medium">{jobTitle(group.latest)}</span>
+          <StatusDot tone={latestOutcome.tone} size="sm" title={latestOutcome.label} />
+        </button>
+        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="truncate">{group.latest.arr_instance}</span>
+          <span>·</span>
+          <PhaseDots group={group} dense />
+          <span>·</span>
+          <RelativeTime ts={group.lastTs} />
+        </div>
       </div>
       {open && (
         <ol className="mt-1.5 space-y-0.5 pl-3">
@@ -99,16 +99,13 @@ function TargetRow({ group, selectedJobId, onSelect }: { group: TargetGroup; sel
               <li key={job.id}>
                 <button
                   type="button"
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    onSelect(job.id);
-                  }}
+                  onClick={() => onSelect(job.id)}
                   className={cn(
                     'flex w-full cursor-pointer items-center gap-2 rounded-sm px-1 py-0.5 text-left text-[11.5px] transition-colors hover:bg-background/60',
                     on ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
                   )}
                 >
-                  <span className={cn('size-1.5 shrink-0 rounded-full', TONE_SOLID[outcome.tone])} />
+                  <StatusDot tone={outcome.tone} size="sm" />
                   <span className="min-w-0 flex-1 truncate">
                     {pipelineLabel(job.pipeline)} · <span className={cn(outcome.tone !== 'success' && TONE_TEXT[outcome.tone])}>{outcome.label}</span>
                   </span>

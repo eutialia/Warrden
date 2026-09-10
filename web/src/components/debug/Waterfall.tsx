@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TraceEntry } from '@/api';
-import { childrenBySeq, effectiveNow, escalations, formatAt, formatTook, isToolKind } from '@/components/debug/laneModel';
-import { ToneBadge } from '@/components/ToneBadge';
+import { childrenBySeq, escalations, formatAt, formatTook, ranTool } from '@/components/debug/laneModel';
+import { StatusDot, ToneBadge } from '@/components/ToneBadge';
 import { Badge } from '@/components/ui/badge';
 import { traceStatusLabel, traceStatusTone } from '@/lib/labels';
-import { TONE_SOLID } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
 export function Waterfall({
@@ -25,7 +24,6 @@ export function Waterfall({
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const kids = useMemo(() => childrenBySeq(entries), [entries]);
   const roots = useMemo(() => entries.filter((e) => e.parent_seq === null), [entries]);
-  const now = useMemo(() => effectiveNow(entries, jobTerminal), [entries, jobTerminal]);
   const start = roots[0]?.ts_start ?? 0;
   const rowRefs = useRef(new Map<number, HTMLDivElement | null>());
   const jobKey = entries.length === 0 ? null : entries[0]!.job_id;
@@ -63,7 +61,6 @@ export function Waterfall({
           depth={0}
           kids={kids}
           expanded={expanded}
-          now={now}
           start={start}
           jobTerminal={jobTerminal}
           selectedSeq={selectedSeq}
@@ -81,7 +78,6 @@ interface NodeProps {
   depth: number;
   kids: Map<number, TraceEntry[]>;
   expanded: Set<number>;
-  now: number;
   start: number;
   jobTerminal: boolean;
   selectedSeq: number | null;
@@ -91,13 +87,14 @@ interface NodeProps {
 }
 
 function Node(props: NodeProps) {
-  const { entry, depth, kids, expanded, now, start, jobTerminal, selectedSeq, rowRefs, onToggle, onSelect } = props;
+  const { entry, depth, kids, expanded, start, jobTerminal, selectedSeq, rowRefs, onToggle, onSelect } = props;
   const children = kids.get(entry.seq) ?? [];
   const open = depth === 0 ? !expanded.has(entry.seq) : expanded.has(entry.seq);
   const interrupted = entry.status === 'running' && jobTerminal;
   const tone = traceStatusTone(entry.status, interrupted);
   const selected = entry.seq === selectedSeq;
   const escalated = entry.kind === 'subtitle.site' ? escalations(children) : 0;
+  const siblings = entry.parent_seq === null ? [] : (kids.get(entry.parent_seq) ?? []);
 
   return (
     <>
@@ -111,11 +108,8 @@ function Node(props: NodeProps) {
           selected && 'bg-accent shadow-[inset_2px_0_0_var(--ring)]',
         )}
       >
-        <span className="flex items-center justify-center">
-          <span
-            title={traceStatusLabel(entry.status, interrupted)}
-            className={cn('size-1.5 rounded-full', TONE_SOLID[tone], entry.status === 'running' && !interrupted && 'animate-pulse')}
-          />
+        <span className="flex items-center justify-center" title={traceStatusLabel(entry.status, interrupted)}>
+          <StatusDot tone={tone} size="sm" pulse={entry.status === 'running' && !interrupted} />
         </span>
         <div className="flex min-w-0 items-center gap-2 whitespace-nowrap" style={{ paddingLeft: depth * 18 }}>
           <button
@@ -138,7 +132,7 @@ function Node(props: NodeProps) {
               write
             </Badge>
           )}
-          {isToolKind(entry.kind) && (
+          {ranTool(entry, siblings) && (
             <Badge variant="outline" className="border-info-border px-1 py-0 font-mono text-[10px] text-info-foreground" title="An action the model chose and the loop ran">
               tool
             </Badge>
@@ -147,7 +141,7 @@ function Node(props: NodeProps) {
         </div>
         <span className="flex justify-end gap-2 font-mono text-[10.5px] text-muted-foreground">
           <span className="opacity-60">{formatAt(entry.ts_start - start)}</span>
-          <span>{formatTook(entry, now, jobTerminal)}</span>
+          <span>{formatTook(entry, jobTerminal)}</span>
         </span>
       </div>
       {open && children.map((c) => <Node key={c.seq} {...props} entry={c} depth={depth + 1} />)}

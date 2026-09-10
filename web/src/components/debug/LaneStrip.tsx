@@ -65,8 +65,8 @@ export function LaneStrip({
   selectedSeq: number | null;
   onSelect: (seq: number) => void;
 }) {
-  // Frozen per fetch, like the old TraceTimeline: every trace.appended replaces entries
-  // and a ticker would only redraw bars nobody is timing.
+  // Frozen per fetch: every trace.appended replaces entries, and a ticker would only
+  // redraw bars nobody is timing.
   const now = useMemo(() => effectiveNow(entries, jobTerminal), [entries, jobTerminal]);
   const scale = useMemo(() => buildTimeScale(entries, now), [entries, now]);
   const byLane = useMemo(() => {
@@ -180,6 +180,12 @@ export function LaneStrip({
         }}
         onPointerUp={(ev) => {
           if (drag.current?.moved) rootRef.current?.releasePointerCapture(ev.pointerId);
+        }}
+        // Bubble phase, after the bars' own handlers have read `moved`: the click that ends a
+        // pan must still be swallowed, but the next one — a keyboard Enter with no pointerdown
+        // in front of it — must not be.
+        onClick={() => {
+          if (drag.current) drag.current.moved = false;
         }}
         onPointerLeave={() => {
           if (lineRef.current) lineRef.current.style.display = 'none';
@@ -300,7 +306,7 @@ function Bar({
   if (x1 < 0 || x0 > 1) return null;
   const tone = traceStatusTone(entry.status, interrupted);
   const site = entry.kind === 'subtitle.site' || entry.kind === 'subtitle.candidate';
-  const took = formatTook(entry, now, jobTerminal);
+  const took = formatTook(entry, jobTerminal);
   return (
     <Tooltip>
       <TooltipTrigger

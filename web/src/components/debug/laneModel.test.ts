@@ -12,6 +12,7 @@ import {
   invert,
   isToolKind,
   laneOf,
+  ranTool,
   runFacts,
   turnOf,
   verdictTicks,
@@ -100,6 +101,13 @@ describe('turnOf', () => {
   it('is null when the next sibling is not a tool step', () => {
     expect(turnOf([site, call, attempt, escalate, ran], 7)).toBeNull();
   });
+  it('is null when the chosen action was refused before it ran', () => {
+    const refused = entry({ seq: 10, kind: 'agent.refused', parent_seq: 4 });
+    const rows = [site, call, attempt, ran, refused];
+    expect(turnOf(rows, 7)).toBeNull();
+    expect(ranTool(ran, rows)).toBe(false);
+    expect(ranTool(ran, [site, call, attempt, ran, escalate])).toBe(true);
+  });
   it('is null for a call with no parent (not under a site)', () => {
     const top = entry({ seq: 2, kind: 'llm.call' });
     expect(turnOf([top, entry({ seq: 3, kind: 'agent.download' })], 2)).toBeNull();
@@ -181,6 +189,12 @@ describe('invert', () => {
   it.each([0, 500, 1000, 4000, 8000, 11_999, 12_000, 12_500, 13_000])('round-trips %dms across the idle gap', (ts) => {
     expect(invert(scale, scale.toX(ts))).toBeCloseTo(ts, 0);
   });
+  it('stays finite over a span that is entirely idle', () => {
+    const rows = [entry({ seq: 0, ts_start: 0, ts_end: 0 }), entry({ seq: 1, ts_start: 10_000, ts_end: 10_000 })];
+    const idle = buildTimeScale(rows, effectiveNow(rows, true));
+    expect(invert(idle, 0)).toBe(0);
+    expect(invert(idle, 1)).toBe(10_000);
+  });
 });
 
 describe('axisTicks', () => {
@@ -249,11 +263,11 @@ describe('formatting', () => {
     expect(formatAt(ms)).toBe(out);
   });
   it('formatTook reads duration, instantaneous, running and interrupted', () => {
-    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: 82 }), 0, false)).toBe('82ms');
-    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: 3100 }), 0, false)).toBe('3.1s');
-    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: 0 }), 0, false)).toBe('·');
-    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: null, status: 'running' }), 5000, false)).toBe('running');
-    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: null, status: 'running' }), 5000, true)).toBe('interrupted');
+    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: 82 }), false)).toBe('82ms');
+    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: 3100 }), false)).toBe('3.1s');
+    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: 0 }), false)).toBe('·');
+    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: null, status: 'running' }), false)).toBe('running');
+    expect(formatTook(entry({ seq: 0, ts_start: 0, ts_end: null, status: 'running' }), true)).toBe('interrupted');
   });
 });
 

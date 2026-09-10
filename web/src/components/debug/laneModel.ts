@@ -29,14 +29,25 @@ export function escalations(children: TraceEntry[]): number {
   return children.filter((c) => c.kind === 'agent.escalate').length;
 }
 
+function siblingAfter(entries: TraceEntry[], entry: TraceEntry): TraceEntry | undefined {
+  return entries.find((e) => e.seq > entry.seq && e.parent_seq === entry.parent_seq);
+}
+
+/** A tool step the loop actually executed. The chosen action reaches the transcript
+ * before the destination guard runs, so an `agent.refused` right behind it means the
+ * action was blocked, not run. `entries` needs only to contain the entry's siblings. */
+export function ranTool(entry: TraceEntry, entries: TraceEntry[]): boolean {
+  return isToolKind(entry.kind) && siblingAfter(entries, entry)?.kind !== 'agent.refused';
+}
+
 /** The agent step the loop ran for a call's decision: the next sibling under the same
- * site, if it is a tool. Anything else in between (a refusal, an escalation) means the
- * decision was not executed as such. */
+ * site, if it is a tool that ran. Anything else in between (a refusal, an escalation)
+ * means the decision was not executed as such. */
 export function turnOf(entries: TraceEntry[], callSeq: number): TraceEntry | null {
   const call = entries.find((e) => e.seq === callSeq);
   if (!call || call.parent_seq === null) return null;
-  const next = entries.find((e) => e.seq > callSeq && e.parent_seq === call.parent_seq);
-  return next && isToolKind(next.kind) ? next : null;
+  const next = siblingAfter(entries, call);
+  return next && ranTool(next, entries) ? next : null;
 }
 
 export function verdictTicks(events: EventRow[]): { id: number; ts: number; tone: Tone }[] {
@@ -113,7 +124,8 @@ type Scale = Pick<TimeScale, 'start' | 'end' | 'idles'>;
  * outside the gaps and every gap is drawn at the same fixed weight. */
 function slopeOf(scale: Scale): number {
   const idleDrawn = scale.idles.reduce((sum, g) => sum + (g.x1 - g.x0), 0);
-  return (1 - idleDrawn) / Math.max(activeBetween(scale.start, scale.end, scale.idles), 1);
+  // An all-idle span draws no active time at all; a zero slope would divide `invert` into NaN.
+  return (1 - idleDrawn) / Math.max(activeBetween(scale.start, scale.end, scale.idles), 1) || 1;
 }
 
 /** x -> ts, the exact inverse of `toX`: linear outside the gaps, and inside one, the
@@ -227,9 +239,7 @@ export function formatAt(ms: number, decimals?: number): string {
   return `+${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-// `_now` is unused on purpose: a live duration ticks from `ElapsedTime`, never a frozen
-// string. The parameter stays so callers keep passing the clock an interrupted check needs.
-export function formatTook(entry: TraceEntry, _now: number, jobTerminal: boolean): string {
+export function formatTook(entry: TraceEntry, jobTerminal: boolean): string {
   if (entry.ts_end === null) return entry.status === 'running' && jobTerminal ? 'interrupted' : 'running';
   const ms = entry.ts_end - entry.ts_start;
   if (ms <= 0) return '·';

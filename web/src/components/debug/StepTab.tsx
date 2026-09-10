@@ -8,14 +8,12 @@ export function StepTab({
   payload,
   payloadError,
   onRetryPayload,
-  now,
   jobTerminal,
 }: {
   entry: TraceEntry;
   payload: unknown;
   payloadError?: string;
   onRetryPayload: () => void;
-  now: number;
   jobTerminal: boolean;
 }) {
   const interrupted = entry.status === 'running' && jobTerminal;
@@ -25,7 +23,7 @@ export function StepTab({
         rows={[
           ['kind', entry.kind],
           ['seq', entry.parent_seq === null ? String(entry.seq) : `${entry.seq} · parent ${entry.parent_seq}`],
-          ['status', `${traceStatusLabel(entry.status, interrupted)} · ${formatTook(entry, now, jobTerminal)}`],
+          ['status', `${traceStatusLabel(entry.status, interrupted)} · ${formatTook(entry, jobTerminal)}`],
           ['started', new Date(entry.ts_start).toLocaleTimeString(undefined, { hour12: false }) + `.${String(entry.ts_start % 1000).padStart(3, '0')}`],
           ['summary', entry.summary],
         ]}
