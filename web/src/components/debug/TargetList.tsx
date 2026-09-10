@@ -69,8 +69,8 @@ function TargetRow({ group, selectedJobId, onSelect }: { group: TargetGroup; sel
   const open = group.runs.some((r) => r.id === selectedJobId);
   const latestOutcome = runOutcome(group.latest);
   return (
-    <li className={cn('border-b px-3 py-2 text-xs', open && 'bg-accent')}>
-      <button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => onSelect(group.latest.id)}>
+    <li className={cn('cursor-pointer border-b px-3 py-2 text-xs transition-colors hover:bg-accent', open && 'bg-accent')} onClick={() => onSelect(group.latest.id)}>
+      <button type="button" className="flex w-full cursor-pointer items-center gap-2 text-left">
         <span className="min-w-0 flex-1 truncate font-medium">{jobTitle(group.latest)}</span>
         <span className={cn('size-1.5 shrink-0 rounded-full', TONE_SOLID[latestOutcome.tone])} title={latestOutcome.label} />
       </button>
@@ -99,8 +99,14 @@ function TargetRow({ group, selectedJobId, onSelect }: { group: TargetGroup; sel
               <li key={job.id}>
                 <button
                   type="button"
-                  onClick={() => onSelect(job.id)}
-                  className={cn('flex w-full items-center gap-2 rounded-sm py-0.5 text-left text-[11.5px]', on ? 'text-foreground' : 'text-muted-foreground hover:text-foreground')}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    onSelect(job.id);
+                  }}
+                  className={cn(
+                    'flex w-full cursor-pointer items-center gap-2 rounded-sm px-1 py-0.5 text-left text-[11.5px] transition-colors hover:bg-background/60',
+                    on ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
+                  )}
                 >
                   <span className={cn('size-1.5 shrink-0 rounded-full', TONE_SOLID[outcome.tone])} />
                   <span className="min-w-0 flex-1 truncate">

@@ -80,7 +80,7 @@ export function Inspector({
   return (
     // One panel bound to `active` rather than five: the body already switches on the active
     // tab, and a trigger controlling no panel is a dead control to anything reading the page.
-    <Tabs className="h-full min-h-0 gap-0 border-l" value={active} onValueChange={(v) => onTab(v as InspectorTab)}>
+    <Tabs className="h-full min-h-0 gap-0" value={active} onValueChange={(v) => onTab(v as InspectorTab)}>
       <div className="sticky top-0 flex items-center border-b bg-background px-2">
         <TabsList variant="line" className="h-9 flex-1 justify-start p-0">
           {tabs
