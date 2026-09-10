@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { ThemeProvider } from 'next-themes';
-import { BrowserRouter, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { BrowserRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { fetchJob } from '@/api';
 import { AppHeader } from '@/components/AppHeader';
 import { AppSidebar } from '@/components/AppSidebar';
@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Toaster } from '@/components/ui/sonner';
 import { OverviewProvider } from '@/hooks/useOverview';
 import { jobTargetKey } from '@/lib/jobs';
+import { cn } from '@/lib/utils';
 import Activity from '@/pages/Activity';
 import Attention from '@/pages/Attention';
 import ConfigPage from '@/pages/Config';
@@ -50,6 +51,29 @@ function JobRedirect() {
   return <Skeleton className="h-40 w-full" />;
 }
 
+/** Debug is the one page that earns the whole viewport: four regions side by side. */
+function Shell() {
+  const wide = useLocation().pathname.startsWith('/debug');
+  return (
+    <main className="w-full flex-1 px-4 py-6 sm:px-6 lg:px-8">
+      <div className={cn('mx-auto w-full', !wide && 'max-w-7xl')}>
+        <Routes>
+          <Route path="/" element={<Overview />} />
+          <Route path="/activity" element={<Activity />} />
+          <Route path="/attention" element={<Attention />} />
+          <Route path="/jobs/:id" element={<JobRedirect />} />
+          <Route path="/managed" element={<ManagedObjects />} />
+          <Route path="/sites" element={<Sites />} />
+          <Route path="/config" element={<ConfigPage />} />
+          <Route path="/debug" element={<DebugPage />} />
+          <Route path="/debug/:jobId" element={<DebugPage />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </div>
+    </main>
+  );
+}
+
 export default function App() {
   return (
     // Dark by default: Warrden sits alongside the arrs in a media stack, which are
@@ -62,22 +86,7 @@ export default function App() {
             <AppSidebar />
             <SidebarInset>
               <AppHeader />
-              <main className="w-full flex-1 px-4 py-6 sm:px-6 lg:px-8">
-                <div className="mx-auto w-full max-w-7xl">
-                  <Routes>
-                    <Route path="/" element={<Overview />} />
-                    <Route path="/activity" element={<Activity />} />
-                    <Route path="/attention" element={<Attention />} />
-                    <Route path="/jobs/:id" element={<JobRedirect />} />
-                    <Route path="/managed" element={<ManagedObjects />} />
-                    <Route path="/sites" element={<Sites />} />
-                    <Route path="/config" element={<ConfigPage />} />
-                    <Route path="/debug" element={<DebugPage />} />
-                    <Route path="/debug/:jobId" element={<DebugPage />} />
-                    <Route path="*" element={<NotFound />} />
-                  </Routes>
-                </div>
-              </main>
+              <Shell />
             </SidebarInset>
           </SidebarProvider>
         </OverviewProvider>

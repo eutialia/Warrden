@@ -59,12 +59,6 @@ export function RunDetail({ jobId }: { jobId: number }) {
     (e) => e === null || (e.kind !== 'trace.appended' && e.job_id === jobId),
   );
 
-  // Every event about this job refetches the whole detail at debounce 0, so a long run
-  // rebuilds this several times a second. The rows are a pure function of the response;
-  // rebuilding them only when the response changes is the difference between the feed
-  // costing one pass per event and one pass per render.
-  const rows = useMemo(() => (data === null ? [] : jobRows(data)), [data]);
-
   if (error) {
     return (
       <div className="pb-3 pl-5">
@@ -74,6 +68,28 @@ export function RunDetail({ jobId }: { jobId: number }) {
   }
   if (!data) return <Spinner className="mb-3 ml-5 text-muted-foreground" />;
 
+  return (
+    // Indented to line up under the run label above it, not the chevron. Without this the
+    // detail sits left of its own parent and the nesting reads as a flat list.
+    <div className="space-y-3 pb-5 pl-5">
+      <RunBody data={data} />
+      <Button variant="ghost" size="sm" render={<Link to={`/debug/${data.job.id}`} />}>
+        <Bug />
+        Debug trace
+      </Button>
+    </div>
+  );
+}
+
+/** Everything a run has to say about itself, without the fetch and without the link to
+ * this page's sibling: the drawer wraps it with a debug link, the debug inspector's
+ * Story tab renders it as is. */
+export function RunBody({ data }: { data: JobDetailResponse }) {
+  // Every event about this job refetches the whole detail at debounce 0, so a long run
+  // rebuilds this several times a second. The rows are a pure function of the response;
+  // rebuilding them only when the response changes is the difference between the feed
+  // costing one pass per event and one pass per render.
+  const rows = useMemo(() => jobRows(data), [data]);
   const { job, placedFiles, attention, events } = data;
   const running = job.status === 'running';
   const pending = job.status === 'pending';
@@ -81,9 +97,7 @@ export function RunDetail({ jobId }: { jobId: number }) {
   const hint = payloadString(job.payload.hint);
 
   return (
-    // Indented to line up under the run label above it, not the chevron. Without this the
-    // detail sits left of its own parent and the nesting reads as a flat list.
-    <div className="space-y-3 pb-5 pl-5">
+    <div className="space-y-3">
       {job.pipeline === 'subtitle' ? (
         <SubtitleSummary placedFiles={placedFiles} attention={attention} events={events} />
       ) : (
@@ -120,10 +134,6 @@ export function RunDetail({ jobId }: { jobId: number }) {
           <p className="border-l pl-3 text-xs leading-relaxed whitespace-pre-wrap">{hint}</p>
         </div>
       )}
-      <Button variant="ghost" size="sm" render={<Link to={`/debug/${job.id}`} />}>
-        <Bug />
-        Debug trace
-      </Button>
     </div>
   );
 }

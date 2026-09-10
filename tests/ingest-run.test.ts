@@ -5,7 +5,7 @@ import type { QueueRecord } from '../src/arr/types.js';
 import { ConfigSchema } from '../src/config/schema.js';
 import { AttentionItems } from '../src/db/attention.js';
 import { PlacedFiles } from '../src/db/placedFiles.js';
-import { TraceEntries } from '../src/db/traceEntries.js';
+import { TraceEntries, type TraceEntryRow } from '../src/db/traceEntries.js';
 import { RescheduleError } from '../src/jobs/errors.js';
 import { runIngestJob, RESCUE_DWELL_MS } from '../src/pipelines/ingest/run.js';
 import { SETTLE_DEADLINE_MS, SETTLE_RETRY_MS } from '../src/pipelines/settle.js';
@@ -47,6 +47,13 @@ function claimAgedIngestJob(fx: IngestFixture) {
   const job = claimIngestJob(fx);
   fx.ctx.db.prepare('UPDATE jobs SET created_at = ? WHERE id = ?').run(Date.now() - RESCUE_DWELL_MS - 1_000, job.id);
   return fx.ctx.queue.get(job.id)!;
+}
+
+/** The `pipeline.rescue` step's end payload — what the debug inspector reads to say how one
+ * rescue pass ended. */
+function rescueOutcome(rows: TraceEntryRow[]): unknown {
+  const row = rows.find((r) => r.kind === 'pipeline.rescue');
+  return JSON.parse(row?.payload ?? 'null');
 }
 
 /** Replaces the fake's `listQueue` so the first poll (runIngestJob's settle gate) answers
@@ -259,7 +266,8 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     expect(placed[0]!.side_effect).toBe(1);
 
     expect(rows.find((r) => r.kind === 'pipeline.assess')?.summary).toBe('arr queue: settled');
-    expect(kinds).toContain('pipeline.rescue');
+    // Nothing importable: the rescue step still closes, with the shape the Call/Step tabs read.
+    expect(rescueOutcome(rows)).toEqual({ items: 0, plan: null, outcome: 'nothing' });
     expect(rows.filter((r) => r.kind === 'ingest.sidecar').map((r) => r.summary)).toEqual(
       expect.arrayContaining([expect.stringMatching(/: deferred: /)]),
     );
@@ -965,6 +973,12 @@ describe('runIngestJob — bundle & stuck-import rescue', () => {
       expect.objectContaining({ path: item6.path, episodeIds: [2] }),
       expect.objectContaining({ path: item7.path, episodeIds: [3] }),
     ]);
+
+    expect(rescueOutcome(new TraceEntries(fx.ctx.db).listByJob(job.id))).toEqual({
+      items: 2,
+      outcome: 'imported',
+      plan: { confidence: 'high', files: 2, skipped: [], reasoning: expect.any(String) },
+    });
   });
 
   it('low confidence: an LLM confidence of low proposes an ingest.rescue-proposed attention item pinned to the bundle-import action payload; executeManualImport is never called; the job still completes', async () => {

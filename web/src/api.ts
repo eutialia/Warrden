@@ -546,11 +546,25 @@ export interface TraceEntry {
   hasPayload: boolean;
 }
 
+/** What the server's `serializePayload` writes in place of a value too big to store whole:
+ * the head of its JSON plus the size it would have been. It stands in either for a whole
+ * payload or for one oversized member of one (an `llm.attempt`'s `request` body). */
+export interface TruncationEnvelope {
+  truncated: true;
+  bytes: number;
+  head: string;
+}
+
+export function isTruncationEnvelope(value: unknown): value is TruncationEnvelope {
+  return typeof value === 'object' && value !== null && (value as { truncated?: unknown }).truncated === true;
+}
+
 export function fetchTraces(): Promise<{ traces: TraceSummary[] }> {
   return fetchJson('/api/traces');
 }
 
-/** LLM token totals over a job's `llm.attempt` entries, summed server-side. */
+/** A job's LLM cost, summed server-side: `calls` counts its `llm.call` entries, the token
+ * sums are over its `llm.attempt` entries (a retry spends its own tokens under one call). */
 export interface TraceUsage {
   calls: number;
   inputTokens: number;

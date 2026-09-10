@@ -1,4 +1,4 @@
-import type { AcquireStatus, Job } from '@/api';
+import type { AcquireStatus, Job, JobStatus } from '@/api';
 import { targetKindLabel } from '@/lib/labels';
 import type { Tone } from '@/lib/tone';
 
@@ -17,6 +17,11 @@ export function jobTitle(job: Job): string {
 
 export type Phase = 'acquire' | 'ingest' | 'subtitle';
 export const PHASES: readonly Phase[] = ['acquire', 'ingest', 'subtitle'];
+
+/** The vocabulary every job filter speaks: `ALL` is the no-filter sentinel, and `PHASES`
+ * above and `STATUSES` are the values a job can actually carry. */
+export const ALL = 'all';
+export const STATUSES: JobStatus[] = ['running', 'pending', 'done', 'failed'];
 
 /** Outcomes that need nobody. A bare `!== 'grabbed'` test paints already-satisfied
  * amber, putting it in the same class as the false alarm it replaced. */

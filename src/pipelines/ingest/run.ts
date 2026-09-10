@@ -25,7 +25,7 @@ import { errorMessage } from '../../util/errors.js';
 import { assertMounted } from '../mounts.js';
 import { placeBlocked, reportPlaceBlocked } from '../placeGuard.js';
 import { settleGate, SETTLE_RETRY_MS } from '../settle.js';
-import { planBundleImport } from './bundle.js';
+import { planBundleImport, type BundlePlan } from './bundle.js';
 import { matchSidecarsWithLlm } from './matchLlm.js';
 import { assessQueue, type QueueAssessment } from '../queueState.js';
 import { buildSidecarName, matchSidecarDeterministic, parseLangTag, sidecarKindForExt, sidecarStem, SIDECAR_EXTS, VIDEO_EXTS } from './sidecars.js';
@@ -703,7 +703,7 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
  * five endings it reached. */
 interface RescueOutcome {
   items: number;
-  plan: { confidence: string; files: number; skipped: unknown; reasoning: string } | null;
+  plan: { confidence: BundlePlan['confidence']; files: number; skipped: BundlePlan['skipped']; reasoning: string } | null;
   outcome: 'imported' | 'proposed' | 'deferred' | 'nothing' | 'skipped';
 }
 
