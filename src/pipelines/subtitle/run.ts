@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
-import { basename, dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, join, relative } from 'node:path';
 import { SEARCH_CALLSITE } from '../../agent/loop.js';
 import { failBackoffMs, reportAgentStop, searchSite, type SiteRunResult } from '../../agent/run.js';
 import { reflectOnRun } from '../../agent/siteReflection.js';
@@ -22,6 +22,8 @@ import { RescheduleError } from '../../jobs/errors.js';
 import type { JobRow } from '../../jobs/queue.js';
 import { decodeSubtitleBytes, dialogueCues, parseSubtitleCues, type SubtitleCue } from '../../media/subtitles.js';
 import type { MediaTools } from '../../media/tools.js';
+import type { Tracer } from '../../trace/tracer.js';
+import { errorMessage } from '../../util/errors.js';
 import { resolveTargetMeta, type TargetMeta } from '../targetTitle.js';
 import { assertMounted, MOUNT_RETRY_MS } from '../mounts.js';
 import { settleGate } from '../settle.js';
@@ -89,6 +91,10 @@ type Candidate = ArchiveCacheEntry & { lang: string };
 interface RunState {
   media: MediaTools;
   placedFiles: PlacedFiles;
+  /** Carried on the state so the per-candidate helpers can write under the candidate step
+   * without every one of them gaining a `ctx`/`job` parameter. */
+  trace: Tracer;
+  jobId: number;
   /** Every episode of the target that has a video on disk, lacking anything or not. `gaps`
    * shrinks as the run places files and never held the episodes an earlier run already filled,
    * so it cannot answer "does this filename name an episode of this show at all?" — which is
@@ -218,6 +224,8 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     const state: RunState = {
       media,
       placedFiles,
+      trace: ctx.trace,
+      jobId: job.id,
       refCache: new Map(),
       refDir,
       rawDir,
@@ -236,6 +244,21 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
 
     const langs = describeLanguages(ctx.config.subtitle.languages);
     const withoutSubs = uncovered(gaps);
+    ctx.trace.event({
+      jobId: job.id,
+      kind: 'subtitle.reconcile',
+      summary: `${withoutSubs.length} of ${targets.length} video(s) missing ${langs}`,
+      payload: () => ({
+        languages: ctx.config.subtitle.languages,
+        videos: gaps.map((g) => ({
+          videoPath: g.videoPath,
+          lacking: g.lacking,
+          covered: g.covered,
+          embeddedRefs: g.embeddedRefs.length,
+        })),
+        absent,
+      }),
+    });
     if (withoutSubs.length > 0) {
       ctx.events.append({
         kind: 'subtitle.missing',
@@ -254,6 +277,12 @@ export async function runSubtitleJob(ctx: AppContext, job: JobRow, deps: RunSubt
     for (const row of cache.forTarget(job.arr_instance, job.target_kind, job.target_id)) {
       if (gaps.length === 0) break;
       const { resolved } = await matchArchiveRow(ctx, job, row, gaps, title, state, undefined);
+      ctx.trace.event({
+        jobId: job.id,
+        kind: 'subtitle.cache',
+        summary: `cached pack ${basename(row.path)}: covered ${resolved.length}`,
+        payload: () => ({ archive: row.path, resolved }),
+      });
       if (resolved.length > 0) {
         ctx.events.append({
           kind: 'subtitle.cache-hit',
@@ -327,6 +356,14 @@ function parseAirDate(airDateUtc: string | undefined): number | null {
   if (airDateUtc === undefined) return null;
   const ms = Date.parse(airDateUtc);
   return Number.isNaN(ms) ? null : ms;
+}
+
+/** How one target reads in a trace summary: the episode code for a series, the video's own
+ * name for a movie (whose season/episode numbers are both 0). */
+function episodeLabel(t: EpisodeTarget): string {
+  if (t.seasonNumber === 0 && t.episodeNumber === 0) return basename(t.videoPath);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `S${pad(t.seasonNumber)}E${pad(t.episodeNumber)}`;
 }
 
 /** The configured languages as a human reads the any-of rule: `zh-Hans or zh-Hant`. */
@@ -555,6 +592,8 @@ async function matchArchiveRow(
   let placedCount = 0;
 
   const unmatchedPaths: string[] = [];
+  const byName: { path: string; episodeId: number }[] = [];
+  const byModel: { path: string; episodeId: number }[] = [];
   let covered = 0;
   for (const entry of candidates) {
     if (gaps.length === 0) break;
@@ -567,6 +606,7 @@ async function matchArchiveRow(
       unmatchedPaths.push(entry.path);
       continue;
     }
+    byName.push({ path: entry.path, episodeId: route.target.episodeId });
     const placedLang = await driftAndPlace(ctx, job, row, entry, route.target, state, site);
     if (placedLang !== undefined) {
       placedCount++;
@@ -608,6 +648,7 @@ async function matchArchiveRow(
       // Episode may already lack nothing after an earlier file in this pack (and have been
       // removed from `gaps`); skip rather than re-placing over a closed gap.
       if (!t) continue;
+      byModel.push({ path: unmatchedEntries[i]!.path, episodeId });
       const placedLang = await driftAndPlace(ctx, job, row, unmatchedEntries[i]!, t, state, site);
       if (placedLang !== undefined) {
         placedCount++;
@@ -615,6 +656,19 @@ async function matchArchiveRow(
       }
     }
   }
+
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'subtitle.map',
+    summary: `mapped ${byName.length + byModel.length} of ${candidates.length} file(s) · ${byName.length} by name, ${byModel.length} by model, ${covered} covered`,
+    payload: () => ({
+      archive: row.path,
+      byName,
+      byModel,
+      covered,
+      unmatched: unmatchedPaths.filter((p) => !byModel.some((m) => m.path === p)),
+    }),
+  });
 
   return { resolved, placedCount };
 }
@@ -736,21 +790,36 @@ async function driftAndPlace(
   if (tried >= MAX_CANDIDATES_PER_EPISODE) return undefined;
   state.attempts.set(t.episodeId, tried + 1);
 
-  const plan = await decideCandidate(entry, t, state);
-  if (plan.kind === 'quarantine') {
-    // A covered episode is already watchable; a candidate that fails to add a second
-    // language to it is nothing to warn about and nothing to set aside. Only an episode
-    // with no subtitles at all reaches the rollup, so only that one earns these events.
-    if (!t.covered) {
-      quarantine(ctx, job, state, t, entry.path);
-      // The trip fires here rather than at the first skipped candidate, so it is exactly one
-      // event per episode whether the pack held five more candidates or none.
-      if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
+  const step = ctx.trace.begin({
+    jobId: job.id,
+    kind: 'subtitle.candidate',
+    summary: `${basename(entry.path)} → ${episodeLabel(t)} · ${entry.lang}`,
+  });
+  try {
+    const plan = await decideCandidate(entry, t, state, step.seq ?? undefined);
+    if (plan.kind === 'quarantine') {
+      // A covered episode is already watchable; a candidate that fails to add a second
+      // language to it is nothing to warn about and nothing to set aside. Only an episode
+      // with no subtitles at all reaches the rollup, so only that one earns these events.
+      if (!t.covered) {
+        quarantine(ctx, job, state, t, entry.path, step.seq ?? undefined);
+        // The trip fires here rather than at the first skipped candidate, so it is exactly one
+        // event per episode whether the pack held five more candidates or none.
+        if (tried + 1 === MAX_CANDIDATES_PER_EPISODE) reportCapped(ctx, job, t);
+        step.end('ok', () => ({ result: 'quarantined' }));
+      } else {
+        step.end('ok', () => ({ result: 'skipped', reason: 'episode already covered' }));
+      }
+      return undefined;
     }
-    return undefined;
-  }
 
-  return placeSubtitle(ctx, job, state, t, targetPath, plan, row, entry, site);
+    const placed = placeSubtitle(ctx, job, state, t, targetPath, plan, row, entry, site, step.seq ?? undefined);
+    step.end('ok', () => ({ result: 'placed', drift: plan.drift, offsetMs: plan.offsetMs }));
+    return placed;
+  } catch (err) {
+    step.end('error', () => ({ error: errorMessage(err) }));
+    throw err;
+  }
 }
 
 /** The warn event for an episode that has used up its candidates. Warn like the quarantines
@@ -779,16 +848,30 @@ function cuesToScore(path: string): SubtitleCue[] {
 /** Runs the drift gate for one candidate, returning what to do with it (and the source path
  * to place — the original, or a resynced output — plus the offset/drift labels for the event
  * and provenance). */
-async function decideCandidate(entry: Candidate, t: EpisodeTarget, state: RunState): Promise<CandidatePlan> {
-  const { media } = state;
+async function decideCandidate(
+  entry: Candidate,
+  t: EpisodeTarget,
+  state: RunState,
+  parentSeq?: number,
+): Promise<CandidatePlan> {
+  const drift = (summary: string, payload: unknown): void => {
+    state.trace.event({ jobId: state.jobId, kind: 'media.drift', parentSeq, summary, payload: () => payload });
+  };
   // No embedded reference track -> nothing to compare against; place unverified (VAD stays a
   // future tier). This is also the fallback when the extracted reference turns out unreadable.
   const refCues = await referenceCues(t, state);
   if (refCues === null) {
+    drift('no reference · unverified', { reference: null });
     return { kind: 'place', path: entry.path, lang: entry.lang, offsetMs: 0, drift: 'unverified' };
   }
 
   const first = assessDrift(refCues, cuesToScore(entry.path));
+  drift(
+    first.state === 'unscorable'
+      ? 'unscorable'
+      : `${first.state} · score ${first.score.toFixed(2)} · ${first.offsetMs >= 0 ? '+' : ''}${first.offsetMs}ms`,
+    { ...first, reference: state.refCache.get(t.videoPath) ?? null, cues: refCues.length },
+  );
 
   if (first.state === 'in-sync') {
     return { kind: 'place', path: entry.path, lang: entry.lang, offsetMs: first.offsetMs, drift: 'in-sync' };
@@ -801,7 +884,7 @@ async function decideCandidate(entry: Candidate, t: EpisodeTarget, state: RunSta
   // resync reference is the video path itself (alass accepts a video as its reference).
   const resyncDir = join(state.rawDir, 'resync', String(t.episodeId));
   mkdirSync(resyncDir, { recursive: true });
-  const c = await tryResyncPipeline(entry.path, entry.lang, t, refCues, media, resyncDir);
+  const c = await tryResyncPipeline(entry.path, entry.lang, t, refCues, state, resyncDir, parentSeq);
   if (c === null) return { kind: 'quarantine' };
   return c;
 }
@@ -845,9 +928,11 @@ async function tryResyncPipeline(
   lang: string,
   t: EpisodeTarget,
   refCues: SubtitleCue[],
-  media: MediaTools,
+  state: RunState,
   resyncDir: string,
+  parentSeq?: number,
 ): Promise<CandidatePlan | null> {
+  const { media } = state;
   const ext = extname(entryPath).toLowerCase() || '.srt';
   const base = sanitizeFilename(basename(entryPath).replace(/\.[^.]+$/, ''));
 
@@ -858,14 +943,19 @@ async function tryResyncPipeline(
   // the binary throwing, or exiting 0 but leaving no readable/decodable output — falls
   // through to the ffsubsync attempt rather than failing the job.
   if (avail.alass) {
+    // A tool that ran but left the file still out of sync ends `error`: it did not do its job,
+    // and the row should read red.
+    const step = state.trace.begin({ jobId: state.jobId, kind: 'media.resync', parentSeq, summary: 'alass' });
     const alassOut = join(resyncDir, `${base}-alass${ext}`);
     try {
       await media.resyncAlass({ reference: t.videoPath, subtitle: entryPath, outPath: alassOut });
       const afterAlass = assessDrift(refCues, cuesToScore(alassOut));
+      step.end(afterAlass.state === 'in-sync' ? 'ok' : 'error', () => ({ ...afterAlass, outPath: alassOut }));
       if (afterAlass.state === 'in-sync') {
         return { kind: 'place', path: alassOut, lang, offsetMs: afterAlass.offsetMs, drift: 'resynced' };
       }
-    } catch {
+    } catch (err) {
+      step.end('error', () => ({ error: errorMessage(err) }));
       // alass failed or produced nothing usable -> try ffsubsync.
     }
   }
@@ -873,14 +963,17 @@ async function tryResyncPipeline(
   // Attempt 2: ffsubsync (aligns to the video's audio), then re-assess. Same failure
   // contract as alass: a throw anywhere in this block quarantines instead of failing the job.
   if (!avail.ffsubsync) return null;
+  const step = state.trace.begin({ jobId: state.jobId, kind: 'media.resync', parentSeq, summary: 'ffsubsync' });
   const ffOut = join(resyncDir, `${base}-ffsubsync${ext}`);
   try {
     await media.resyncFfsubsync({ videoPath: t.videoPath, subtitlePath: entryPath, outPath: ffOut });
     const afterFf = assessDrift(refCues, cuesToScore(ffOut));
+    step.end(afterFf.state === 'in-sync' ? 'ok' : 'error', () => ({ ...afterFf, outPath: ffOut }));
     if (afterFf.state === 'in-sync') {
       return { kind: 'place', path: ffOut, lang, offsetMs: afterFf.offsetMs, drift: 'resynced' };
     }
-  } catch {
+  } catch (err) {
+    step.end('error', () => ({ error: errorMessage(err) }));
     // ffsubsync failed or produced nothing usable -> caller quarantines.
   }
 
@@ -896,7 +989,14 @@ async function tryResyncPipeline(
  * fact reaches a human through the run's single `subtitle.unresolved` rollup, which reports
  * this tally per episode.
  */
-function quarantine(ctx: AppContext, job: JobRow, state: RunState, t: EpisodeTarget, entryPath: string): void {
+function quarantine(
+  ctx: AppContext,
+  job: JobRow,
+  state: RunState,
+  t: EpisodeTarget,
+  entryPath: string,
+  parentSeq?: number,
+): void {
   const quarantineDir = join(ctx.dataDir, 'subtitle', 'quarantine');
   mkdirSync(quarantineDir, { recursive: true });
   let dest = join(quarantineDir, basename(entryPath));
@@ -906,6 +1006,14 @@ function quarantine(ctx: AppContext, job: JobRow, state: RunState, t: EpisodeTar
     i++;
   }
   renameSync(entryPath, dest);
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'subtitle.quarantine',
+    parentSeq,
+    sideEffect: true,
+    summary: `set aside ${basename(entryPath)}`,
+    payload: () => ({ from: entryPath, to: dest }),
+  });
   state.quarantined.set(t.episodeId, (state.quarantined.get(t.episodeId) ?? 0) + 1);
   ctx.events.append({
     kind: 'subtitle.quarantined',
@@ -932,6 +1040,7 @@ function placeSubtitle(
   row: ArchiveContents,
   entry: Candidate,
   site: string | undefined,
+  parentSeq?: number,
 ): string {
   const { path: sourcePath, lang: effectiveLang, offsetMs, drift } = plan;
   const videoLocal = t.videoPath;
@@ -941,6 +1050,7 @@ function placeSubtitle(
   ctx.trace.event({
     jobId: job.id,
     kind: 'pipeline.place',
+    parentSeq,
     summary: `placed ${targetName}`,
     sideEffect: true,
     payload: () => ({ from: sourcePath, to: targetPath, lang: effectiveLang, drift }),
@@ -1333,6 +1443,11 @@ async function extractAndMatch(
   // dir: one shared extracted copy, and ArchiveCache's (target, path) upsert refreshes that
   // target's row instead of piling up a new one per run.
   const cacheDir = join(ctx.dataDir, 'subtitle', 'cache', `${siteKey(site.baseUrl)}-${safeUrlTailName(download.url)}`);
+  const extract = ctx.trace.begin({
+    jobId: job.id,
+    kind: 'media.extract',
+    summary: `extract ${safeUrlTailName(download.url)}`,
+  });
   let files: string[];
   try {
     // Extract fresh: extraction preserves the pack's directory structure and `collectFrom`
@@ -1341,7 +1456,9 @@ async function extractAndMatch(
     // regenerates the same relative paths, so another target's row pointing here stays valid.
     rmSync(cacheDir, { recursive: true, force: true });
     files = await extractArchive(download.filePath, cacheDir);
+    extract.end('ok', () => ({ files: files.length, sample: files.slice(0, 50).map((f) => relative(cacheDir, f)) }));
   } catch (err) {
+    extract.end('error', () => ({ error: errorMessage(err) }));
     if (err instanceof UnsupportedArchiveError) {
       packEmpty(ctx, job, download.url, err.message);
       return false;

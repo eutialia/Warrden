@@ -550,11 +550,20 @@ export function fetchTraces(): Promise<{ traces: TraceSummary[] }> {
   return fetchJson('/api/traces');
 }
 
+/** LLM token totals over a job's `llm.attempt` entries, summed server-side. */
+export interface TraceUsage {
+  calls: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+}
+
 /** `jobTerminal` is what turns a still-`running` entry on a finished job into "interrupted"
  * rather than live work: the job crashed before that step could be closed. */
 export function fetchTrace(
   jobId: number | string,
-): Promise<{ jobId: number; jobStatus: string | null; jobTerminal: boolean; entries: TraceEntry[] }> {
+): Promise<{ jobId: number; jobStatus: string | null; jobTerminal: boolean; usage: TraceUsage; entries: TraceEntry[] }> {
   return fetchJson(`/api/traces/${jobId}`);
 }
 

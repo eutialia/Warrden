@@ -32,9 +32,35 @@ describe('runAcquireJob — single-season series (the common case)', () => {
     const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
     await runAcquireJob(ctx, job);
     // No `llm.call` here: FakeGenerator never traces (see Task 4's tests for that side).
-    const kinds = new TraceEntries(ctx.db).listByJob(job.id).map((r) => r.kind);
+    const rows = new TraceEntries(ctx.db).listByJob(job.id);
+    const kinds = rows.map((r) => r.kind);
     expect(kinds).toContain('arr.request');
     expect(kinds).toContain('pipeline.prefilter');
+    expect(kinds).toContain('acquire.season');
+    const season = rows.find((r) => r.kind === 'acquire.season')!;
+    expect(season.summary).toBe('Season 1 · unknown');
+    expect(rows.find((r) => r.kind === 'pipeline.prefilter')?.parent_seq).toBe(season.seq);
+    expect(rows.find((r) => r.kind === 'acquire.pick')?.parent_seq).toBe(season.seq);
+    expect(rows.find((r) => r.kind === 'acquire.pick')?.summary).toMatch(/^picked /);
+  });
+
+  it('a season skipped as unaired traces the skip under its own season step', async () => {
+    const { ctx, client, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));
+    client.series = [
+      seriesResource({
+        id: 42,
+        title: 'Frieren',
+        seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeCount: 0, episodeFileCount: 0, totalEpisodeCount: 12 } }],
+      }),
+    ];
+    await runAcquireJob(ctx, job);
+
+    const rows = new TraceEntries(ctx.db).listByJob(job.id);
+    const season = rows.find((r) => r.kind === 'acquire.season')!;
+    const skip = rows.find((r) => r.kind === 'acquire.skip')!;
+    expect(skip.summary).toBe('skipped: unaired');
+    expect(skip.parent_seq).toBe(season.seq);
+    expect(JSON.parse(season.payload!)).toMatchObject({ status: 'skipped', reason: 'unaired' });
   });
   it('records the source from job.payload.source when the enqueuer set one, instead of the "webhook" default', async () => {
     const { ctx, job } = setup(pickResponse({ decision: 'pick', candidate: 1, releaseGroup: 'SubsPlease', confidence: 'high', reasoning: 'ok' }));

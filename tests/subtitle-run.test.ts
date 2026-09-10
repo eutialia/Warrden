@@ -445,10 +445,19 @@ describe('runSubtitleJob', () => {
     await runSubtitleJob(fx.ctx, job, siteStub(PACK));
 
     const rows = new TraceEntries(fx.ctx.db).listByJob(job.id);
-    expect(rows.map((r) => r.kind)).toContain('arr.request');
+    const kinds = rows.map((r) => r.kind);
+    expect(kinds).toContain('arr.request');
     const placed = rows.filter((r) => r.kind === 'pipeline.place');
     expect(placed).toHaveLength(1);
     expect(placed[0]!.side_effect).toBe(1);
+
+    expect(kinds).toContain('subtitle.reconcile');
+    expect(kinds).toContain('media.extract');
+    expect(kinds).toContain('subtitle.map');
+    const cand = rows.find((r) => r.kind === 'subtitle.candidate')!;
+    expect(rows.find((r) => r.kind === 'media.drift')?.parent_seq).toBe(cand.seq);
+    expect(placed[0]!.parent_seq).toBe(cand.seq);
+    expect(JSON.parse(cand.payload!)).toMatchObject({ result: 'placed', drift: 'in-sync' });
   });
 
   it('drifted candidate -> resyncAlass called -> re-assessed in-sync -> placed with subtitle.resynced', async () => {
@@ -470,6 +479,31 @@ describe('runSubtitleJob', () => {
     expect(hasEvent(fx.ctx.events.list(), 'subtitle.resynced')).toBe(true);
     const expected = join(fx.libraryDir, 'Show - S01E05.zh-Hans.ass');
     expect(existsSync(expected)).toBe(true);
+
+    const rows = new TraceEntries(fx.ctx.db).listByJob(job.id);
+    const cand = rows.find((r) => r.kind === 'subtitle.candidate')!;
+    const resync = rows.filter((r) => r.kind === 'media.resync');
+    expect(resync).toHaveLength(1);
+    expect(resync[0]).toMatchObject({ summary: 'alass', status: 'ok', parent_seq: cand.seq });
+  });
+
+  it('alass runs but leaves the file still drifted -> its trace row reads error and the ffsubsync row reads ok', async () => {
+    const fx = subtitleFixture();
+    fx.media.setStreams(fx.videoPath, VIDEO_STREAMS);
+    fx.media.setExtraction(`${fx.videoPath}:2`, SRT);
+    fx.media.setAlassResult(SRT_SHIFTED); // ran, wrote a file, and it is still out of sync
+    fx.media.setFfsubsyncResult(SRT);
+
+    const job = claimSubtitleJob(fx);
+    await runSubtitleJob(fx.ctx, job, siteStub({ 'Show - S01E05.chs.ass': SRT_SHIFTED }));
+
+    expect(fx.media.alassCalls).toHaveLength(1);
+    expect(fx.media.ffsubsyncCalls).toHaveLength(1);
+    const resync = new TraceEntries(fx.ctx.db).listByJob(job.id).filter((r) => r.kind === 'media.resync');
+    expect(resync.map((r) => [r.summary, r.status])).toEqual([
+      ['alass', 'error'],
+      ['ffsubsync', 'ok'],
+    ]);
   });
 
   it('alass exits 0 but writes nothing -> falls through to ffsubsync instead of failing the job', async () => {

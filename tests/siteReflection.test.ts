@@ -20,6 +20,7 @@ import {
   renderKnowledge,
   saveKnowledge,
 } from '../src/agent/siteKnowledge.js';
+import { TraceEntries } from '../src/db/traceEntries.js';
 import { AiSdkGenerator, LlmError } from '../src/llm/generator.js';
 import type { AppContext } from '../src/context.js';
 import type { TranscriptEntry } from '../src/agent/transcript.js';
@@ -477,6 +478,43 @@ describe('reflectOnRun', () => {
     expect(out?.verdict).toBe('usable');
     expect(loadKnowledge(ctx.dataDir, SITE).sections.Search[0]).toBe(`IF x THEN y. (confirmed ${TODAY})`);
     expect(hasEvent(ctx.events.list({}), 'subtitle.knowledge-updated')).toBe(true);
+  });
+
+  it('traces the write as a side-effecting knowledge.update, and a no-op run as knowledge.unchanged', async () => {
+    const ctx = reflectCtx({
+      llm: new FakeGenerator([
+        reflection({
+          ops: [
+            { op: 'add', section: 'Search', text: 'IF x THEN y.', target: '' },
+            { op: 'update', section: 'Search', text: 'IF y THEN z.', target: 'IF nothing THEN nothing.' },
+          ],
+        }),
+        reflection({ ops: [] }),
+      ]),
+    });
+
+    const job = enqueueAndClaim(ctx, subtitleJobInput());
+    const run = () =>
+      reflectOnRun({
+        ctx,
+        job,
+        site: { baseUrl: SITE },
+        transcript: [{ ts: 1, tier: 'curl', action: 'search', detail: 'GET /s' }],
+        verifiedSuccess: true,
+        searchObserved: false,
+        today: TODAY,
+        seedsDir: NO_SEEDS,
+      });
+    await run();
+
+    const upd = new TraceEntries(ctx.db).listByJob(job.id).find((r) => r.kind === 'knowledge.update')!;
+    expect(upd.side_effect).toBe(1);
+    expect(upd.summary).toMatch(/applied/);
+    expect(JSON.parse(upd.payload!)).toMatchObject({ applied: [{ text: 'IF x THEN y.' }] });
+
+    await run();
+    const unchanged = new TraceEntries(ctx.db).listByJob(job.id).find((r) => r.kind === 'knowledge.unchanged')!;
+    expect(unchanged.summary).toContain('nothing to write');
   });
 
   it('gives the model the current file and the run outcome', async () => {

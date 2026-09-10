@@ -238,8 +238,14 @@ describe('runIngestJob — sidecar sweep and placement', () => {
   });
 
   it('traces the arr calls, the sweep and one side-effecting entry per placement', async () => {
-    const fx = ingestFixture();
+    const fx = ingestFixture({
+      episodes: [
+        episodeResource({ id: 1, seriesId: 42, seasonNumber: 1, episodeNumber: 5, episodeFileId: 100, hasFile: true }),
+        episodeResource({ id: 2, seriesId: 42, seasonNumber: 1, episodeNumber: 6, episodeFileId: 0, hasFile: false }),
+      ],
+    });
     writeFileSync(join(fx.torrentDir, 'Show - 05 [JPSC].ass'), 'subtitle-content');
+    writeFileSync(join(fx.torrentDir, 'Show - 06 [JPSC].ass'), 'subtitle-content');
     const job = claimIngestJob(fx);
 
     await runIngestJob(fx.ctx, job);
@@ -251,6 +257,12 @@ describe('runIngestJob — sidecar sweep and placement', () => {
     const placed = rows.filter((r) => r.kind === 'pipeline.place');
     expect(placed).toHaveLength(1);
     expect(placed[0]!.side_effect).toBe(1);
+
+    expect(rows.find((r) => r.kind === 'pipeline.assess')?.summary).toBe('arr queue: settled');
+    expect(kinds).toContain('pipeline.rescue');
+    expect(rows.filter((r) => r.kind === 'ingest.sidecar').map((r) => r.summary)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/: deferred: /)]),
+    );
   });
 
   it('writes a trigger.pipeline entry on the subtitle job the handoff enqueues', async () => {

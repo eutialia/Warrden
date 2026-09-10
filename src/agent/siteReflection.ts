@@ -140,6 +140,20 @@ export interface DroppedOp {
   hostile?: true;
 }
 
+/** Whether `capped` — a `DroppedOp`'s copy of an op, with its long fields truncated — is the
+ * refusal of `op`. Identity never matches (the copy is rebuilt), and the truncation means the
+ * heads are what still identify it. */
+function isDroppedCopyOf(capped: KnowledgeOp, op: KnowledgeOp): boolean {
+  const headMatches = (full: string, head: string): boolean =>
+    head.endsWith('…') ? full.startsWith(head.slice(0, -1)) : full === head;
+  return (
+    capped.op === op.op &&
+    capped.section === op.section &&
+    headMatches(op.text, capped.text) &&
+    headMatches(op.target, capped.target)
+  );
+}
+
 /** Bullet text without any `(confirmed …)` stamp — what `update` matches on, so
  * re-confirming a rule doesn't make its own earlier stamp a mismatch. Every occurrence
  * goes, not just a trailing one, and each leaves a single space behind so removing one
@@ -528,6 +542,12 @@ export async function reflectOnRun(input: {
     if (appliedCount === 0) {
       // Nothing changed, so nothing is written: a no-op run leaves the file — and its
       // single `.bak` — exactly as it found them.
+      ctx.trace.event({
+        jobId: job.id,
+        kind: 'knowledge.unchanged',
+        summary: `${label}: nothing to write`,
+        payload: () => ({ ops: reflection.ops.length, dropped: dropped.length, reason: 'no-op' }),
+      });
       return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
 
@@ -542,6 +562,12 @@ export async function reflectOnRun(input: {
         jobId: job.id,
         message: `Knowledge update for ${label} dropped — it would reach ${size} chars, over the ${KNOWLEDGE_CHAR_CAP} cap`,
         data: targetEventData(job, { site: label, size, cap: KNOWLEDGE_CHAR_CAP }),
+      });
+      ctx.trace.event({
+        jobId: job.id,
+        kind: 'knowledge.unchanged',
+        summary: `${label}: over cap, not written`,
+        payload: () => ({ ops: reflection.ops.length, dropped: dropped.length, reason: 'overflow' }),
       });
       return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
@@ -564,6 +590,16 @@ export async function reflectOnRun(input: {
       });
       return { stop: { kind: 'done' }, verdict: reflection.verdict, reason: reflection.reason };
     }
+    ctx.trace.event({
+      jobId: job.id,
+      kind: 'knowledge.update',
+      sideEffect: true,
+      summary: `${label}: ${appliedCount} edit(s) applied, ${dropped.length} refused`,
+      payload: () => ({
+        applied: reflection.ops.filter((op) => !dropped.some((d) => isDroppedCopyOf(d.op, op))),
+        dropped,
+      }),
+    });
     ctx.events.append({
       kind: 'subtitle.knowledge-updated',
       jobId: job.id,

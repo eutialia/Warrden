@@ -26,6 +26,14 @@ export interface TraceSummaryRow {
   last_ts: number;
 }
 
+export interface TraceUsage {
+  calls: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+}
+
 export interface AppendTraceInput {
   jobId: number;
   kind: string;
@@ -107,6 +115,23 @@ export class TraceEntries {
          FROM trace_entries GROUP BY job_id ORDER BY last_ts DESC LIMIT ?`,
       )
       .all(limit) as TraceSummaryRow[];
+  }
+
+  // Summed in SQL so the payloads stay server-side instead of crossing the wire for the
+  // header to add up. json_extract returns NULL for a missing key and for the truncation
+  // envelope, which SUM ignores. Tokens come from attempts (a retry spends its own), but
+  // `calls` counts `llm.call`, so one call retried twice is one call.
+  usageByJob(jobId: number): TraceUsage {
+    return this.db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM trace_entries WHERE job_id = ? AND kind = 'llm.call') AS calls,
+                COALESCE(SUM(json_extract(payload, '$.usage.inputTokens')), 0) AS inputTokens,
+                COALESCE(SUM(json_extract(payload, '$.usage.cachedInputTokens')), 0) AS cachedInputTokens,
+                COALESCE(SUM(json_extract(payload, '$.usage.outputTokens')), 0) AS outputTokens,
+                COALESCE(SUM(json_extract(payload, '$.usage.outputTokenDetails.reasoningTokens')), 0) AS reasoningTokens
+         FROM trace_entries WHERE job_id = ? AND kind = 'llm.attempt'`,
+      )
+      .get(jobId, jobId) as TraceUsage;
   }
 
   // Whole jobs at a time: a partially pruned trace is worse than none.

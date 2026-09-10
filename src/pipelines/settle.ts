@@ -42,6 +42,15 @@ export async function settleGate(
   scope: 'ingest' | 'subtitle',
 ): Promise<QueueAssessment | null> {
   const assessment = assessQueue(await client.listQueue(), { kind: job.target_kind, id: job.target_id });
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'pipeline.assess',
+    summary:
+      assessment.state === 'stuck'
+        ? `arr queue: stuck (${assessment.downloadIds.length} download${assessment.downloadIds.length === 1 ? '' : 's'})`
+        : `arr queue: ${assessment.state}`,
+    payload: () => assessment,
+  });
   if (assessment.state !== 'busy') return assessment;
 
   if (Date.now() - job.created_at > SETTLE_DEADLINE_MS) {

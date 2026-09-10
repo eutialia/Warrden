@@ -155,6 +155,7 @@ async function runMovieAcquire(
       message: `Skipped re-grab for "${title}" — a previous run of this job already grabbed a release`,
       data: eventEnvelope({ scope: 'acquire', action: 'skip-already-grabbed', facts: { title } }, targetEventData(job)),
     });
+    skipTrace(ctx, job, 'already grabbed');
     return;
   }
 
@@ -167,6 +168,7 @@ async function runMovieAcquire(
       candidates: { kept: [], dropped: [] },
       label: title,
     });
+    skipTrace(ctx, job, 'already satisfied');
     return;
   }
 
@@ -200,6 +202,12 @@ async function runMovieAcquire(
   }
 }
 
+/** The movie branch's counterpart to the season loop's own `skip`: a movie has no season
+ * step to nest under, so its skip stands on its own. */
+function skipTrace(ctx: AppContext, job: JobRow, reason: string): void {
+  ctx.trace.event({ jobId: job.id, kind: 'acquire.skip', summary: `skipped: ${reason}`, payload: () => ({ reason }) });
+}
+
 async function runSeriesAcquire(
   ctx: AppContext,
   job: JobRow,
@@ -230,6 +238,26 @@ async function runSeriesAcquire(
   let anySeasonSettled = false;
 
   for (const season of monitoredSeasons) {
+    const mode = classifySeason(season.statistics);
+    const satisfaction = seasonSatisfaction(season.statistics);
+    const seasonLabel = `${title} Season ${season.seasonNumber}`;
+    const step = ctx.trace.begin({
+      jobId: job.id,
+      kind: 'acquire.season',
+      summary: `Season ${season.seasonNumber} · ${mode}`,
+      payload: () => ({ seasonNumber: season.seasonNumber, mode, satisfaction }),
+    });
+    const skip = (reason: string): void => {
+      ctx.trace.event({
+        jobId: job.id,
+        kind: 'acquire.skip',
+        parentSeq: step.seq ?? undefined,
+        summary: `skipped: ${reason}`,
+        payload: () => ({ seasonNumber: season.seasonNumber, reason }),
+      });
+      step.end('ok', () => ({ status: 'skipped', reason }));
+    };
+
     if (grabbedSeasons.has(season.seasonNumber)) {
       ctx.events.append({
         kind: 'acquire.skip-already-grabbed',
@@ -240,12 +268,9 @@ async function runSeriesAcquire(
           targetEventData(job),
         ),
       });
+      skip('already grabbed');
       continue;
     }
-
-    const mode = classifySeason(season.statistics);
-    const satisfaction = seasonSatisfaction(season.statistics);
-    const seasonLabel = `${title} Season ${season.seasonNumber}`;
 
     if (mode === 'unaired') {
       ctx.events.append({
@@ -257,6 +282,7 @@ async function runSeriesAcquire(
           targetEventData(job),
         ),
       });
+      skip('unaired');
       continue;
     }
 
@@ -271,124 +297,135 @@ async function runSeriesAcquire(
         label: seasonLabel,
       });
       anySeasonSettled = true;
+      skip('already satisfied');
       continue;
     }
 
-    const raw = await cachedSearch(ctx, job, `s${season.seasonNumber}`, () =>
-      client.searchReleases({ seriesId: job.target_id, seasonNumber: season.seasonNumber }),
-    );
-    let missingEpisodeNumbers: number[] | undefined;
-    if (mode === 'airing') {
-      const episodes = await client.listEpisodes(job.target_id);
-      missingEpisodeNumbers = missingAiredEpisodeNumbers(episodes, season.seasonNumber);
-    }
-    const result = await attempt(ctx, client, raw, {
-      title,
-      kind: 'series',
-      seasonNumber: season.seasonNumber,
-      jobId: job.id,
-      hint: resolveHint(job),
-      mode,
-      missingEpisodeNumbers,
-    });
+    try {
+      const raw = await cachedSearch(ctx, job, `s${season.seasonNumber}`, () =>
+        client.searchReleases({ seriesId: job.target_id, seasonNumber: season.seasonNumber }),
+      );
+      let missingEpisodeNumbers: number[] | undefined;
+      if (mode === 'airing') {
+        const episodes = await client.listEpisodes(job.target_id);
+        missingEpisodeNumbers = missingAiredEpisodeNumbers(episodes, season.seasonNumber);
+      }
+      const result = await attempt(ctx, client, raw, {
+        title,
+        kind: 'series',
+        seasonNumber: season.seasonNumber,
+        jobId: job.id,
+        hint: resolveHint(job),
+        mode,
+        missingEpisodeNumbers,
+        parentSeq: step.seq ?? undefined,
+      });
 
-    if (result.status !== 'grabbed') {
-      // Only when nothing better than the rejection text is on hand. A file count is the
-      // better answer: on a part-filled season most candidates are refused as "existing
-      // file meets cutoff" for the episodes we DO have, and believing that text would
-      // report the season complete while an episode is still missing. A known-missing
-      // aired episode (from episode-level `hasFile`) says the same thing structurally,
-      // so it vetoes the fallback too.
-      const satisfied =
-        result.status === 'no-candidates' &&
-        satisfaction === 'unknown' &&
-        (missingEpisodeNumbers?.length ?? 0) === 0 &&
-        anyDropSatisfied(result.dropped);
+      if (result.status !== 'grabbed') {
+        // Only when nothing better than the rejection text is on hand. A file count is the
+        // better answer: on a part-filled season most candidates are refused as "existing
+        // file meets cutoff" for the episodes we DO have, and believing that text would
+        // report the season complete while an episode is still missing. A known-missing
+        // aired episode (from episode-level `hasFile`) says the same thing structurally,
+        // so it vetoes the fallback too.
+        const satisfied =
+          result.status === 'no-candidates' &&
+          satisfaction === 'unknown' &&
+          (missingEpisodeNumbers?.length ?? 0) === 0 &&
+          anyDropSatisfied(result.dropped);
 
-      if (satisfied) {
-        recordAlreadySatisfied(ctx, job, {
-          message: `Nothing to grab for "${seasonLabel}": the arr refused every release because it already holds this`,
-          candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
-          seasonNumber: season.seasonNumber,
-          label: seasonLabel,
-        });
-        anySeasonSettled = true;
-      } else {
+        if (satisfied) {
+          recordAlreadySatisfied(ctx, job, {
+            message: `Nothing to grab for "${seasonLabel}": the arr refused every release because it already holds this`,
+            candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
+            seasonNumber: season.seasonNumber,
+            label: seasonLabel,
+          });
+          anySeasonSettled = true;
+        } else {
+          recordOutcome(ctx, job, {
+            status: result.status,
+            reasoning: result.reasoning,
+            candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
+            label: seasonLabel,
+            seasonNumber: season.seasonNumber,
+          });
+          appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
+        }
+        step.end('ok', () => ({ status: result.status }));
+        continue;
+      }
+
+      if (pinnedGroup === null && result.releaseGroup) {
+        pinnedGroup = result.releaseGroup;
+        try {
+          await pinReleaseGroup(
+            { client, db: ctx.db },
+            { instanceName: job.arr_instance, seriesId: job.target_id, group: result.releaseGroup },
+          );
+        } catch (err) {
+          ctx.events.append({
+            kind: 'acquire.pin-failed',
+            level: 'warn',
+            jobId: job.id,
+            message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${errorMessage(err)}`,
+            data: eventEnvelope(
+              {
+                scope: 'acquire',
+                action: 'pin-failed',
+                facts: { title, season: season.seasonNumber, release: { group: result.releaseGroup ?? undefined }, error: errorMessage(err) },
+                verdict: { tone: 'warning' },
+              },
+              targetEventData(job),
+            ),
+          });
+        }
+      }
+
+      if (mode === 'complete' && result.pickedFullSeason !== true) {
+        try {
+          await client.searchSeason(job.target_id, season.seasonNumber);
+        } catch (err) {
+          ctx.events.append({
+            kind: 'acquire.season-search-failed',
+            level: 'warn',
+            jobId: job.id,
+            message: `Grabbed "${result.pickedTitle}" but failed to kick a season search for "${seasonLabel}": ${errorMessage(err)}`,
+            data: eventEnvelope(
+              {
+                scope: 'acquire',
+                action: 'season-search-failed',
+                facts: { title, season: season.seasonNumber, error: errorMessage(err) },
+                verdict: { tone: 'warning' },
+              },
+              targetEventData(job),
+            ),
+          });
+        }
+      }
+
+      try {
         recordOutcome(ctx, job, {
-          status: result.status,
+          status: 'grabbed',
+          pickedGuid: result.pickedGuid,
+          releaseGroup: result.releaseGroup,
           reasoning: result.reasoning,
           candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
           label: seasonLabel,
           seasonNumber: season.seasonNumber,
+          picked: result.picked,
         });
-        appendNonGrabAttentionEvent(ctx, job, seasonLabel, result, season.seasonNumber);
-      }
-      continue;
-    }
-
-    if (pinnedGroup === null && result.releaseGroup) {
-      pinnedGroup = result.releaseGroup;
-      try {
-        await pinReleaseGroup(
-          { client, db: ctx.db },
-          { instanceName: job.arr_instance, seriesId: job.target_id, group: result.releaseGroup },
-        );
+        settleSeasonAttention(ctx, job, season.seasonNumber);
+        anySeasonSettled = true;
       } catch (err) {
-        ctx.events.append({
-          kind: 'acquire.pin-failed',
-          level: 'warn',
-          jobId: job.id,
-          message: `Grabbed "${result.pickedTitle}" but failed to pin release group "${result.releaseGroup}": ${errorMessage(err)}`,
-          data: eventEnvelope(
-            {
-              scope: 'acquire',
-              action: 'pin-failed',
-              facts: { title, season: season.seasonNumber, release: { group: result.releaseGroup ?? undefined }, error: errorMessage(err) },
-              verdict: { tone: 'warning' },
-            },
-            targetEventData(job),
-          ),
-        });
+        appendRecordFailedEvent(ctx, job, seasonLabel, result.pickedTitle, err);
       }
-    }
-
-    if (mode === 'complete' && result.pickedFullSeason !== true) {
-      try {
-        await client.searchSeason(job.target_id, season.seasonNumber);
-      } catch (err) {
-        ctx.events.append({
-          kind: 'acquire.season-search-failed',
-          level: 'warn',
-          jobId: job.id,
-          message: `Grabbed "${result.pickedTitle}" but failed to kick a season search for "${seasonLabel}": ${errorMessage(err)}`,
-          data: eventEnvelope(
-            {
-              scope: 'acquire',
-              action: 'season-search-failed',
-              facts: { title, season: season.seasonNumber, error: errorMessage(err) },
-              verdict: { tone: 'warning' },
-            },
-            targetEventData(job),
-          ),
-        });
-      }
-    }
-
-    try {
-      recordOutcome(ctx, job, {
-        status: 'grabbed',
-        pickedGuid: result.pickedGuid,
-        releaseGroup: result.releaseGroup,
-        reasoning: result.reasoning,
-        candidates: { seasonNumber: season.seasonNumber, kept: result.kept, dropped: result.dropped },
-        label: seasonLabel,
-        seasonNumber: season.seasonNumber,
-        picked: result.picked,
-      });
-      settleSeasonAttention(ctx, job, season.seasonNumber);
-      anySeasonSettled = true;
+      // Ended once, here and at the non-grab return above: the step spans everything the
+      // season did, including the pin and the season search the grab caused.
+      step.end('ok', () => ({ status: result.status }));
     } catch (err) {
-      appendRecordFailedEvent(ctx, job, seasonLabel, result.pickedTitle, err);
+      step.end('error', () => ({ error: errorMessage(err) }));
+      throw err;
     }
   }
 
@@ -418,6 +455,8 @@ async function attempt(
     hint?: string;
     mode?: SeasonMode | 'movie';
     missingEpisodeNumbers?: number[];
+    /** The season step this attempt belongs to; absent for a movie, which has no season. */
+    parentSeq?: number;
   },
 ): Promise<AttemptResult> {
   const label = input.seasonNumber !== undefined ? `${input.title} Season ${input.seasonNumber}` : input.title;
@@ -452,6 +491,7 @@ async function attempt(
   ctx.trace.event({
     jobId: input.jobId,
     kind: 'pipeline.prefilter',
+    parentSeq: input.parentSeq,
     summary: `prefilter kept ${kept.length} of ${raw.length}`,
     payload: () => ({ kept, dropped }),
   });
@@ -500,6 +540,16 @@ async function attempt(
     hint: input.hint,
     mode: input.mode === 'movie' ? undefined : input.mode,
     jobId: input.jobId,
+    parentSeq: input.parentSeq,
+  });
+
+  ctx.trace.event({
+    jobId: input.jobId,
+    kind: 'acquire.pick',
+    parentSeq: input.parentSeq,
+    summary:
+      pick.decision === 'none' ? 'none viable' : `picked ${kept.find((c) => c.guid === pick.guid)?.title ?? pick.guid}`,
+    payload: () => ({ ...pick, kept: kept.length }),
   });
 
   if (pick.decision === 'none') {

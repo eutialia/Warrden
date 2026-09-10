@@ -163,9 +163,13 @@ describe('searchSite', () => {
     const rows = new TraceEntries(ctx.db).listByJob(job.id);
     const site = rows.find((r) => r.kind === 'subtitle.site');
     expect(site?.status).toBe('ok');
-    const steps = rows.filter((r) => r.kind === 'agent.step');
+    const steps = rows.filter((r) => r.kind.startsWith('agent.'));
     expect(steps.length).toBeGreaterThan(0);
     expect(steps.every((r) => r.parent_seq === site?.seq)).toBe(true);
+    // The model's own verb is the kind, so the UI can tell an executed action from a
+    // refusal without reading the payload.
+    expect(steps.map((r) => r.kind)).toContain('agent.download');
+    expect(rows.some((r) => r.kind === 'agent.step')).toBe(false);
   });
 
   it('records total failure (fail_count/last_failure_at) and emits subtitle.site-failed', async () => {
