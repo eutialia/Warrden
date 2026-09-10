@@ -2,6 +2,9 @@ import type Database from 'better-sqlite3';
 
 export const TRACE_RETENTION_DAYS = 7;
 export const PAYLOAD_CAP_BYTES = 256 * 1024;
+/** Head kept for one oversized member of an object payload; half the whole-payload head so
+ * several truncated members still fit under the cap together. */
+export const PAYLOAD_LEAF_HEAD_BYTES = 64 * 1024;
 
 export type TraceStatus = 'running' | 'ok' | 'error';
 
@@ -46,13 +49,33 @@ export interface AppendTraceInput {
   payload?: unknown;
 }
 
+function truncationEnvelope(json: string, head: number): { truncated: true; bytes: number; head: string } {
+  return { truncated: true, bytes: Buffer.byteLength(json, 'utf-8'), head: json.slice(0, head) };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 // The column must always hold valid JSON: a truncated raw string would be unparseable,
-// so over-cap payloads become an envelope the UI renders as text.
+// so over-cap payloads become an envelope the UI renders as text. An object payload sheds
+// its oversized members one at a time first, so the small facts beside them survive — an
+// `llm.attempt` with a megabyte-long `request` body still carries the `usage` block that
+// `usageByJob` sums in SQL, and the Call tab still has an output to draw.
 export function serializePayload(value: unknown): string {
   const json = JSON.stringify(value ?? null);
-  const bytes = Buffer.byteLength(json, 'utf-8');
-  if (bytes <= PAYLOAD_CAP_BYTES) return json;
-  return JSON.stringify({ truncated: true, bytes, head: json.slice(0, PAYLOAD_CAP_BYTES / 2) });
+  if (Buffer.byteLength(json, 'utf-8') <= PAYLOAD_CAP_BYTES) return json;
+  if (isPlainObject(value)) {
+    const pruned: Record<string, unknown> = {};
+    for (const [key, member] of Object.entries(value)) {
+      const memberJson = JSON.stringify(member ?? null);
+      pruned[key] =
+        Buffer.byteLength(memberJson, 'utf-8') > PAYLOAD_LEAF_HEAD_BYTES ? truncationEnvelope(memberJson, PAYLOAD_LEAF_HEAD_BYTES) : member;
+    }
+    const prunedJson = JSON.stringify(pruned);
+    if (Buffer.byteLength(prunedJson, 'utf-8') <= PAYLOAD_CAP_BYTES) return prunedJson;
+  }
+  return JSON.stringify(truncationEnvelope(json, PAYLOAD_CAP_BYTES / 2));
 }
 
 export class TraceEntries {
@@ -118,8 +141,8 @@ export class TraceEntries {
   }
 
   // Summed in SQL so the payloads stay server-side instead of crossing the wire for the
-  // header to add up. json_extract returns NULL for a missing key and for the truncation
-  // envelope, which SUM ignores. Tokens come from attempts (a retry spends its own), but
+  // header to add up. json_extract returns NULL for a missing key and for a whole-payload
+  // truncation envelope, which SUM ignores. Tokens come from attempts (a retry spends its own), but
   // `calls` counts `llm.call`, so one call retried twice is one call.
   usageByJob(jobId: number): TraceUsage {
     return this.db

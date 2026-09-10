@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
-import { TraceEntries, serializePayload, PAYLOAD_CAP_BYTES } from '../src/db/traceEntries.js';
+import { TraceEntries, serializePayload, PAYLOAD_CAP_BYTES, PAYLOAD_LEAF_HEAD_BYTES } from '../src/db/traceEntries.js';
 import { freshDb } from './helpers.js';
 
 let db: Database.Database;
@@ -33,9 +33,9 @@ describe('TraceEntries', () => {
     expect(JSON.parse(row?.payload ?? '')).toEqual({ output: 'y' });
   });
 
-  it('stores over-cap payloads as a valid-JSON truncation envelope', () => {
+  it('stores an over-cap payload that is one huge value as a valid-JSON truncation envelope', () => {
     const big = 'x'.repeat(PAYLOAD_CAP_BYTES + 1000);
-    const seq = t.append({ jobId: 1, kind: 'arr.request', summary: 'big', payload: { body: big } });
+    const seq = t.append({ jobId: 1, kind: 'arr.request', summary: 'big', payload: big });
     const parsed = JSON.parse(t.get(1, seq)?.payload ?? '') as { truncated: boolean; bytes: number; head: string };
     expect(parsed.truncated).toBe(true);
     expect(parsed.bytes).toBeGreaterThan(PAYLOAD_CAP_BYTES);
@@ -71,5 +71,25 @@ describe('TraceEntries', () => {
   it('serializePayload passes small values through unchanged', () => {
     expect(JSON.parse(serializePayload({ a: 1 }))).toEqual({ a: 1 });
     expect(serializePayload(undefined)).toBe('null');
+  });
+
+  it('serializePayload truncates only the oversized member of an object, keeping the small facts', () => {
+    const usage = { inputTokens: 100, outputTokens: 7 };
+    const parsed = JSON.parse(
+      serializePayload({ usage, output: { pick: 'a' }, request: { body: 'x'.repeat(PAYLOAD_CAP_BYTES + 1000) } }),
+    ) as { usage: unknown; output: unknown; request: { truncated: boolean; bytes: number; head: string } };
+    expect(parsed.usage).toEqual(usage);
+    expect(parsed.output).toEqual({ pick: 'a' });
+    expect(parsed.request.truncated).toBe(true);
+    expect(parsed.request.bytes).toBeGreaterThan(PAYLOAD_CAP_BYTES);
+    expect(parsed.request.head.length).toBe(PAYLOAD_LEAF_HEAD_BYTES);
+  });
+
+  it('serializePayload falls back to the whole-payload envelope when shedding members is not enough', () => {
+    const member = 'x'.repeat(PAYLOAD_LEAF_HEAD_BYTES * 2);
+    const wide = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`m${i}`, member]));
+    const parsed = JSON.parse(serializePayload(wide)) as { truncated: boolean; bytes: number };
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.bytes).toBeGreaterThan(PAYLOAD_CAP_BYTES);
   });
 });

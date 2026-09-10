@@ -10,6 +10,22 @@ import { compareEpisodeCodes, formatEpisodeCode, parseEpisodeCode, type EpisodeC
 import { TONE_SOFT, TONE_TEXT, type Tone } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
+/** The four numbers a subtitle run is judged by. Shared with the debug header so both
+ * surfaces count the same way. */
+export function subtitleCounts(
+  placedFiles: PlacedFileRow[],
+  attention: AttentionItem[],
+  events: EventRow[],
+): { placed: number; resynced: number; missing: number; setAside: number } {
+  const unresolved = attention.filter((a) => a.kind === 'subtitle.unresolved');
+  return {
+    placed: placedFiles.length,
+    resynced: placedFiles.filter((f) => f.data.drift === 'resynced').length,
+    missing: unresolvedEpisodes(unresolved).length,
+    setAside: countSetAside(attention, events),
+  };
+}
+
 /**
  * What a subtitle run *produced*, above its timeline. A season pack places hundreds of
  * files and sets aside hundreds more, so nothing here is a flat list: it opens with the
@@ -34,14 +50,15 @@ export function SubtitleSummary({
   // acts on them one by one. Everything else keeps its own link into the queue.
   const other = attention.filter((a) => a.kind !== 'subtitle.unresolved' && a.kind !== 'subtitle.quarantined');
   const episodes = unresolvedEpisodes(unresolved);
+  const counts = subtitleCounts(placedFiles, attention, events);
 
   return (
     <div className="space-y-3">
       <SummaryStrip
-        placed={placedFiles.length}
-        resynced={placedFiles.filter((f) => f.data.drift === 'resynced').length}
-        missing={episodes.length}
-        setAside={countSetAside(attention, events)}
+        placed={counts.placed}
+        resynced={counts.resynced}
+        missing={counts.missing}
+        setAside={counts.setAside}
       />
       {unresolved.length > 0 && <UnresolvedCard items={unresolved} episodes={episodes} />}
       {other.map((a) => (

@@ -530,17 +530,20 @@ export class AiSdkGenerator implements StructuredGenerator {
       const model = createModel(this.getCfg(), ref, tier, capabilities !== undefined, opts.callsite);
       const cache = planPromptCache(opts.promptCache === true);
       const result = await generateObject({ model, ...buildGenerateOptions(opts, cache, tier) });
+      // `request` last on purpose: a prompt-cached request body runs to megabytes, and
+      // serializePayload truncates the oversized member rather than the payload, so the
+      // facts before it stay readable and `usage` stays summable in SQL.
       attempt.end('ok', () => ({
         provider: ref.provider,
         model: ref.model,
-        request: result.request?.body,
-        output: result.object,
         usage: result.usage,
-        providerMetadata: result.providerMetadata,
         responseId: result.response?.id,
         responseModelId: result.response?.modelId,
         finishReason: result.finishReason,
         warnings: result.warnings,
+        output: result.object,
+        providerMetadata: result.providerMetadata,
+        request: result.request?.body,
       }));
       // A reported count of zero against a requested effort means the route answered without
       // reasoning at all; no count reported means the provider said nothing, which proves

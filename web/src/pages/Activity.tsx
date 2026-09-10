@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ListChecks, Search } from 'lucide-react';
-import { apiErrorMessage, fetchJobs, type Job, type JobStatus } from '@/api';
+import { apiErrorMessage, fetchJobs, type Job } from '@/api';
 import { ActivityList } from '@/components/activity/ActivityList';
 import { TargetDrawer } from '@/components/activity/TargetDrawer';
 import { PageHeader } from '@/components/PageHeader';
@@ -19,20 +19,16 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch } from '@/hooks/useSseRefetch';
-import { foldJobsByTarget, jobTitle, type TargetGroup } from '@/lib/jobs';
+import { ALL, foldJobsByTarget, jobTitle, PHASES, STATUSES, type TargetGroup } from '@/lib/jobs';
 import { jobStatusLabel, pipelineLabel } from '@/lib/labels';
 
 const PAGE_SIZE = 50;
 // One widened fetch is the most a bookmark can ask for. Matches MAX_LIMIT in src/server/app.ts.
 const DEEP_LINK_LIMIT = 1000;
-const PIPELINES = ['acquire', 'ingest', 'subtitle'] as const;
-const STATUSES: JobStatus[] = ['running', 'pending', 'done', 'failed'];
-
-const ALL = 'all';
 
 const PIPELINE_ITEMS: Record<string, string> = {
   [ALL]: 'All work',
-  ...Object.fromEntries(PIPELINES.map((p) => [p, pipelineLabel(p)])),
+  ...Object.fromEntries(PHASES.map((p) => [p, pipelineLabel(p)])),
 };
 const STATUS_ITEMS: Record<string, string> = {
   [ALL]: 'Any status',
