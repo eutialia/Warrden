@@ -234,7 +234,7 @@ function loadKnowledgeForPrompt(ctx: AppContext, job: JobRow, baseUrl: string, s
  * ended it. A broken site is a health event, not a job failure, so site faults come back as
  * a stop; a provider error (`LlmError`) is not the site's fault and throws out of here to
  * fail the job. The transcript is emitted step by step as `subtitle.transcript` events and
- * `agent.step` trace entries, and is also handed back to the caller so it can be replayed
+ * `agent.<action>` trace entries, and is also handed back to the caller so it can be replayed
  * into reflection.
  */
 export async function searchSite(
@@ -277,7 +277,7 @@ export async function searchSite(
     transcript.push(entry);
     ctx.trace.event({
       jobId: job.id,
-      kind: 'agent.step',
+      kind: `agent.${entry.action}`,
       parentSeq: siteStep.seq ?? undefined,
       summary: `${entry.action}: ${entry.detail}`.slice(0, 200),
       payload: () => entry,

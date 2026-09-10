@@ -1321,6 +1321,28 @@ describe('app', () => {
       expect((await app.request('/api/traces/999/entries/0')).status).toBe(404);
     });
 
+    it('sums llm usage over attempts, ignoring rows with no usage block and truncated payloads', async () => {
+      const ctx = makeCtx();
+      const app = createApp(ctx);
+      const { id } = ctx.queue.enqueue({ pipeline: 'subtitle', targetKind: 'series', targetId: 1, arrInstance: 'sonarr' });
+      const usage = (inputTokens: number, cachedInputTokens: number, outputTokens: number, reasoningTokens: number) => ({
+        usage: { inputTokens, cachedInputTokens, outputTokens, outputTokenDetails: { reasoningTokens } },
+      });
+      ctx.trace.event({ jobId: id!, kind: 'llm.attempt', summary: 'a', payload: () => usage(100, 60, 10, 4) });
+      ctx.trace.event({ jobId: id!, kind: 'llm.attempt', summary: 'b', payload: () => usage(200, 0, 20, 0) });
+      // A failed attempt closes with an error payload and no usage.
+      ctx.trace.event({ jobId: id!, kind: 'llm.attempt', summary: 'c', payload: () => ({ error: 'boom' }) });
+      // A truncated payload is the {truncated, bytes, head} envelope: no usage to read.
+      ctx.trace.event({ jobId: id!, kind: 'llm.attempt', summary: 'd', payload: () => ({ pad: 'x'.repeat(300 * 1024), ...usage(999, 0, 0, 0) }) });
+      // Two calls behind those four attempts: a retried call must count once, and its own
+      // usage block is never added to the attempt sums.
+      ctx.trace.event({ jobId: id!, kind: 'llm.call', summary: 'e', payload: () => usage(5, 0, 0, 0) });
+      ctx.trace.event({ jobId: id!, kind: 'llm.call', summary: 'f' });
+
+      const body = (await (await app.request(`/api/traces/${id}`)).json()) as { usage: Record<string, number> };
+      expect(body.usage).toEqual({ calls: 2, inputTokens: 300, cachedInputTokens: 60, outputTokens: 30, reasoningTokens: 4 });
+    });
+
     it('overview reports debugEnabled from config', async () => {
       const ctx = makeCtx();
       ctx.config.debug.enabled = true;

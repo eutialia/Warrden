@@ -498,6 +498,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         jobId,
         jobStatus: job?.status ?? null,
         jobTerminal: job ? isTerminal(job) : true,
+        usage: traces.usageByJob(jobId),
         entries: rows.map(({ payload, ...rest }) => ({ ...rest, hasPayload: payload !== null })),
       });
     });

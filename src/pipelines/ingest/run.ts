@@ -440,9 +440,19 @@ async function sweepSidecars(
   const episodesWithFiles = target.kind === 'series' ? target.episodes.filter((e) => e.hasFile) : [];
   const llmBatch: string[] = [];
 
+  const note = (sidecarPath: string, what: string, extra: Record<string, unknown> = {}): void => {
+    ctx.trace.event({
+      jobId: job.id,
+      kind: 'ingest.sidecar',
+      summary: `${basename(sidecarPath)}: ${what}`,
+      payload: () => ({ sidecarPath, ...extra }),
+    });
+  };
+
   for (const sidecarPath of sidecarPaths) {
     const existing = existingPlaced.find((r) => r.source_path === sidecarPath);
     if (existing && existsSync(existing.video_path)) {
+      note(sidecarPath, 'already placed', { placedPath: existing.placed_path });
       if (existsSync(existing.placed_path)) {
         refreshPlacedRow(placedFiles, job, existing);
       } else {
@@ -469,6 +479,7 @@ async function sweepSidecars(
             message: `Skipped "${basename(sidecarPath)}" — belongs to "${basename(siblingVideo)}", an extra the arr never imported`,
             data: targetEventData(job, { sidecarPath, videoPath: siblingVideo }),
           });
+          note(sidecarPath, 'skipped extra', { videoPath: siblingVideo });
           continue;
         }
       }
@@ -504,12 +515,21 @@ async function sweepSidecars(
 
   if (target.kind !== 'series' || llmBatch.length === 0) return;
 
+  for (const p of llmBatch) note(p, 'sent to model');
+
   const ids = await matchSidecarsWithLlm({
     llm: ctx.llm,
     seriesTitle: target.seriesTitle,
     files: llmBatch.map((p) => basename(p)),
     episodes: episodesWithFiles,
     jobId: job.id,
+  });
+
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'ingest.match',
+    summary: `model matched ${ids.filter((id) => id !== null).length} of ${llmBatch.length} sidecar(s)`,
+    payload: () => ({ files: llmBatch, episodeIds: ids }),
   });
 
   llmBatch.forEach((sidecarPath, i) => {
@@ -526,6 +546,7 @@ async function sweepSidecars(
         // sidecars failing in the same run would collapse into one row naming only the last.
         data: targetEventData(job, { sidecarPath, dedupeKey: sidecarPath }),
       });
+      note(sidecarPath, 'unmatched');
       return;
     }
     placeEpisodeSidecar(ctx, job, placedFiles, target, sidecarPath, episode, 'llm');
@@ -576,6 +597,12 @@ function tryRestore(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, row:
 }
 
 function appendDeferred(ctx: AppContext, job: JobRow, sidecarPath: string, reason: string): void {
+  ctx.trace.event({
+    jobId: job.id,
+    kind: 'ingest.sidecar',
+    summary: `${basename(sidecarPath)}: deferred: ${reason}`,
+    payload: () => ({ sidecarPath, reason }),
+  });
   ctx.events.append({
     kind: 'ingest.deferred',
     jobId: job.id,
@@ -671,6 +698,15 @@ function place(ctx: AppContext, job: JobRow, placedFiles: PlacedFiles, sidecarPa
   });
 }
 
+/** What one rescue pass concluded, for the `pipeline.rescue` step's end payload: how many
+ * manual-import items it had to work with, the plan it built (series only), and which of the
+ * five endings it reached. */
+interface RescueOutcome {
+  items: number;
+  plan: { confidence: string; files: number; skipped: unknown; reasoning: string } | null;
+  outcome: 'imported' | 'proposed' | 'deferred' | 'nothing' | 'skipped';
+}
+
 /**
  * The rescue stage — retries anything the sidecar sweep above couldn't touch
  * because there was no video on disk to sit beside: a `'stuck'` download's own
@@ -688,13 +724,20 @@ async function rescueStuckImports(
   assessment: QueueAssessment,
   bundleFolders: string[],
 ): Promise<void> {
+  const stuck = assessment.state === 'stuck' ? assessment.downloadIds.length : 0;
+  const step = ctx.trace.begin({
+    jobId: job.id,
+    kind: 'pipeline.rescue',
+    summary: `rescue: ${stuck} stuck download${stuck === 1 ? '' : 's'}, ${bundleFolders.length} folder(s)`,
+  });
   try {
-    if (target.kind === 'series') {
-      await rescueSeries(ctx, job, client, target, assessment, bundleFolders);
-    } else {
-      await rescueMovie(ctx, job, client, target, assessment);
-    }
+    const outcome =
+      target.kind === 'series'
+        ? await rescueSeries(ctx, job, client, target, assessment, bundleFolders)
+        : await rescueMovie(ctx, job, client, target, assessment);
+    step.end('ok', () => outcome);
   } catch (err) {
+    step.end('error', () => ({ error: errorMessage(err) }));
     ctx.events.append({
       kind: 'ingest.rescue-failed',
       level: 'warn',
@@ -768,7 +811,7 @@ async function rescueSeries(
   target: SeriesTargetContext,
   assessment: QueueAssessment,
   bundleFolders: string[],
-): Promise<void> {
+): Promise<RescueOutcome> {
   const stuckDownloadIds = assessment.state === 'stuck' ? assessment.downloadIds : [];
   const seriesId = job.target_id;
 
@@ -789,10 +832,13 @@ async function rescueSeries(
     episodes: target.episodes,
     jobId: job.id,
   });
-  if (plan === null) return;
+  if (plan === null) return { items: items.length, plan: null, outcome: 'nothing' };
+  const planned = { confidence: plan.confidence, files: plan.files.length, skipped: plan.skipped, reasoning: plan.reasoning };
 
   if (plan.confidence !== 'low') {
-    if (await rescueDeferred(ctx, job, client, { kind: 'series', id: seriesId }, plan.files, target.seriesTitle)) return;
+    if (await rescueDeferred(ctx, job, client, { kind: 'series', id: seriesId }, plan.files, target.seriesTitle)) {
+      return { items: items.length, plan: planned, outcome: 'deferred' };
+    }
     await client.executeManualImport(plan.files, 'copy');
     ctx.events.append({
       kind: 'ingest.rescued',
@@ -800,7 +846,7 @@ async function rescueSeries(
       message: `Imported ${plan.files.length} leftover episode file(s) for "${target.seriesTitle}"`,
       data: targetEventData(job, { files: plan.files, skipped: plan.skipped, reasoning: plan.reasoning }),
     });
-    return;
+    return { items: items.length, plan: planned, outcome: 'imported' };
   }
 
   const n = plan.files.length;
@@ -821,6 +867,7 @@ async function rescueSeries(
       targetEventData(job, { accept: { action: 'bundle-import', instance: job.arr_instance, files: plan.files } }),
     ),
   });
+  return { items: items.length, plan: planned, outcome: 'proposed' };
 }
 
 /**
@@ -866,14 +913,20 @@ async function rescueSeries(
  * breaks a re-execution loop: without it, a stuck queue record that lingers after a
  * successful import would re-run (and re-execute) this same rescue every job run.
  */
-async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target: MovieTargetContext, assessment: QueueAssessment): Promise<void> {
-  if (assessment.state !== 'stuck') return;
+async function rescueMovie(
+  ctx: AppContext,
+  job: JobRow,
+  client: ArrApi,
+  target: MovieTargetContext,
+  assessment: QueueAssessment,
+): Promise<RescueOutcome> {
+  if (assessment.state !== 'stuck') return { items: 0, plan: null, outcome: 'nothing' };
 
   const itemsByScope = await Promise.all(
     assessment.downloadIds.map((downloadId) => client.listManualImport({ downloadId, filterExistingFiles: true })),
   );
   const deduped = dedupeManualImportItems(itemsByScope.flat());
-  if (deduped.length === 0) return;
+  if (deduped.length === 0) return { items: 0, plan: null, outcome: 'nothing' };
 
   const skipped: string[] = [];
   const items = deduped.filter((item) => {
@@ -889,7 +942,7 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       message: `Found ${skipped.length} leftover download file(s) for this movie, but none were safe to import (already rejected by Sonarr/Radarr, or named a different movie)`,
       data: targetEventData(job, { skipped }),
     });
-    return;
+    return { items: deduped.length, plan: null, outcome: 'skipped' };
   }
 
   const files: ManualImportFile[] = items.map((item) => ({
@@ -923,7 +976,7 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
         targetEventData(job, { accept: { action: 'bundle-import', instance: job.arr_instance, files } }),
       ),
     });
-    return;
+    return { items: deduped.length, plan: null, outcome: 'proposed' };
   }
 
   // Movie already has a file: do not propose a replace. Incremental-only — Sonarr/Radarr
@@ -935,10 +988,12 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
       message: `Skipped leftover file for "${movieTitle}" — the movie is already in the library`,
       data: targetEventData(job, { skipped: files.map((f) => f.path), title: movieTitle }),
     });
-    return;
+    return { items: deduped.length, plan: null, outcome: 'skipped' };
   }
 
-  if (await rescueDeferred(ctx, job, client, { kind: 'movie', id: job.target_id }, files, movieTitle)) return;
+  if (await rescueDeferred(ctx, job, client, { kind: 'movie', id: job.target_id }, files, movieTitle)) {
+    return { items: deduped.length, plan: null, outcome: 'deferred' };
+  }
 
   await client.executeManualImport(files, 'copy');
   ctx.events.append({
@@ -947,4 +1002,5 @@ async function rescueMovie(ctx: AppContext, job: JobRow, client: ArrApi, target:
     message: `Imported leftover file for "${movieTitle}"`,
     data: targetEventData(job, { files, skipped, reasoning: `stuck download mapped 1:1 onto "${movieTitle}"` }),
   });
+  return { items: deduped.length, plan: null, outcome: 'imported' };
 }

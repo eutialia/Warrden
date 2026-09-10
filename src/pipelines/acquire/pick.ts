@@ -136,10 +136,12 @@ export async function pickRelease(input: {
   /** Ties this call's `llm.call` trace entries to the job that made it; omitted by callers
    * with no job at hand (tests), which just means the call isn't traced. */
   jobId?: number;
+  /** The season step this pick belongs to, so the `llm.call` nests under it. */
+  parentSeq?: number;
 }): Promise<PickResult> {
-  // `jobId` is destructured out explicitly: anything left in `promptInput` reaches
+  // `jobId`/`parentSeq` are destructured out explicitly: anything left in `promptInput` reaches
   // `synthesizePolicyPrompt` and would change the prompt bytes.
-  const { llm, candidates, jobId, ...promptInput } = input;
+  const { llm, candidates, jobId, parentSeq, ...promptInput } = input;
 
   const pool = eligibleCandidates(promptInput.mode, candidates);
 
@@ -158,7 +160,7 @@ export async function pickRelease(input: {
     schema: LlmPickResponseSchema,
     system,
     prompt,
-    trace: jobId !== undefined ? { jobId } : undefined,
+    trace: jobId !== undefined ? { jobId, parentSeq } : undefined,
   });
 
   // `none` is honoured unconditionally, candidate number or not. A structured-output model
