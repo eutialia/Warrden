@@ -9,17 +9,19 @@ import { pipelineLabel, runOutcome, targetKindLabel } from '@/lib/labels';
 import { TONE_SOLID } from '@/lib/tone';
 import { cn } from '@/lib/utils';
 
-function PhaseDots({ group }: { group: TargetGroup }) {
+/** `dense` drops the connector hairline and shrinks the dots, for the sidebar row where
+ * the phases sit inline with the rest of a target's meta. */
+export function PhaseDots({ group, dense = false }: { group: TargetGroup; dense?: boolean }) {
   return (
     <span className="flex items-center gap-0.5">
       {PHASES.map((p, i) => {
         const runs = group.byPhase[p];
         return (
           <span key={p} className="flex items-center gap-0.5">
-            {i > 0 && <span className="h-px w-3 bg-border" />}
+            {i > 0 && !dense && <span className="h-px w-3 bg-border" />}
             <span
               title={`${pipelineLabel(p)} - ${phaseSummary(p, runs)}`}
-              className={cn('size-2 rounded-full', runs.length === 0 ? 'bg-muted-foreground/20' : TONE_SOLID[phaseTone(runs)])}
+              className={cn('rounded-full', dense ? 'size-1.5' : 'size-2', runs.length === 0 ? 'bg-muted-foreground/20' : TONE_SOLID[phaseTone(runs)])}
             />
           </span>
         );

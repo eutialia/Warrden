@@ -2,9 +2,18 @@ import { isTruncationEnvelope, type TraceEntry } from '@/api';
 import { formatTook } from '@/components/debug/laneModel';
 import { PayloadView } from '@/components/debug/PayloadView';
 import { Facts } from '@/components/debug/StepTab';
+import { StatusDot } from '@/components/ToneBadge';
 import { tierLabel } from '@/lib/labels';
-import { TONE_SOLID } from '@/lib/tone';
+import type { Tone } from '@/lib/tone';
 import { cn } from '@/lib/utils';
+
+/** The `llm.call` payload the generator writes. `system` and `prompt` arrive as strings
+ * or, past the per-member cap, as a `TruncationEnvelope`. */
+export interface CallPayload {
+  callsite?: string;
+  system?: unknown;
+  prompt?: unknown;
+}
 
 interface Usage {
   inputTokens?: number;
@@ -37,7 +46,7 @@ export function CallTab({
   onRetryPayload,
   turn,
   turnPayload,
-  now,
+  callPayload,
   jobTerminal,
 }: {
   call: TraceEntry;
@@ -47,7 +56,7 @@ export function CallTab({
   onRetryPayload: (seq: number) => void;
   turn: TraceEntry | null;
   turnPayload: unknown;
-  now: number;
+  callPayload: CallPayload | undefined;
   jobTerminal: boolean;
 }) {
   const last = attempts[attempts.length - 1];
@@ -57,15 +66,17 @@ export function CallTab({
   const whole = isTruncationEnvelope(raw) ? raw : null;
   const attempt = whole ? {} : (asRecord(raw) as AttemptPayload);
   const usage = attempt.usage ?? {};
-  // A failed attempt carries an error and no output, which must read as "there is none"
-  // rather than as the payload still being in flight.
-  const output = last && raw !== undefined ? (whole ?? attempt.output ?? null) : undefined;
+  // A failed attempt carries an error and no output, and a job that died mid-attempt left
+  // a row with no payload at all; both must read as "there is none" rather than as a fetch
+  // still in flight.
+  const pending = last !== undefined && last.hasPayload && raw === undefined;
+  const output = pending ? undefined : (whole ?? attempt.output ?? null);
   const outputError = last ? attemptErrors[last.seq] : undefined;
   const retryOutput = () => {
     if (last) onRetryPayload(last.seq);
   };
-  const callsite = call.summary.split(' via ')[0] ?? call.summary;
-  const model = call.summary.split(' via ')[1] ?? '';
+  const callsite = callPayload?.callsite ?? '—';
+  const model = attempt.provider && attempt.model ? `${attempt.provider}/${attempt.model}` : '—';
   const decided = asRecord(attempt.output);
   const ran = asRecord(turnPayload) as { tier?: string; action?: string; detail?: string };
 
@@ -77,7 +88,7 @@ export function CallTab({
             ['kind', `llm.call · seq ${call.seq}`],
             ['callsite', callsite],
             ['model', model],
-            ['status', `${call.status} · ${formatTook(call, now, jobTerminal)} · ${attempts.length} attempt${attempts.length === 1 ? '' : 's'}`],
+            ['status', `${call.status} · ${formatTook(call, jobTerminal)} · ${attempts.length} attempt${attempts.length === 1 ? '' : 's'}`],
             ...(attempt.error ? ([['error', attempt.error]] as [string, string][]) : []),
           ]}
         />
@@ -98,7 +109,7 @@ export function CallTab({
             dot={turn.status === 'error' ? 'danger' : 'success'}
             head="ran"
             title={`${turn.kind.slice('agent.'.length)} · ${ran.tier ? tierLabel(ran.tier as never) : ''}`}
-            trailing={formatTook(turn, now, jobTerminal)}
+            trailing={formatTook(turn, jobTerminal)}
           >
             <p className="font-mono text-[11px] break-all">{turn.summary}</p>
           </Turn>
@@ -144,7 +155,7 @@ function Turn({
   trailing,
   children,
 }: {
-  dot: 'info' | 'success' | 'danger' | 'neutral';
+  dot: Tone;
   head: string;
   title: string;
   trailing?: string;
@@ -153,7 +164,7 @@ function Turn({
   return (
     <div className="rounded-sm border text-xs">
       <div className="flex items-center gap-2 border-b px-2.5 py-1.5 text-[11px] text-muted-foreground">
-        <span className={cn('size-1.5 rounded-full', TONE_SOLID[dot])} />
+        <StatusDot tone={dot} size="sm" />
         <b className="font-medium text-foreground">{head}</b>
         <span>{title}</span>
         {trailing && <span className="ml-auto font-mono">{trailing}</span>}

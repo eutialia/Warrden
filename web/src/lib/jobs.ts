@@ -23,6 +23,23 @@ export const PHASES: readonly Phase[] = ['acquire', 'ingest', 'subtitle'];
 export const ALL = 'all';
 export const STATUSES: JobStatus[] = ['running', 'pending', 'done', 'failed'];
 
+/** One wide window, filtered client-side. Matches MAX_LIMIT in src/server/app.ts: the API
+ * returns a bounded list already, and a homelab's job history is small enough that a
+ * round-trip per keystroke would be the slower option. */
+export const JOB_WINDOW = 1000;
+
+/** The job list filter both the Activity table and the debug sidebar apply. `ALL` in a
+ * slot means that slot filters nothing. */
+export function filterJobs(jobs: Job[], f: { query: string; pipeline: string; status: string }): Job[] {
+  const needle = f.query.trim().toLowerCase();
+  return jobs.filter((job) => {
+    if (f.pipeline !== ALL && job.pipeline !== f.pipeline) return false;
+    if (f.status !== ALL && job.status !== f.status) return false;
+    if (!needle) return true;
+    return `${jobTitle(job)} ${job.arr_instance}`.toLowerCase().includes(needle);
+  });
+}
+
 /** Outcomes that need nobody. A bare `!== 'grabbed'` test paints already-satisfied
  * amber, putting it in the same class as the false alarm it replaced. */
 const SETTLED_OUTCOMES = new Set<AcquireStatus>(['grabbed', 'already-satisfied']);

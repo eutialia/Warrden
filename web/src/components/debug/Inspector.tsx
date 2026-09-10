@@ -1,9 +1,9 @@
 import { useEffect } from 'react';
 import { X } from 'lucide-react';
-import type { JobDetailResponse, TraceEntry } from '@/api';
+import { isTruncationEnvelope, type JobDetailResponse, type TraceEntry } from '@/api';
 import { RunBody } from '@/components/activity/RunDetail';
-import { CallTab } from '@/components/debug/CallTab';
-import { PayloadView } from '@/components/debug/PayloadView';
+import { CallTab, type CallPayload } from '@/components/debug/CallTab';
+import { PayloadView, TruncationNote } from '@/components/debug/PayloadView';
 import { StepTab } from '@/components/debug/StepTab';
 import { StatusNotice } from '@/components/StatusNotice';
 import { Button } from '@/components/ui/button';
@@ -28,7 +28,6 @@ export function Inspector({
   tab,
   onTab,
   onClose,
-  now,
   jobTerminal,
 }: {
   entries: TraceEntry[];
@@ -46,7 +45,6 @@ export function Inspector({
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
   onClose: () => void;
-  now: number;
   jobTerminal: boolean;
 }) {
   useEffect(() => {
@@ -69,7 +67,7 @@ export function Inspector({
   // on an arr call, Step on nothing selected); fall back rather than draw an empty panel.
   const active = tabs.find((t) => t.id === tab && t.enabled)?.id ?? (selected ? 'step' : 'story');
   const attempts = selected ? entries.filter((e) => e.parent_seq === selected.seq && e.kind === 'llm.attempt') : [];
-  const callPayload = payload as { system?: string; prompt?: string } | undefined;
+  const callPayload = payload as CallPayload | undefined;
   // An entry with no payload row never resolves, so "Loading…" has to be reachable only
   // while a fetch is actually out.
   const promptFallback = selected?.hasPayload && payload === undefined ? 'Loading…' : '—';
@@ -97,7 +95,7 @@ export function Inspector({
       </div>
       <TabsContent value={active} className="min-h-0 flex-1 overflow-y-auto">
         {active === 'step' && selected && !isCall && (
-          <StepTab entry={selected} payload={payload} payloadError={payloadError} onRetryPayload={retrySelected} now={now} jobTerminal={jobTerminal} />
+          <StepTab entry={selected} payload={payload} payloadError={payloadError} onRetryPayload={retrySelected} jobTerminal={jobTerminal} />
         )}
         {active === 'step' && selected && isCall && (
           <CallTab
@@ -108,7 +106,7 @@ export function Inspector({
             onRetryPayload={onRetryPayload}
             turn={turn}
             turnPayload={turnPayload}
-            now={now}
+            callPayload={callPayload}
             jobTerminal={jobTerminal}
           />
         )}
@@ -119,13 +117,9 @@ export function Inspector({
             ) : (
               <>
                 <h4 className="text-[11px] tracking-wide text-muted-foreground uppercase">System</h4>
-                <pre className="rounded-sm border bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
-                  {callPayload?.system ?? promptFallback}
-                </pre>
+                <PromptPane value={callPayload?.system} fallback={promptFallback} />
                 <h4 className="text-[11px] tracking-wide text-muted-foreground uppercase">Prompt</h4>
-                <pre className="rounded-sm border bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
-                  {callPayload?.prompt ?? promptFallback}
-                </pre>
+                <PromptPane value={callPayload?.prompt} fallback={promptFallback} />
               </>
             )}
           </div>
@@ -147,5 +141,19 @@ export function Inspector({
         )}
       </TabsContent>
     </Tabs>
+  );
+}
+
+/** Past the server's per-member cap a prompt arrives as a truncation envelope, not a
+ * string; rendering the object straight into the `<pre>` throws. */
+function PromptPane({ value, fallback }: { value: unknown; fallback: string }) {
+  const envelope = isTruncationEnvelope(value) ? value : null;
+  return (
+    <>
+      {envelope && <TruncationNote envelope={envelope} />}
+      <pre className="rounded-sm border bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+        {envelope?.head ?? (typeof value === 'string' ? value : fallback)}
+      </pre>
+    </>
   );
 }

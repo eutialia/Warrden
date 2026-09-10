@@ -38,14 +38,16 @@ export function StatusDot({
   pulse = false,
   size = 'default',
   className,
+  title,
 }: {
   tone: Tone;
   pulse?: boolean;
   size?: 'default' | 'sm';
   className?: string;
+  title?: string;
 }) {
   return (
-    <span className={cn('relative flex shrink-0', size === 'sm' ? 'size-1.5' : 'size-2', className)}>
+    <span title={title} className={cn('relative flex shrink-0', size === 'sm' ? 'size-1.5' : 'size-2', className)}>
       {pulse && (
         <span className={cn('absolute inline-flex size-full animate-ping rounded-full opacity-75', TONE_SOLID[tone])} />
       )}

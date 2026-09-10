@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
+  ApiError,
   apiErrorMessage,
   fetchJob,
   fetchJobs,
@@ -14,7 +15,7 @@ import {
   type TraceUsage,
 } from '@/api';
 import { Inspector, type InspectorTab } from '@/components/debug/Inspector';
-import { effectiveNow, turnOf } from '@/components/debug/laneModel';
+import { turnOf } from '@/components/debug/laneModel';
 import { LaneStrip } from '@/components/debug/LaneStrip';
 import { INSPECTOR_MIN_W, ResizeHandle } from '@/components/debug/ResizeHandle';
 import { TargetList } from '@/components/debug/TargetList';
@@ -22,11 +23,9 @@ import { TraceHeader } from '@/components/debug/TraceHeader';
 import { Waterfall } from '@/components/debug/Waterfall';
 import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch, type SseEvent } from '@/hooks/useSseRefetch';
-import { ALL, jobTitle } from '@/lib/jobs';
+import { ALL, filterJobs, JOB_WINDOW } from '@/lib/jobs';
 
 const INSPECTOR_WIDTH_KEY = 'warrden.debug.inspectorWidth';
-// Matches MAX_LIMIT in src/server/app.ts: one wide window, filtered client-side like Activity.
-const JOB_WINDOW = 1000;
 
 export default function DebugPage() {
   const { jobId } = useParams();
@@ -41,6 +40,7 @@ export default function DebugPage() {
   const [entries, setEntries] = useState<TraceEntry[]>([]);
   const [usage, setUsage] = useState<TraceUsage | null>(null);
   const [jobTerminal, setJobTerminal] = useState(false);
+  const [traceError, setTraceError] = useState<'missing' | 'failed' | null>(null);
   const [detail, setDetail] = useState<JobDetailResponse | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [payloads, setPayloads] = useState<Record<number, unknown>>({});
@@ -57,25 +57,42 @@ export default function DebugPage() {
   // bumped only on a job switch, so the trace refetching on every trace.appended does
   // not throw away payloads for the job still on screen.
   const listGen = useFetchGeneration();
+  const traceListGen = useFetchGeneration();
   const traceGen = useFetchGeneration();
   const detailGen = useFetchGeneration();
   const payloadGen = useFetchGeneration();
   const payloadStaleRef = useRef<() => boolean>(() => false);
+  // A live job replaces `entries` every 250ms, and the prefetch effect runs again each time;
+  // without this the same GET is reissued on every tick until the first reply lands.
+  const pending = useRef(new Set<number>());
 
-  const loadList = useCallback(() => {
+  // Two loaders, not one: the job window is a thousand rows and only the trace list is worth
+  // refetching on a live job's `trace.appended` burst.
+  const loadJobs = useCallback(() => {
     const isStale = listGen();
-    Promise.all([fetchJobs(JOB_WINDOW), fetchTraces()])
-      .then(([j, t]) => {
+    fetchJobs(JOB_WINDOW)
+      .then((j) => {
         if (isStale()) return;
         setJobs(j);
-        setTraces(t.traces);
       })
       .catch(() => {
         if (isStale()) return;
         setJobs([]);
-        setTraces([]);
       });
   }, [listGen]);
+
+  const loadTraces = useCallback(() => {
+    const isStale = traceListGen();
+    fetchTraces()
+      .then((t) => {
+        if (isStale()) return;
+        setTraces(t.traces);
+      })
+      .catch(() => {
+        if (isStale()) return;
+        setTraces([]);
+      });
+  }, [traceListGen]);
 
   const loadTrace = useCallback(() => {
     if (selectedJob === null) return;
@@ -86,13 +103,16 @@ export default function DebugPage() {
         setEntries(r.entries);
         setUsage(r.usage);
         setJobTerminal(r.jobTerminal);
+        setTraceError(null);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (isStale()) return;
-        // 404 is "no trace": the job may still exist and the Story tab still works.
+        // 404 is "no trace rows": the job may still exist and the Story tab still works.
+        // Anything else is a failed request, which must not be reported as a missing trace.
         setEntries([]);
         setUsage(null);
-        setJobTerminal(true);
+        setJobTerminal(false);
+        setTraceError(err instanceof ApiError && err.status === 404 ? 'missing' : 'failed');
       });
   }, [selectedJob, traceGen]);
 
@@ -113,20 +133,29 @@ export default function DebugPage() {
   }, [selectedJob, detailGen]);
 
   useEffect(() => {
-    loadList();
+    loadJobs();
     return () => {
       listGen();
     };
-  }, [loadList, listGen]);
+  }, [loadJobs, listGen]);
+
+  useEffect(() => {
+    loadTraces();
+    return () => {
+      traceListGen();
+    };
+  }, [loadTraces, traceListGen]);
 
   useEffect(() => {
     payloadStaleRef.current = payloadGen();
     setEntries([]);
     setUsage(null);
     setJobTerminal(false);
+    setTraceError(null);
     setDetail(null);
     setDetailError(null);
     setPayloads({});
+    pending.current.clear();
     setPayloadErrors({});
     setStoryOpen(false);
     setTab('step');
@@ -139,7 +168,8 @@ export default function DebugPage() {
     };
   }, [selectedJob, loadTrace, loadDetail, traceGen, detailGen, payloadGen]);
 
-  useSseRefetch(loadList, 1000, true, useCallback(() => true, []));
+  useSseRefetch(loadJobs, 1000, true);
+  useSseRefetch(loadTraces, 1000, true, useCallback(() => true, []));
   useSseRefetch(
     loadTrace,
     250,
@@ -153,28 +183,20 @@ export default function DebugPage() {
     useCallback((e: SseEvent | null) => e === null || (e.kind !== 'trace.appended' && e.job_id === selectedJob), [selectedJob]),
   );
 
-  const visibleJobs = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return jobs.filter((job) => {
-      if (pipeline !== ALL && job.pipeline !== pipeline) return false;
-      if (status !== ALL && job.status !== status) return false;
-      if (!needle) return true;
-      return `${jobTitle(job)} ${job.arr_instance}`.toLowerCase().includes(needle);
-    });
-  }, [jobs, query, pipeline, status]);
+  const visibleJobs = useMemo(() => filterJobs(jobs, { query, pipeline, status }), [jobs, query, pipeline, status]);
 
   const job = useMemo(() => jobs.find((j) => j.id === selectedJob) ?? detail?.job ?? null, [jobs, selectedJob, detail]);
   const summary = useMemo(() => traces.find((t) => t.jobId === selectedJob) ?? null, [traces, selectedJob]);
   const selected = useMemo(() => entries.find((e) => e.seq === selectedSeq) ?? null, [entries, selectedSeq]);
   const turn = useMemo(() => (selected?.kind === 'llm.call' ? turnOf(entries, selected.seq) : null), [entries, selected]);
-  const now = useMemo(() => effectiveNow(entries, jobTerminal), [entries, jobTerminal]);
 
   const ensurePayload = useCallback(
     (entry: TraceEntry) => {
-      if (!entry.hasPayload || selectedJob === null) return;
+      if (!entry.hasPayload || selectedJob === null || pending.current.has(entry.seq)) return;
       // Captured now, not read at resolution time: seqs restart per job, so a late reply
       // from a job you've navigated away from must not land in the new job's map.
       const isStale = payloadStaleRef.current;
+      pending.current.add(entry.seq);
       fetchTraceEntry(selectedJob, entry.seq)
         .then((full) => {
           if (isStale()) return;
@@ -183,6 +205,11 @@ export default function DebugPage() {
         .catch((err: unknown) => {
           if (isStale()) return;
           setPayloadErrors((prev) => ({ ...prev, [entry.seq]: apiErrorMessage(err, 'Could not load payload') }));
+        })
+        .finally(() => {
+          // Stale means the set was already cleared for the new job; deleting could drop a
+          // seq the new job has since re-added.
+          if (!isStale()) pending.current.delete(entry.seq);
         });
     },
     [selectedJob],
@@ -241,6 +268,14 @@ export default function DebugPage() {
   }, [setSearch]);
 
   const inspectorOpen = selected !== null || storyOpen;
+  // Only a 404 on a job that has finished proves debug mode was off; a running job may
+  // simply not have written its first entry yet, and a dropped request proves nothing.
+  const emptyLabel =
+    traceError === 'failed'
+      ? "Couldn't load the trace."
+      : job !== null && job.status !== 'done' && job.status !== 'failed'
+        ? 'No trace yet.'
+        : 'No trace for this run. Debug mode was off when it ran.';
 
   return (
     <div className="-mx-4 -my-6 grid h-[calc(100vh-3.5rem)] grid-cols-[236px_minmax(0,1fr)] sm:-mx-6 lg:-mx-8">
@@ -280,7 +315,7 @@ export default function DebugPage() {
               jobTerminal={jobTerminal}
               selectedSeq={selectedSeq}
               onSelect={select}
-              emptyLabel="No trace for this run. Debug mode was off when it ran."
+              emptyLabel={emptyLabel}
             />
             {inspectorOpen && (
               <ResizeHandle
@@ -307,7 +342,6 @@ export default function DebugPage() {
                 tab={tab}
                 onTab={setTab}
                 onClose={closeInspector}
-                now={now}
                 jobTerminal={jobTerminal}
               />
             )}
