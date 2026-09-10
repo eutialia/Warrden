@@ -8,6 +8,9 @@ export const INSPECTOR_MAX_SHARE = 0.65;
  * from the pointer's distance to the parent's right edge, clamped to a readable range. */
 export function ResizeHandle({ onResize }: { onResize: (width: number) => void }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Pointer capture routes every move and release to this element for the life of the
+  // drag, so no window listener exists to outlive an unmount mid-drag.
+  const drag = useRef<{ right: number; max: number } | null>(null);
   return (
     <div
       ref={ref}
@@ -17,18 +20,19 @@ export function ResizeHandle({ onResize }: { onResize: (width: number) => void }
       onPointerDown={(ev) => {
         const parent = ref.current?.parentElement;
         if (!parent) return;
-        ev.currentTarget.setPointerCapture(ev.pointerId);
         const rect = parent.getBoundingClientRect();
-        const max = rect.width * INSPECTOR_MAX_SHARE;
-        const move = (e: PointerEvent) => onResize(clamp(rect.right - e.clientX, INSPECTOR_MIN_W, max));
-        const up = () => {
-          window.removeEventListener('pointermove', move);
-          window.removeEventListener('pointerup', up);
-          window.removeEventListener('pointercancel', up);
-        };
-        window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', up);
-        window.addEventListener('pointercancel', up);
+        drag.current = { right: rect.right, max: rect.width * INSPECTOR_MAX_SHARE };
+        ev.currentTarget.setPointerCapture(ev.pointerId);
+      }}
+      onPointerMove={(ev) => {
+        const d = drag.current;
+        if (d) onResize(clamp(d.right - ev.clientX, INSPECTOR_MIN_W, d.max));
+      }}
+      onPointerUp={() => {
+        drag.current = null;
+      }}
+      onPointerCancel={() => {
+        drag.current = null;
       }}
     >
       <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:w-0.5 group-hover:bg-ring group-active:w-0.5 group-active:bg-ring" />

@@ -27,20 +27,26 @@ import { ALL, filterJobs, JOB_WINDOW } from '@/lib/jobs';
 
 const INSPECTOR_WIDTH_KEY = 'warrden.debug.inspectorWidth';
 
+/** A route or query id; anything that is not an integer reads as no selection. */
+function parseId(raw: string | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : null;
+}
+
 export default function DebugPage() {
   const { jobId } = useParams();
   const navigate = useNavigate();
   const [search, setSearch] = useSearchParams();
-  const selectedJob = jobId !== undefined ? Number(jobId) : null;
-  const seqParam = search.get('seq');
-  const selectedSeq = seqParam === null ? null : Number(seqParam);
+  const selectedJob = parseId(jobId);
+  const selectedSeq = parseId(search.get('seq'));
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [entries, setEntries] = useState<TraceEntry[]>([]);
   const [usage, setUsage] = useState<TraceUsage | null>(null);
   const [jobTerminal, setJobTerminal] = useState(false);
-  const [traceError, setTraceError] = useState<'missing' | 'failed' | null>(null);
+  const [traceState, setTraceState] = useState<'loading' | 'loaded' | 'missing' | 'failed'>('loading');
   const [detail, setDetail] = useState<JobDetailResponse | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [payloads, setPayloads] = useState<Record<number, unknown>>({});
@@ -103,7 +109,7 @@ export default function DebugPage() {
         setEntries(r.entries);
         setUsage(r.usage);
         setJobTerminal(r.jobTerminal);
-        setTraceError(null);
+        setTraceState('loaded');
       })
       .catch((err: unknown) => {
         if (isStale()) return;
@@ -112,7 +118,7 @@ export default function DebugPage() {
         setEntries([]);
         setUsage(null);
         setJobTerminal(false);
-        setTraceError(err instanceof ApiError && err.status === 404 ? 'missing' : 'failed');
+        setTraceState(err instanceof ApiError && err.status === 404 ? 'missing' : 'failed');
       });
   }, [selectedJob, traceGen]);
 
@@ -151,7 +157,7 @@ export default function DebugPage() {
     setEntries([]);
     setUsage(null);
     setJobTerminal(false);
-    setTraceError(null);
+    setTraceState('loading');
     setDetail(null);
     setDetailError(null);
     setPayloads({});
@@ -271,9 +277,11 @@ export default function DebugPage() {
   // Only a 404 on a job that has finished proves debug mode was off; a running job may
   // simply not have written its first entry yet, and a dropped request proves nothing.
   const emptyLabel =
-    traceError === 'failed'
-      ? "Couldn't load the trace."
-      : job !== null && job.status !== 'done' && job.status !== 'failed'
+    traceState === 'loading'
+      ? 'Loading trace…'
+      : traceState === 'failed'
+        ? "Couldn't load the trace."
+        : job !== null && job.status !== 'done' && job.status !== 'failed'
         ? 'No trace yet.'
         : 'No trace for this run. Debug mode was off when it ran.';
 
