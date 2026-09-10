@@ -22,6 +22,12 @@ export interface TraceEntryRow {
   payload: string | null;
 }
 
+/** One entry without the payload column, which the list route never serves: it carries only
+ * whether there is a payload to fetch per-entry. */
+export interface TraceEntryHeaderRow extends Omit<TraceEntryRow, 'payload'> {
+  hasPayload: boolean;
+}
+
 export interface TraceSummaryRow {
   job_id: number;
   entry_count: number;
@@ -123,6 +129,20 @@ export class TraceEntries {
       .all(jobId) as TraceEntryRow[];
   }
 
+  // What `GET /api/traces/:jobId` serves. The payload column stays out of the result set:
+  // the debug page refetches this several times a second on a live job, and an `llm.attempt`
+  // body is a quarter megabyte the route would only throw away.
+  headersByJob(jobId: number): TraceEntryHeaderRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, job_id, seq, parent_seq, kind, summary, side_effect, status, ts_start, ts_end,
+                payload IS NOT NULL AS hasPayload
+         FROM trace_entries WHERE job_id = ? ORDER BY seq ASC`,
+      )
+      .all(jobId) as (Omit<TraceEntryRow, 'payload'> & { hasPayload: 0 | 1 })[];
+    return rows.map((row) => ({ ...row, hasPayload: row.hasPayload === 1 }));
+  }
+
   get(jobId: number, seq: number): TraceEntryRow | null {
     const row = this.db
       .prepare(`SELECT * FROM trace_entries WHERE job_id = ? AND seq = ?`)
@@ -141,18 +161,20 @@ export class TraceEntries {
   }
 
   // Summed in SQL so the payloads stay server-side instead of crossing the wire for the
-  // header to add up. json_extract returns NULL for a missing key and for a whole-payload
+  // header to add up. Each attempt payload is parsed once, in the subquery, rather than once
+  // per token column. json_extract returns NULL for a missing key and for a whole-payload
   // truncation envelope, which SUM ignores. Tokens come from attempts (a retry spends its own), but
   // `calls` counts `llm.call`, so one call retried twice is one call.
   usageByJob(jobId: number): TraceUsage {
     return this.db
       .prepare(
         `SELECT (SELECT COUNT(*) FROM trace_entries WHERE job_id = ? AND kind = 'llm.call') AS calls,
-                COALESCE(SUM(json_extract(payload, '$.usage.inputTokens')), 0) AS inputTokens,
-                COALESCE(SUM(json_extract(payload, '$.usage.cachedInputTokens')), 0) AS cachedInputTokens,
-                COALESCE(SUM(json_extract(payload, '$.usage.outputTokens')), 0) AS outputTokens,
-                COALESCE(SUM(json_extract(payload, '$.usage.outputTokenDetails.reasoningTokens')), 0) AS reasoningTokens
-         FROM trace_entries WHERE job_id = ? AND kind = 'llm.attempt'`,
+                COALESCE(SUM(json_extract(u, '$.inputTokens')), 0) AS inputTokens,
+                COALESCE(SUM(json_extract(u, '$.cachedInputTokens')), 0) AS cachedInputTokens,
+                COALESCE(SUM(json_extract(u, '$.outputTokens')), 0) AS outputTokens,
+                COALESCE(SUM(json_extract(u, '$.outputTokenDetails.reasoningTokens')), 0) AS reasoningTokens
+         FROM (SELECT json_extract(payload, '$.usage') AS u
+               FROM trace_entries WHERE job_id = ? AND kind = 'llm.attempt')`,
       )
       .get(jobId, jobId) as TraceUsage;
   }

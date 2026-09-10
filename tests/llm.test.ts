@@ -874,7 +874,7 @@ describe('AiSdkGenerator tracing', () => {
 
     const call = new TraceEntries(db).listByJob(7).find((r) => r.kind === 'llm.call');
     expect(call?.status).toBe('error');
-    expect(JSON.parse(call?.payload ?? '')).toMatchObject({ system: 'sys', prompt: 'user', error: expect.stringContaining('down') });
+    expect(JSON.parse(call?.payload ?? '')).toMatchObject({ callsite: 'release-pick', system: 'sys', prompt: 'user', error: expect.stringContaining('down') });
   });
 
   it('writes nothing without a trace option', async () => {

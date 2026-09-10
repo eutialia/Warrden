@@ -138,20 +138,9 @@ export interface DroppedOp {
   op: KnowledgeOp;
   why: string;
   hostile?: true;
-}
-
-/** Whether `capped` — a `DroppedOp`'s copy of an op, with its long fields truncated — is the
- * refusal of `op`. Identity never matches (the copy is rebuilt), and the truncation means the
- * heads are what still identify it. */
-function isDroppedCopyOf(capped: KnowledgeOp, op: KnowledgeOp): boolean {
-  const headMatches = (full: string, head: string): boolean =>
-    head.endsWith('…') ? full.startsWith(head.slice(0, -1)) : full === head;
-  return (
-    capped.op === op.op &&
-    capped.section === op.section &&
-    headMatches(op.text, capped.text) &&
-    headMatches(op.target, capped.target)
-  );
+  /** The op's position in the reflection's `ops`. Two field-identical ops are told apart by
+   * nothing else, and the applied list is the ops these indices don't name. */
+  index: number;
 }
 
 /** Bullet text without any `(confirmed …)` stamp — what `update` matches on, so
@@ -273,26 +262,26 @@ export function applyOps(
   // bounded.
   const capField = (s: string): string =>
     s.length <= DROPPED_FIELD_CAP ? s : `${s.slice(0, DROPPED_FIELD_CAP)}…`;
-  const drop = (op: KnowledgeOp, why: string, hostile?: true): void => {
+  const drop = (index: number, op: KnowledgeOp, why: string, hostile?: true): void => {
     const capped: KnowledgeOp = { ...op, text: capField(op.text), target: capField(op.target) };
-    dropped.push(hostile ? { op: capped, why, hostile } : { op: capped, why });
+    dropped.push(hostile ? { op: capped, why, hostile, index } : { op: capped, why, index });
   };
 
   for (const [i, op] of ops.entries()) {
     if (i >= MAX_OPS) {
-      drop(op, `over the ${MAX_OPS}-operation limit for one reflection`);
+      drop(i, op, `over the ${MAX_OPS}-operation limit for one reflection`);
       continue;
     }
 
     const section = op.section as string;
     if (!isAgentSection(section)) {
-      drop(op, `"${section}" is not an agent-writable section — the operator section is not writable`);
+      drop(i, op, `"${section}" is not an agent-writable section — the operator section is not writable`);
       continue;
     }
 
     const isProtocol = PROTOCOL_SECTIONS.includes(section);
     if (isProtocol && !opts.allowProtocol) {
-      drop(op, `this run may not ${op.op} protocol knowledge in ${section}`);
+      drop(i, op, `this run may not ${op.op} protocol knowledge in ${section}`);
       continue;
     }
 
@@ -302,17 +291,17 @@ export function applyOps(
     // forged heading/marker behind text that `withoutStamp` deletes before storage (C-01).
     const text = withoutMarker(op.text);
     if (withoutStamp(text) === '') {
-      drop(op, `${op.op} with no bullet text`);
+      drop(i, op, `${op.op} with no bullet text`);
       continue;
     }
     const candidate = stamped(text, opts.today);
     const forgery = FORGERY_CHECKS.find((check) => check.test.test(candidate));
     if (forgery) {
-      drop(op, forgery.why, forgery.hostile);
+      drop(i, op, forgery.why, forgery.hostile);
       continue;
     }
     if (scanForThreats(candidate, 'strict').length > 0) {
-      drop(op, 'injection patterns in bullet', true);
+      drop(i, op, 'injection patterns in bullet', true);
       continue;
     }
     /** Whether the section already holds this bullet, ignoring the bullet at `exclude` —
@@ -323,7 +312,7 @@ export function applyOps(
 
     if (op.op === 'add') {
       if (duplicates(withoutStamp(text))) {
-        drop(op, `${section} already has this bullet`);
+        drop(i, op, `${section} already has this bullet`);
         continue;
       }
       knowledge.sections[section].push(candidate);
@@ -332,7 +321,7 @@ export function applyOps(
 
     const wanted = withoutStamp(withoutMarker(op.target));
     if (wanted === '') {
-      drop(op, `${op.op} with no target bullet`);
+      drop(i, op, `${op.op} with no target bullet`);
       continue;
     }
     const matches = knowledge.sections[section]
@@ -340,11 +329,11 @@ export function applyOps(
       .filter(({ bullet }) => withoutStamp(bullet) === wanted);
 
     if (matches.length === 0) {
-      drop(op, `no match in ${section} for the target bullet`);
+      drop(i, op, `no match in ${section} for the target bullet`);
       continue;
     }
     if (matches.length > 1) {
-      drop(op, `ambiguous target: ${matches.length} bullets in ${section} match it`);
+      drop(i, op, `ambiguous target: ${matches.length} bullets in ${section} match it`);
       continue;
     }
 
@@ -354,7 +343,7 @@ export function applyOps(
     // then on every `update` naming that text is ambiguous, so neither copy can be edited
     // again except by the operator.
     if (duplicates(withoutStamp(text), index)) {
-      drop(op, `${section} already has this bullet`);
+      drop(i, op, `${section} already has this bullet`);
       continue;
     }
     knowledge.sections[section][index] = candidate;
@@ -596,7 +585,7 @@ export async function reflectOnRun(input: {
       sideEffect: true,
       summary: `${label}: ${appliedCount} edit(s) applied, ${dropped.length} refused`,
       payload: () => ({
-        applied: reflection.ops.filter((op) => !dropped.some((d) => isDroppedCopyOf(d.op, op))),
+        applied: reflection.ops.filter((_, i) => !dropped.some((d) => d.index === i)),
         dropped,
       }),
     });
