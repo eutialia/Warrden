@@ -51,6 +51,14 @@ describe('TraceEntries', () => {
     expect(t.get(9, 0)).toBeNull();
   });
 
+  it('headersByJob drops the payload column and reports whether there was one', () => {
+    t.append({ jobId: 1, kind: 'a', summary: 'a' });
+    t.append({ jobId: 1, kind: 'b', summary: 'b', payload: { input: 'x' } });
+    const rows = t.headersByJob(1);
+    expect(rows.map((r) => r.hasPayload)).toEqual([false, true]);
+    expect(rows[0]).not.toHaveProperty('payload');
+  });
+
   it('prune deletes jobs whose entries are all older than the cutoff', () => {
     const now = Date.now();
     t.append({ jobId: 1, kind: 'a', summary: 'old', tsStart: now - 8 * 24 * 3600 * 1000 });

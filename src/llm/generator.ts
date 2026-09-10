@@ -485,7 +485,7 @@ export class AiSdkGenerator implements StructuredGenerator {
           parentSeq: opts.trace.parentSeq,
           kind: 'llm.call',
           summary: `${opts.callsite} via ${model.provider}/${model.model}`,
-          payload: () => ({ system: opts.system, prompt: opts.prompt }),
+          payload: () => ({ callsite: opts.callsite, system: opts.system, prompt: opts.prompt }),
         })
       : NOOP_HANDLE;
     try {
@@ -495,7 +495,7 @@ export class AiSdkGenerator implements StructuredGenerator {
     } catch (err) {
       // Carries system+prompt through: `end` REPLACES the payload written at begin, so a
       // failed call would otherwise lose the very inputs you need to debug it.
-      call.end('error', () => ({ system: opts.system, prompt: opts.prompt, error: errorMessage(err) }));
+      call.end('error', () => ({ callsite: opts.callsite, system: opts.system, prompt: opts.prompt, error: errorMessage(err) }));
       if (err instanceof LlmError) throw err;
       const message = errorMessage(err);
       throw new LlmError(`Generation failed for callsite "${opts.callsite}": ${message}`, opts.callsite, {

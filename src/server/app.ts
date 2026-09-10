@@ -488,7 +488,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
 
     app.get('/api/traces/:jobId', (c) => {
       const jobId = Number(c.req.param('jobId'));
-      const rows = Number.isInteger(jobId) ? traces.listByJob(jobId) : [];
+      const rows = Number.isInteger(jobId) ? traces.headersByJob(jobId) : [];
       if (rows.length === 0) return c.json({ error: 'trace not found' }, 404);
       // A still-`running` entry on a job that has already finished means the job crashed
       // mid-step; the UI needs `jobTerminal` to render those as interrupted rather than
@@ -499,7 +499,7 @@ export function createApp(ctx: Partial<AppContext>): Hono {
         jobStatus: job?.status ?? null,
         jobTerminal: job ? isTerminal(job) : true,
         usage: traces.usageByJob(jobId),
-        entries: rows.map(({ payload, ...rest }) => ({ ...rest, hasPayload: payload !== null })),
+        entries: rows,
       });
     });
   }

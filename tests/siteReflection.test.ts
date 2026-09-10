@@ -517,6 +517,28 @@ describe('reflectOnRun', () => {
     expect(unchanged.summary).toContain('nothing to write');
   });
 
+  it('counts the duplicate of an applied op as dropped, not as a second applied op', async () => {
+    const op: KnowledgeOp = { op: 'add', section: 'Search', text: 'IF x THEN y.', target: '' };
+    const ctx = reflectCtx({ llm: new FakeGenerator([reflection({ ops: [op, { ...op }] })]) });
+    const job = enqueueAndClaim(ctx, subtitleJobInput());
+
+    await reflectOnRun({
+      ctx,
+      job,
+      site: { baseUrl: SITE },
+      transcript: [{ ts: 1, tier: 'curl', action: 'search', detail: 'GET /s' }],
+      verifiedSuccess: true,
+      searchObserved: false,
+      today: TODAY,
+      seedsDir: NO_SEEDS,
+    });
+
+    const upd = new TraceEntries(ctx.db).listByJob(job.id).find((r) => r.kind === 'knowledge.update')!;
+    const payload = JSON.parse(upd.payload!) as { applied: KnowledgeOp[]; dropped: unknown[] };
+    expect(payload.applied).toEqual([op]);
+    expect(payload.dropped).toHaveLength(1);
+  });
+
   it('gives the model the current file and the run outcome', async () => {
     const llm = new FakeGenerator([reflection()]);
     const ctx = reflectCtx({ llm });
