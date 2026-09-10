@@ -16,6 +16,7 @@ import {
 import { Inspector, type InspectorTab } from '@/components/debug/Inspector';
 import { effectiveNow, turnOf } from '@/components/debug/laneModel';
 import { LaneStrip } from '@/components/debug/LaneStrip';
+import { INSPECTOR_MIN_W, ResizeHandle } from '@/components/debug/ResizeHandle';
 import { TargetList } from '@/components/debug/TargetList';
 import { TraceHeader } from '@/components/debug/TraceHeader';
 import { Waterfall } from '@/components/debug/Waterfall';
@@ -23,6 +24,7 @@ import { useFetchGeneration } from '@/hooks/useFetchGeneration';
 import { useSseRefetch, type SseEvent } from '@/hooks/useSseRefetch';
 import { ALL, jobTitle } from '@/lib/jobs';
 
+const INSPECTOR_WIDTH_KEY = 'warrden.debug.inspectorWidth';
 // Matches MAX_LIMIT in src/server/app.ts: one wide window, filtered client-side like Activity.
 const JOB_WINDOW = 1000;
 
@@ -45,6 +47,7 @@ export default function DebugPage() {
   const [payloadErrors, setPayloadErrors] = useState<Record<number, string>>({});
   const [tab, setTab] = useState<InspectorTab>('step');
   const [storyOpen, setStoryOpen] = useState(false);
+  const [inspectorWidth, setInspectorWidth] = useState(() => Math.max(Number(localStorage.getItem(INSPECTOR_WIDTH_KEY)) || 400, INSPECTOR_MIN_W));
   const [query, setQuery] = useState('');
   const [pipeline, setPipeline] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
@@ -268,7 +271,10 @@ export default function DebugPage() {
             }}
           />
           <LaneStrip key={selectedJob} entries={entries} events={detail?.events ?? []} jobTerminal={jobTerminal} selectedSeq={selectedSeq} onSelect={select} />
-          <div className={inspectorOpen ? 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_400px]' : 'flex min-h-0 flex-1 flex-col'}>
+          <div
+            className={inspectorOpen ? 'grid min-h-0 flex-1' : 'flex min-h-0 flex-1 flex-col'}
+            style={inspectorOpen ? { gridTemplateColumns: `minmax(0,1fr) auto ${inspectorWidth}px` } : undefined}
+          >
             <Waterfall
               entries={entries}
               jobTerminal={jobTerminal}
@@ -276,6 +282,14 @@ export default function DebugPage() {
               onSelect={select}
               emptyLabel="No trace for this run. Debug mode was off when it ran."
             />
+            {inspectorOpen && (
+              <ResizeHandle
+                onResize={(w) => {
+                  setInspectorWidth(w);
+                  localStorage.setItem(INSPECTOR_WIDTH_KEY, String(Math.round(w)));
+                }}
+              />
+            )}
             {inspectorOpen && (
               <Inspector
                 entries={entries}
